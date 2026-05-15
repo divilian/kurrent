@@ -60,7 +60,6 @@ def parse_args():
         default="all-MiniLM-L6-v2",
         help="Which embedding model to use?",
     )
-    # Use "sentence-transformers/all-mpnet-base-v2" for slower & better.
     parser.add_argument(
         "--cache-dir",
         type=str,

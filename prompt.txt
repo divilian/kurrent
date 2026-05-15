@@ -1,0 +1,39 @@
+I'd like to build a tool to help me tame the academic research literature I work with.
+
+Background: I'm a command-line (Ubuntu) enthusiast, advanced Python programmer, and long-time Zotero user. I'm also comfortable using and deploying Ollama models on my own system, and accessing them through a local HTTP API.
+
+The tool I propose building is called "kurrent". (for "keeping one's *k*nowledge c*urrent*.")
+
+It will maintain a Chroma DB directory, in which to store chunks of files that it has ingested, and the embeddings for those chunks.
+
+It can be used in the following ways:
+
+
+UC 1: INTERACTIVE INGESTION. The user can specify one or more PDFs as command-line arguments. For each PDF (call it "P"), the program will then:
+
+    1. internally, divide P into "chunks." These will be structural (if that information is available in the PDF), or simply similar-sized consecutive token sequences in the PDF's stream of text (otherwise). After chunking, embeddings will be computed for each chunk, and all chunks and their embeddings will be stored in Chroma.
+
+    2. print to stdout a summary of P's contents (using a callout to Ollama).
+
+    3. give "proximity alert(s)" (PA) for any paper currently in the Chroma DB, if any of its chunks are deemed semantically close enough to any of P's chunks. For each PDF (call it "Q") which has a chunk that's identified as a PA to one of P's chunks, a brief description will be given of "the way in which Q is semantically similar to P" that captures the relationship between documents. 
+
+    4. allow the user, if she chooses, to select which of these PAs to "confirm" by a simple yes/no toggle. If confirmed, the chunk of the P document and the chunk of the Q document that semantically matched will be permanently linked in some way in the Chroma DB. Also, when the user later views either of the source PDFs (in the PDF viewer of her choice) she will see the relevant chunks highlighted in a randomly-colored background highlight color (using the same randomly-chosen color for both the P document chunk and the Q document chunk.) The P document's highlighted chunk will also have appearing next to it a small text annotation with the author(s) and year of the Q document. (Similarly, the Q document's highlighted chunk will have a text annotation referring to P.)
+
+
+UC 2: RAG QUERYING. The user will be placed in an interactive, text/console-based, RAG-enabled chat (using Ollama) via which she can repeatedly type plain-text (English) questions and get answers based on the contents of the Chroma database.
+
+One open question with this 2 use case 2 is which documents will constitute the RAG corpus. I see these possibilities, and perhaps you can think of others:
+
+(2a): all chunks in the entire Chroma database will always be the RAG corpus.
+
+(2b): the user browses and specifies which previously-ingested documents will constitute the RAG corpus.
+
+(2c): kurrent will attempt to determine the ideal subset of previously-ingested documents for the RAG corpus.
+
+
+UC 3: DOCUMENT SEARCHING. The user can specify search terms and/or text patterns and/or metadata, and get a list of documents that match. When this list is presented, the user can also see which chunks have been "linked via confirmed PAs" to which chunks from other papers.
+
+
+UC 4: ONGOING, AUTOMATIC INGESTION. Finally, kurrent can be equipped with a set of source URLs corresponding to journals or other academic sources. At regular intervals (e.g., daily) kurrent will query these sources and identify PAs with previously-ingested documents. When the user launches the kurrent tool using UC 4, she will be presented with the summaries of all documents found from sources since the last time she launched UC 4 which have chunks with PAs. She will have the opportunity to select which of these to ingest into kurrent's Chroma database, as happens in step 1 of use case 1.
+
+vim:textwidth=99999
