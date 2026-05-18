@@ -1,7 +1,8 @@
-import sqlite3
+from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import sqlite3
 import pytest
 
 from kurrent.schema import (
@@ -21,11 +22,13 @@ def store(tmp_path):
 
 
 def make_document(**overrides) -> Document:
+    doc_id = str(uuid4())
+    fake_sha256 = f"fake-sha256-{doc_id}"
     values = {
-        "doc_id": str(uuid4()),
-        "pdf_sha256": "abc123",
+        "doc_id": doc_id,
+        "pdf_sha256": fake_sha256,
         "storage_mode": "external",
-        "pdf_path": "/tmp/example.pdf",
+        "pdf_path": Path("/tmp/example.pdf"),
         "ingested_at": datetime.now(timezone.utc),
         "title": "Example Paper",
         "authors": "Ren, Kylo",
