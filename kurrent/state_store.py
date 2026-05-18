@@ -273,3 +273,15 @@ class StateStore:
 
     def close(self) -> None:
         self.conn.close()
+
+    # (note to SD: __enter__ and __exit__ supports automatic closing in "with" statements)
+    def __enter__(self) -> "StateStore":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
