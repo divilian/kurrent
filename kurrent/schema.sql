@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS confirmed_links (
     FOREIGN KEY (pa_id) REFERENCES proximity_alerts(pa_id)
 );
 
-CREATE TRIGGER confirmed_links_pa_must_be_confirmed
+CREATE TRIGGER IF NOT EXISTS confirmed_links_pa_must_be_confirmed
 BEFORE INSERT ON confirmed_links
 FOR EACH ROW
 BEGIN
