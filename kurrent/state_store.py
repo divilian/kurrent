@@ -3,7 +3,7 @@ from datetime import datetime
 
 import sqlite3
 
-from schema import (
+from kurrent.schema import (
     Document,
     Chunk,
     ProximityAlert,

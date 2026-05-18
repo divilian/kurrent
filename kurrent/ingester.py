@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List
 from uuid import uuid4, UUID
 
-from state_store import StateStore
+from kurrent.state_store import StateStore
 from kurrent.schema import Document, Chunk
 
 
