@@ -1,8 +1,11 @@
 # Data type definitions.
 
+from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal, Self
+from uuid import uuid4
 
 StorageMode = Literal["managed", "library", "external"]
 PAStatus = Literal["pending", "confirmed", "rejected"]
@@ -17,12 +20,34 @@ class Document:
     doc_id: str    # uuid
     pdf_sha256: str
     storage_mode: StorageMode
-    pdf_path: str
+    pdf_path: Path
     ingested_at: datetime
     title: str | None = None
     authors: str | None = None
     year: int | None = None
     doi: str | None = None
+
+    @classmethod
+    def for_pdf(
+        cls,
+        pdf_path: Path,
+        pdf_sha256: str,
+        storage_mode: StorageMode = "external",
+    ) -> Self:
+        """
+        Blindly create a new Document object for this PDF.
+
+        This does not check whether the PDF content already exists in
+        kurrent. That check belongs upstream, in StateStore.
+        """
+        return cls(
+            doc_id=str(uuid4()),
+            pdf_sha256=pdf_sha256,
+            storage_mode=storage_mode,
+            pdf_path=pdf_path,
+            ingested_at=datetime.now(timezone.utc),
+        )
+
 
 
 @dataclass(slots=True)
@@ -102,7 +127,7 @@ class ProximityAlert:
     chunk_b_index: int
     score: float
     status: PAStatus
-    explanation_text: str
+    explanation: str
     created_at: datetime
     decided_at: datetime | None = None
 

@@ -3,7 +3,13 @@ from datetime import datetime
 
 import sqlite3
 
-from schema import Document, Chunk, ProximityAlert, ConfirmedLink, PAStatus
+from schema import (
+    Document,
+    Chunk,
+    ProximityAlert,
+    ConfirmedLink,
+    PAStatus,
+)
 
 
 class StateStore:
@@ -39,10 +45,10 @@ class StateStore:
                 (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    document.doc_id,
+                    document.doc_id,    # note to SD: this is already a str, not a UUID
                     document.pdf_sha256,
                     document.storage_mode,
-                    document.pdf_path,
+                    str(document.pdf_path),   # note to SD: convert Path to str
                     document.ingested_at.isoformat(),
                     document.title,
                     document.authors,
@@ -50,6 +56,50 @@ class StateStore:
                     document.doi,
                 )
             )
+
+    def get_document_by_sha256(self, pdf_sha256: str) -> Document | None:
+        """
+        Look up a document by its contents, essentially. Do we already have
+        this exact PDF file stored in kurrent, no matter what path that might
+        have been at? If so, return that document. Otherwise, None.
+        """
+        row = self.conn.execute(
+            """
+            SELECT doc_id, pdf_path, pdf_sha256
+            FROM documents
+            WHERE pdf_sha256 = ?
+            """,
+            (pdf_sha256,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        doc_id = row["doc_id"]
+        return self.get_document(doc_id)
+
+    def get_or_create_document(
+        self,
+        pdf_path: str | Path,
+        pdf_sha256: str,
+    ) -> Document:
+        """
+        Attempt to create a document with the given contents. Oh, but if those
+        contents already exist (no matter at what location) by all means return
+        that existing one instead.
+        """
+        existing = self.get_document_by_sha256(pdf_sha256)
+
+        if existing is not None:
+            return existing
+
+        doc = Document.for_pdf(
+            pdf_path=Path(pdf_path),
+            pdf_sha256=pdf_sha256,
+        )
+
+        self.insert_document(doc)
+        return doc
 
     def get_document(self, doc_id: str) -> Document | None:
         row = self.conn.execute(
@@ -64,18 +114,21 @@ class StateStore:
         if row is None:
             return None
 
+        return self._row_to_document(row)
+
+    def _row_to_document(self, row: sqlite3.Row) -> Document:
         return Document(
             doc_id=row["doc_id"],
             pdf_sha256=row["pdf_sha256"],
             storage_mode=row["storage_mode"],
-            pdf_path=row["pdf_path"],
+            # note to SD: convert str to fully normalized Path
+            pdf_path=Path(row["pdf_path"]).expanduser().resolve(),
             ingested_at=datetime.fromisoformat(row["ingested_at"]),
             title=row["title"],
             authors=row["authors"],
             year=row["year"],
             doi=row["doi"],
         )
-
     def insert_chunks(self, chunks: list[Chunk]) -> None:
         with self.conn:
             self.conn.executemany("""
@@ -278,10 +331,5 @@ class StateStore:
     def __enter__(self) -> "StateStore":
         return self
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
+    def __exit__(self) -> None:
         self.close()

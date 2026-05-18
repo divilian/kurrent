@@ -6,24 +6,46 @@
 # - compute embeddings
 # - upsert into the corpus store
 
-def ingest_path(path: Path, store: CorpusStore) -> list[str]:
+from datetime import datetime
+import hashlib
+from pathlib import Path
+from typing import List
+from uuid import uuid4, UUID
+
+from state_store import StateStore
+from kurrent.schema import Document, Chunk
+
+
+def is_pdf(path: str | Path) -> bool:
+    if not path.is_file():
+        return False
+    with path.open("rb") as f:
+        header = f.read(5)
+    return header == b"%PDF-"
+
+
+def ingest_pdf(path: str | Path, store: StateStore) -> str:
     """
-    Purpose:
+    Returns the doc_id for this PDF. If this exact PDF content already exists
+    in kurrent, returns the existing doc_id.
 
-    accept either
-        a single file
-        a directory
+    Returns: the doc_id of this new (or existing) document.
 
-    discover ingestable files
-    call ingest_file() for each
-
-    Example usage from CLI:
-
-    doc_ids = ingest_path(Path(args.path), store)
-
-    Return value: list of document IDs ingested.
+    Assumptions for the moment:
+    - externally managed ("external" storage mode only)
     """
-    pass
+    path = Path(path).expanduser().resolve()
+
+    if not is_pdf(path):
+        raise ValueError(f"No such PDF file {path}")
+
+    with path.open("rb") as f:
+        sha256 = hashlib.file_digest(f, "sha256").hexdigest()
+
+    doc = store.get_or_create_document(path, sha256)
+
+    return doc.doc_id
+
 
 def discover_documents(path: Path) -> list[Path]:
     """
@@ -48,36 +70,6 @@ def discover_documents(path: Path) -> list[Path]:
     pass
 
 
-def ingest_file(path: Path, store: CorpusStore) -> str:
-    """
-    The core ingestion code.
-
-    Pipeline inside this function:
-
-    read bytes
-    compute document hash
-    extract text
-    chunk text
-    embed chunks
-    store chunks
-
-    Return value:
-
-    document_id
-
-    Example pipeline:
-
-    doc_id = compute_document_id(path)
-
-    text = extract_text(path)
-
-    chunks = chunk_text(text, doc_id, source_path=path)
-
-    embed_chunks(chunks)
-
-    store.upsert_chunks(doc_id, chunks)
-    """
-    pass
 
 def compute_document_id(path: Path) -> str:
     """

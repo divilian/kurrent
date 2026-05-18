@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS documents (
     doc_id TEXT PRIMARY KEY,
-    pdf_sha256 TEXT NOT NULL,
+    pdf_sha256 TEXT NOT NULL UNIQUE,
     storage_mode TEXT NOT NULL,
     pdf_path TEXT NOT NULL,
     ingested_at TEXT NOT NULL,
@@ -38,17 +38,17 @@ CREATE TABLE IF NOT EXISTS chunks (
 --
 -- CREATE TABLE external_references (
 --     ref_id TEXT PRIMARY KEY,
--- 
+--
 --     doc_id TEXT NOT NULL,
--- 
+--
 --     system_name TEXT NOT NULL,
 --     external_item_id TEXT,
 --     external_attachment_id TEXT,
 --     external_uri TEXT,
 --     metadata_json TEXT,
--- 
+--
 --     FOREIGN KEY (doc_id) REFERENCES documents(doc_id),
--- 
+--
 --     UNIQUE (system_name, external_item_id, external_attachment_id)
 -- );
 
