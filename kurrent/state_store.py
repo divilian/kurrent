@@ -45,7 +45,7 @@ class StateStore:
                 (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    document.doc_id,    # note to SD: this is already a str, not a UUID
+                    document.doc_id,    # note to SD: already str, not UUID
                     document.pdf_sha256,
                     document.storage_mode,
                     str(document.pdf_path),   # note to SD: convert Path to str
@@ -331,5 +331,5 @@ class StateStore:
     def __enter__(self) -> "StateStore":
         return self
 
-    def __exit__(self) -> None:
+    def __exit__(self, *args) -> None:
         self.close()
