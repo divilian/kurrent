@@ -51,8 +51,11 @@ class Chunk:
 
     @property
     def chunk_id(self) -> str:
-        return make_chunk_id(self.doc_id, self.chunker_version,
-            self.chunk_index)
+        return make_chunk_id(
+            self.doc_id,
+            self.chunker_version,
+            self.chunk_index,
+        )
 
 
 @dataclass(slots=True)
@@ -70,8 +73,11 @@ class SearchHit:
 
     @property
     def chunk_id(self) -> str:
-        return make_chunk_id(self.doc_id, self.chunker_version,
-            self.chunk_index)
+        return make_chunk_id(
+            self.doc_id,
+            self.chunker_version,
+            self.chunk_index,
+        )
 
 @dataclass(slots=True)
 class ProximityAlert:
@@ -96,19 +102,25 @@ class ProximityAlert:
     chunk_b_index: int
     score: float
     status: PAStatus
-    explanation text: str
+    explanation_text: str
     created_at: datetime
     decided_at: datetime | None = None
 
     @property
     def chunk_a_id(self) -> str:
-        return make_chunk_id(self.doc_a_id, self.chunker_a_version,
-            self.chunk_a_index)
+        return make_chunk_id(
+            self.doc_a_id,
+            self.chunker_a_version,
+            self.chunk_a_index,
+        )
 
     @property
     def chunk_b_id(self) -> str:
-        return make_chunk_id(self.doc_b_id, self.chunker_b_version,
-            self.chunk_b_index)
+        return make_chunk_id(
+            self.doc_b_id,
+            self.chunker_b_version,
+            self.chunk_b_index,
+        )
 
 
 @dataclass(slots=True)
