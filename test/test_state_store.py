@@ -42,7 +42,7 @@ def make_document(**overrides) -> Document:
 def make_chunk(doc_id: str, **overrides) -> Chunk:
     values = {
         "doc_id": doc_id,
-        "chunker_version": "fixed-char-v1",
+        "chunker_version": "word-aware-fixed-char-v1",
         "chunk_index": 0,
         "text": "This is a test chunk.",
         "text_sha256": "chunkhash123",
@@ -119,7 +119,7 @@ def test_insert_and_get_chunk(store):
 def test_missing_chunk_returns_none(store):
     retrieved = store.get_chunk(
         doc_id="not-a-real-id",
-        chunker_version="fixed-char-v1",
+        chunker_version="word-aware-fixed-char-v1",
         chunk_index=0,
     )
 
