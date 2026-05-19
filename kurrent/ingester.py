@@ -4,7 +4,6 @@
 # - computes PDF content hash
 # - registers (or looks up) the document in the kurrent state store
 
-import hashlib
 from pathlib import Path
 
 from kurrent.file_utils import normalize_path, is_pdf, sha256_file
@@ -23,13 +22,12 @@ def ingest_pdf(path: str | Path, store: StateStore) -> str:
     Assumptions for the moment:
     - externally managed ("external" storage mode only)
     """
-    path = Path(path).expanduser().resolve()
+    path = normalize_path(path)
 
     if not is_pdf(path):
         raise ValueError(f"No such PDF file {path}")
 
-    with path.open("rb") as f:
-        sha256 = hashlib.file_digest(f, "sha256").hexdigest()
+    sha256 = sha256_file(path)
 
     doc = store.get_or_create_document(path, sha256)
     chunk_document(doc.doc_id, store)   # idempotent

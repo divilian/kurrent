@@ -3,6 +3,7 @@ from datetime import datetime
 
 import sqlite3
 
+from kurrent.file_utils import normalize_path
 from kurrent.schema import (
     Document,
     Chunk,
@@ -128,7 +129,7 @@ class StateStore:
             pdf_sha256=row["pdf_sha256"],
             storage_mode=row["storage_mode"],
             # note to SD: convert str to fully normalized Path
-            pdf_path=Path(row["pdf_path"]).expanduser().resolve(),
+            pdf_path=normalize_path(row["pdf_path"]),
             ingested_at=datetime.fromisoformat(row["ingested_at"]),
             title=row["title"],
             authors=row["authors"],

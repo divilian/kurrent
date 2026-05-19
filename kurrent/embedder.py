@@ -8,6 +8,7 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 
 from kurrent.chunker import chunker_version
+from kurrent.file_utils import normalize_path
 from kurrent.schema import Chunk
 from kurrent.state_store import StateStore
 
@@ -26,7 +27,7 @@ class Embedder:
         model_name: str = DEFAULT_EMBED_MODEL_NAME,
         collection_name: str | None = None,
     ):
-        self.chroma_path = Path(chroma_path).expanduser().resolve()
+        self.chroma_path = normalize_path(chroma_path)
         self.model_name = model_name
         self.collection_name = collection_name or self._make_collection_name(
             chunker_version=chunker_version(),

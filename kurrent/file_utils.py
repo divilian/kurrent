@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 def is_pdf(path: str | Path) -> bool:
-    path = Path(path).expanduser().resolve()
+    path = normalize_path(path)
     if not path.is_file():
         return False
     with path.open("rb") as f:
@@ -13,7 +13,7 @@ def is_pdf(path: str | Path) -> bool:
 
 
 def sha256_file(path: str | Path) -> str:
-    path = Path(path).expanduser().resolve()
+    path = normalize_path(path)
 
     with path.open("rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
