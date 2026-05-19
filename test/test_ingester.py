@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pymupdf
 import pytest
 
+from kurrent.chunker import chunker_version
 from kurrent.ingester import ingest_pdf
 from kurrent.state_store import StateStore
 
@@ -24,6 +26,18 @@ trailer
 
 def write_pdf(path: Path, content: bytes = MINIMAL_PDF_BYTES) -> Path:
     path.write_bytes(content)
+    return path
+
+def write_text_pdf(path: Path, pages: list[str]) -> Path:
+    pdf = pymupdf.open()
+
+    for text in pages:
+        page = pdf.new_page()
+        page.insert_text((72, 72), text)
+
+    pdf.save(path)
+    pdf.close()
+
     return path
 
 
@@ -103,3 +117,28 @@ def test_ingest_missing_file_raises_error(store, tmp_path):
 
     with pytest.raises((FileNotFoundError, ValueError)):
         ingest_pdf(missing_path, store)
+
+
+def test_ingest_pdf_creates_chunks(store, tmp_path):
+    pdf_path = write_text_pdf(
+        tmp_path / "paper.pdf",
+        ["This is page one."],
+    )
+
+    doc_id = ingest_pdf(pdf_path, store)
+
+    chunks = store.get_chunks_for_document(
+        doc_id=doc_id,
+        chunker_version=chunker_version(),
+    )
+
+    assert len(chunks) == 1
+
+    chunk = chunks[0]
+    assert chunk.doc_id == doc_id
+    assert chunk.chunker_version == "word-aware-fixed-char-2000-v1"
+    assert chunk.chunk_index == 0
+    assert "This is page one." in chunk.text
+    assert chunk.text_sha256 is not None
+    assert chunk.page_start == 1
+    assert chunk.page_end == 1

@@ -8,14 +8,16 @@ import hashlib
 from pathlib import Path
 
 from kurrent.state_store import StateStore
+from kurrent.chunker import chunk_document
 
 
 def ingest_pdf(path: str | Path, store: StateStore) -> str:
     """
-    Returns the doc_id for this PDF. If this exact PDF content already exists
-    in kurrent, returns the existing doc_id.
+    Ingests the PDF into kurrent, and returns the doc_id for it. This could be
+    an already-existing doc_id if that PDF had been previously ingested (even
+    under a different file path).
 
-    Returns: the doc_id of this new (or existing) document.
+    If this is indeed a new PDF, chunk it and insert the chunks into kurrent.
 
     Assumptions for the moment:
     - externally managed ("external" storage mode only)
@@ -29,6 +31,7 @@ def ingest_pdf(path: str | Path, store: StateStore) -> str:
         sha256 = hashlib.file_digest(f, "sha256").hexdigest()
 
     doc = store.get_or_create_document(path, sha256)
+    chunk_document(doc.doc_id, store)   # idempotent
 
     return doc.doc_id
 
