@@ -162,3 +162,25 @@ SQLite owns durable application state.
 Zotero or another library manager may own some PDFs.
 Ollama supplies local language-model intelligence.
 ```
+
+## Running tests
+
+Run the fast test suite with:
+
+```bash
+python -m pytest -m "not slow"
+```
+
+Run only slow/integration-style tests with:
+
+```bash
+python -m pytest -m slow
+```
+
+Run all tests with:
+
+```bash
+python -m pytest
+```
+
+Slow tests include tests that load real embedding models, use heavier local resources, or otherwise take noticeably longer than ordinary unit tests.
