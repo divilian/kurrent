@@ -7,6 +7,7 @@
 import hashlib
 from pathlib import Path
 
+from kurrent.file_utils import normalize_path, is_pdf, sha256_file
 from kurrent.state_store import StateStore
 from kurrent.chunker import chunk_document
 
@@ -34,15 +35,6 @@ def ingest_pdf(path: str | Path, store: StateStore) -> str:
     chunk_document(doc.doc_id, store)   # idempotent
 
     return doc.doc_id
-
-
-def is_pdf(path: str | Path) -> bool:
-    path = Path(path).expanduser().resolve()
-    if not path.is_file():
-        return False
-    with path.open("rb") as f:
-        header = f.read(5)
-    return header == b"%PDF-"
 
 
 if __name__ == "__main__":

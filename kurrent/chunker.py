@@ -4,6 +4,7 @@ import hashlib
 
 import pymupdf
 
+from kurrent.file_utils import is_pdf
 from kurrent.state_store import StateStore
 from kurrent.schema import Document, Chunk
 
