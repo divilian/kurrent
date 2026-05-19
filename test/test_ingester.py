@@ -4,6 +4,7 @@ import pymupdf
 import pytest
 
 from kurrent.chunker import chunker_version
+from kurrent.embedder import Embedder
 from kurrent.ingester import ingest_pdf
 from kurrent.state_store import StateStore
 
@@ -47,6 +48,31 @@ def store(tmp_path):
     with StateStore(db_path) as store:
         yield store
 
+class FakeModel:
+    def encode(self, texts, convert_to_numpy=True):
+        return FakeEmbeddings([
+            [float(len(text)), float(i), 1.0]
+            for i, text in enumerate(texts)
+        ])
+
+class FakeEmbeddings:
+    def __init__(self, values):
+        self.values = values
+
+    def tolist(self):
+        return self.values
+
+@pytest.fixture
+def embedder(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "kurrent.embedder.SentenceTransformer",
+        lambda model_name: FakeModel(),
+    )
+
+    return Embedder(
+        chroma_path=tmp_path / "chroma",
+        model_name="fake-model",
+    )
 
 def test_ingest_pdf_creates_document(store, tmp_path):
     pdf_path = write_pdf(tmp_path / "paper.pdf")
@@ -142,3 +168,75 @@ def test_ingest_pdf_creates_chunks(store, tmp_path):
     assert chunk.text_sha256 is not None
     assert chunk.page_start == 1
     assert chunk.page_end == 1
+
+
+def test_ingest_pdf_with_embedder_indexes_chunks(
+    store,
+    embedder,
+    tmp_path,
+):
+    pdf_path = write_text_pdf(
+        tmp_path / "paper.pdf",
+        ["This is page one."],
+    )
+
+    doc_id = ingest_pdf(pdf_path, store, embedder=embedder)
+
+    chunks = store.get_chunks_for_document(
+        doc_id=doc_id,
+        chunker_version=chunker_version(),
+    )
+
+    assert len(chunks) == 1
+
+    results = embedder.collection.get(
+        where={"doc_id": doc_id},
+        include=["documents", "metadatas", "embeddings"],
+    )
+
+    assert results["ids"] == [chunks[0].chunk_id]
+    assert results["documents"] == ["This is page one."]
+
+    metadata = results["metadatas"][0]
+    assert metadata["doc_id"] == doc_id
+    assert metadata["chunker_version"] == chunker_version()
+    assert metadata["chunk_index"] == 0
+    assert metadata["text_sha256"] == chunks[0].text_sha256
+    assert metadata["embedding_model"] == "fake-model"
+    assert metadata["page_start"] == 1
+    assert metadata["page_end"] == 1
+
+    assert list(results["embeddings"][0][:3]) == pytest.approx(
+        [17.0, 0.0, 1.0]
+    )
+
+
+def test_ingest_pdf_with_embedder_is_idempotent(
+    store,
+    embedder,
+    tmp_path,
+):
+    pdf_path = write_text_pdf(
+        tmp_path / "paper.pdf",
+        ["This is page one."],
+    )
+
+    first_doc_id = ingest_pdf(pdf_path, store, embedder=embedder)
+    second_doc_id = ingest_pdf(pdf_path, store, embedder=embedder)
+
+    assert second_doc_id == first_doc_id
+
+    chunks = store.get_chunks_for_document(
+        doc_id=first_doc_id,
+        chunker_version=chunker_version(),
+    )
+
+    assert len(chunks) == 1
+
+    results = embedder.collection.get(
+        where={"doc_id": first_doc_id},
+        include=["documents", "metadatas", "embeddings"],
+    )
+
+    assert len(results["ids"]) == 1
+    assert results["ids"] == [chunks[0].chunk_id]

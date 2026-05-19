@@ -6,18 +6,26 @@
 
 from pathlib import Path
 
+from kurrent.embedder import Embedder
 from kurrent.file_utils import normalize_path, is_pdf, sha256_file
 from kurrent.state_store import StateStore
 from kurrent.chunker import chunk_document
 
 
-def ingest_pdf(path: str | Path, store: StateStore) -> str:
+def ingest_pdf(
+    path: str | Path,
+    store: StateStore,
+    embedder: Embedder | None = None,
+) -> str:
     """
     Ingests the PDF into kurrent, and returns the doc_id for it. This could be
     an already-existing doc_id if that PDF had been previously ingested (even
     under a different file path).
 
     If this is indeed a new PDF, chunk it and insert the chunks into kurrent.
+
+    If a Chroma embedder is provided, also compute and store each chunk's
+    embeddings in the vector store.
 
     Assumptions for the moment:
     - externally managed ("external" storage mode only)
@@ -31,6 +39,10 @@ def ingest_pdf(path: str | Path, store: StateStore) -> str:
 
     doc = store.get_or_create_document(path, sha256)
     chunk_document(doc.doc_id, store)   # idempotent
+    if embedder is not None:
+        # This is possibly slow if this document has been previously ingested.
+        # We're redoing the embedding work. Possible performance improvement.
+        embedder.index_chunks(doc.doc_id, store)
 
     return doc.doc_id
 
