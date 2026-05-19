@@ -13,6 +13,12 @@ from kurrent.schema import (
 
 
 class StateStore:
+    """
+    Maintains all basic information for kurrent in an SQLite database (missing
+    only the vector embeddings, which are in Chroma; and the source PDF files,
+    which are in the kurrent_files directory).
+    """
+
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path)
