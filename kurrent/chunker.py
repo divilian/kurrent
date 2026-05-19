@@ -10,6 +10,10 @@ from kurrent.schema import Document, Chunk
 __all__ = ["chunk_document"]
 
 
+def chunker_version(target_chars: int = 2000) -> str:
+    return f"word-aware-fixed-char-{target_chars}-v1"
+
+
 def chunk_document(
     doc_id: str,
     store: StateStore,
@@ -23,12 +27,19 @@ def chunk_document(
     if doc is None:
         raise ValueError(f"No such document: {doc_id}")
 
+    existing_chunks = store.get_chunks_for_document(
+        doc_id=doc.doc_id,
+        chunker_version=chunker_version(),
+    )
+
+    if existing_chunks:
+        return existing_chunks
+
     pages = extract_pdf_pages(doc.pdf_path)
     chunks = make_word_aware_fixed_size_chunks(
         pages=pages,
         doc_id=doc.doc_id,
     )
-
     store.insert_chunks(chunks)
     return chunks
 
@@ -65,8 +76,6 @@ def make_word_aware_fixed_size_chunks(
     database.
     """
 
-    CHUNKER_VERSION = f"word-aware-fixed-char-{target_chars}-v1"
-
     chunks: list[Chunk] = []
 
     current_parts: list[str] = []
@@ -84,7 +93,7 @@ def make_word_aware_fixed_size_chunks(
         chunks.append(
             Chunk(
                 doc_id=doc_id,
-                chunker_version=CHUNKER_VERSION,
+                chunker_version=chunker_version(target_chars),
                 chunk_index=len(chunks),
                 text=text,
                 text_sha256=sha256_text(text),

@@ -129,6 +129,18 @@ class StateStore:
             year=row["year"],
             doi=row["doi"],
         )
+
+    def _row_to_chunk(self, row: sqlite3.Row) -> Chunk:
+        return Chunk(
+            doc_id=row["doc_id"],
+            chunker_version=row["chunker_version"],
+            chunk_index=row["chunk_index"],
+            text=row["text"],
+            text_sha256=row["text_sha256"],
+            page_start=row["page_start"],
+            page_end=row["page_end"],
+        )
+
     def insert_chunks(self, chunks: list[Chunk]) -> None:
         with self.conn:
             self.conn.executemany("""
@@ -177,15 +189,25 @@ class StateStore:
         if row is None:
             return None
 
-        return Chunk(
-            doc_id=row["doc_id"],
-            chunker_version=row["chunker_version"],
-            chunk_index=row["chunk_index"],
-            text=row["text"],
-            text_sha256=row["text_sha256"],
-            page_start=row["page_start"],
-            page_end=row["page_end"],
-        )
+        return self._row_to_chunk(row)
+
+    def get_chunks_for_document(
+        self,
+        doc_id: str,
+        chunker_version: str,
+    ) -> Chunk | None:
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM chunks
+            WHERE doc_id = ?
+              AND chunker_version = ?
+            ORDER BY chunk_index
+            """,
+            (doc_id, chunker_version),
+        ).fetchall()
+
+        return [self._row_to_chunk(row) for row in rows]
 
     def insert_proximity_alert(self, pa: ProximityAlert) -> None:
         with self.conn:
