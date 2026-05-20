@@ -3,13 +3,16 @@
 # - verifies that files are PDFs
 # - computes PDF content hash
 # - registers (or looks up) the document in the kurrent state store
+# - optionally discovers PDFs in a filesystem hierarchy
 
 from pathlib import Path
+from typing import Sequence
 
 from kurrent.embedder import Embedder
 from kurrent.file_utils import normalize_path, is_pdf, sha256_file
 from kurrent.state_store import StateStore
 from kurrent.chunker import chunk_document
+
 
 
 def ingest_pdf(
@@ -47,27 +50,93 @@ def ingest_pdf(
     return doc.doc_id
 
 
+def discover_pdfs(root_dir: str | Path) -> list[Path]:
+    """Recursively discover PDF files under root_dir."""
+
+    root = Path(root_dir).expanduser().resolve()
+
+    if not root.exists():
+        raise FileNotFoundError(f"Root directory does not exist: {root}")
+
+    if not root.is_dir():
+        raise NotADirectoryError(f"Root path is not a directory: {root}")
+
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    )
+
+
+def ingest_pdfs_recursively(
+    root_dir: str | Path,
+    store: StateStore,
+    embedder: Embedder | None = None,
+    verbose: bool | None = True,
+) -> dict[Path, str]:
+    """Recursively ingest all PDF files under root_dir.
+
+    Returns a mapping specifying which files became ingested as which doc_ids.
+
+    If embedder is provided, each document is also indexed in Chroma.
+    This function is intentionally fail-fast: any exception stops the batch.
+    """
+
+    doc_ids: dict[Path, str] = {}
+
+    for pdf_path in discover_pdfs(root_dir):
+        try:
+            doc_id = ingest_pdf(pdf_path, store)
+
+            if embedder is not None:
+                embedder.index_chunks(doc_id, store)
+
+            doc_ids[pdf_path] = doc_id
+            print(f"Ingested {pdf_path.name} as {doc_id}")
+        except Exception as e:
+            print(f"Could not ingest {pdf_path.name}: {e}")
+
+    return doc_ids
+
+
+def print_batch_ingest_summary(results: dict[Path, str]) -> None:
+    for path, doc_id in results.items():
+        print(f"Created {doc_id} for {path.name}")
+
 if __name__ == "__main__":
 
-    # Smoke test.
-    from tempfile import TemporaryDirectory
+    # Smoke test / IPython playground.
+    #
+    # Run from IPython with:
+    #
+    #     run -m kurrent.ingester
+    #
+    # Then inspect:
+    #
+    #     results
+    #     store
+    #     embedder
 
-    with TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "kurrent.db"
+    from pathlib import Path
 
-        with StateStore(db_path) as store:
-            doc_id = ingest_pdf(
-                "/home/stephen/teaching/419/syllabus.pdf",
-                store,
-            )
-            print(f"Should be the same as following: {doc_id}")
-            doc2_id = ingest_pdf(
-                "/home/stephen/teaching/419/syllabus.pdf",
-                store,
-            )
-            print(f"Should be the same as preceding: {doc2_id}")
-            doc3_id = ingest_pdf(
-                "/home/stephen/teaching/350/syllabus.pdf",
-                store,
-            )
-            print(f"Should be different: {doc3_id}")
+    from kurrent.embedder import Embedder
+    from kurrent.state_store import StateStore
+
+    root_dir = Path("~/teaching/letters").expanduser().resolve()
+
+    tmpdir = Path("/tmp/kurrent-batch-ingest")
+    tmpdir.mkdir(parents=True, exist_ok=True)
+
+    db_path = tmpdir / "kurrent.db"
+    chroma_path = tmpdir / "chroma"
+
+    store = StateStore(db_path)
+    embedder = Embedder(chroma_path=chroma_path)
+
+    results = ingest_pdfs_recursively(
+        root_dir=root_dir,
+        store=store,
+        embedder=embedder,
+    )
+
+    print_batch_ingest_summary(results)
