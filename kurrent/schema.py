@@ -232,7 +232,6 @@ class ChunkHit(ChunkIdProperties):
     chunk_id: str
     distance: float | None
     text: str
-
     path: Path | None = None
     title: str | None = None
     page_start: int | None = None
@@ -245,9 +244,9 @@ class DocumentHit:
 
     doc_id: str
     path: Path
-
     title: str | None = None
     authors: str | None = None
     year: int | None = None
-
     score: float | None = None
+    # Out of all this doc's chunks, which was the best match to the query?
+    best_chunk_id: str | None = None

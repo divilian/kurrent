@@ -17,6 +17,7 @@ from textwrap import shorten
 
 from kurrent.embedder import Embedder
 from kurrent.ingester import ingest_pdfs_recursively
+from kurrent.schema import DocumentHit
 from kurrent.searcher import Searcher
 from kurrent.state_store import StateStore
 
@@ -118,7 +119,7 @@ def semantic_search_loop(
             print()
             break
 
-        if user_input in {":q", ":quit", "quit", "exit"}:
+        if user_input in {":q", ":quit", "done", "quit", "exit"}:
             break
 
         if not user_input:

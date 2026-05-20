@@ -16,6 +16,7 @@ import sys
 
 from kurrent.embedder import Embedder
 from kurrent.ingester import ingest_pdfs_recursively
+from kurrent.schema import ChunkHit
 from kurrent.searcher import Searcher
 from kurrent.state_store import StateStore
 
@@ -24,7 +25,7 @@ DEFAULT_ROOT_DIR = Path("/home/stephen/teaching/420")
 PLAYGROUND_DIR = Path("/tmp/kurrent-semantic-document-search-playground")
 
 
-def print_document_hit_list(hits) -> None:
+def print_document_hit_list(hits: list[ChunkHit]) -> None:
     """Print a numbered list of document search hits."""
 
     if not hits:
@@ -34,16 +35,21 @@ def print_document_hit_list(hits) -> None:
     for i, hit in enumerate(hits, start=1):
         score = f"{hit.score:.4f}" if hit.score is not None else "n/a"
 
-        print(f"{i}. {hit.name}  [score={score}]")
+        print(f"{i}. {hit.path.name}  [score={score}]")
 
 
-def print_document_hit_detail(hit, index: int) -> None:
-    """Print the selected document hit in detail."""
+def print_document_hit_detail(
+    hit: ChunkHit,
+    index: int,
+    searcher: Searcher,
+    preview_chars: int = 2000,
+) -> None:
+    """Print the selected document hit and its best matching chunk."""
 
     print()
     print(f"Document hit {index}")
     print(f"doc_id: {hit.doc_id}")
-    print(f"path:   {hit.path}")
+    print(f"path:   {hit.path.name}")
 
     if hit.score is not None:
         print(f"score:  {hit.score:.4f}")
@@ -57,6 +63,32 @@ def print_document_hit_detail(hit, index: int) -> None:
     if hit.year:
         print(f"year:   {hit.year}")
 
+    if hit.best_chunk_id is None:
+        print()
+        print("No representative chunk recorded for this document hit.")
+        print()
+        return
+
+    chunk = searcher.state_store.get_chunk(hit.best_chunk_id)
+
+    if chunk is None:
+        print()
+        print(f"Representative chunk not found: {hit.best_chunk_id}")
+        print()
+        return
+
+    print()
+    print("Best matching chunk")
+    print(f"chunk_id: {chunk.chunk_id}")
+    print(f"pages:    {chunk.page_start}–{chunk.page_end}")
+    print()
+
+    text = " ".join(chunk.text.split())
+
+    if len(text) > preview_chars:
+        text = text[:preview_chars] + " [...]"
+
+    print(text)
     print()
 
 
@@ -96,7 +128,7 @@ def semantic_document_search_loop(
             print()
             break
 
-        if user_input in {":q", ":quit", "quit", "exit"}:
+        if user_input in {":q", ":quit", "done", "quit", "exit"}:
             break
 
         if not user_input:
@@ -109,7 +141,7 @@ def semantic_document_search_loop(
                 print(f"Please enter a number from 1 to {len(hits)}.")
                 continue
 
-            print_document_hit_detail(hits[index - 1], index)
+            print_document_hit_detail(hits[index - 1], index, searcher)
             print_current_hit_list()
             continue
 

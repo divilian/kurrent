@@ -132,6 +132,7 @@ class Searcher:
                     authors=document.authors,
                     year=document.year,
                     score=best_hit.distance,
+                    best_chunk_id=best_hit.chunk_id,
                 )
             )
 
