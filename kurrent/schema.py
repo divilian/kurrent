@@ -166,3 +166,30 @@ class ConfirmedLink:
     pa_id: str   # uuid
     created_at: datetime
     relationship_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VectorChunkMatch:
+    """Raw-ish vector result returned from Chroma."""
+    chunk_id: str
+    distance: float
+    text: str | None = None
+
+    @property
+    def doc_id(self) -> str:
+        return self.chunk_id_parts[0]
+
+    @property
+    def chunker_version(self) -> str:
+        return self.chunk_id_parts[1]
+
+    @property
+    def chunk_index(self) -> int:
+        return int(self.chunk_id_parts[2])
+
+    @property
+    def chunk_id_parts(self) -> tuple[str, str, str]:
+        parts = self.chunk_id.split(":", 2)
+        if len(parts) != 3:
+            raise ValueError(f"Malformed chunk_id: {self.chunk_id!r}")
+        return parts[0], parts[1], parts[2]

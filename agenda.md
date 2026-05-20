@@ -124,6 +124,22 @@ def row_to_chunk(row: sqlite3.Row) -> Chunk:
     )
 ```
 
+## Terms for "search and query" type operations
+
+In general, **search** is a user-facing operation, while **query** is a
+low-level adapter.
+
+Types of search:
+
+- **semantic search**: fuzzy, embedding-based search on a free text expression.
+  (brass tacks: query Chroma)
+- **metadata search**: exact/structured search over metadata fields. (brass
+  tacks: query SQLite)
+- **full-text search**: lexical/exact-ish text search. (brass tacks: FTS on
+  SQLite)
+  
+- **retrieval**: the lower-level act of fetching ranked hits/chunks/docs
+
 ## Proximity alerts (PAs) and confirmed links (CLs)
 
 - A proximity alert (PA) is a machine-generated candidate relationship between

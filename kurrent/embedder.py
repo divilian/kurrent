@@ -1,15 +1,17 @@
 # Functions/classes to compute embeddings for chunks of text and index them in
 # Chroma.
-
+from __future__ import annotations
+from dataclasses import dataclass
 from pathlib import Path
 import re
+from typing import Sequence
 
 import chromadb
 from sentence_transformers import SentenceTransformer
 
 from kurrent.chunker import chunker_version
 from kurrent.file_utils import normalize_path
-from kurrent.schema import Chunk
+from kurrent.schema import Chunk, VectorChunkMatch, make_chunk_id
 from kurrent.state_store import StateStore
 
 
@@ -126,6 +128,52 @@ class Embedder:
 
         return metadata
 
+    def query_chunks(
+        self,
+        search_text: str,
+        n_results: int = 10,
+        max_distance: float | None = None,
+        exclude_doc_ids: Sequence[str] | None = None,
+    ) -> list[VectorChunkMatch]:
+        """Query Chroma for chunks semantically close to search_text."""
+
+        results = self.collection.query(
+            query_texts=[search_text],
+            n_results=n_results,
+            include=["documents", "metadatas", "distances"],
+        )
+
+        chunk_ids = results["ids"][0]
+        documents = results["documents"][0]
+        metadatas = results["metadatas"][0]
+        distances = results["distances"][0]
+
+        excluded = set(exclude_doc_ids or [])
+
+        matches: list[VectorChunkMatch] = []
+
+        for chunk_id, document, metadata, distance in zip(
+            chunk_ids,
+            documents,
+            metadatas,
+            distances,
+        ):
+            if max_distance is not None and distance > max_distance:
+                continue
+
+            doc_id = metadata.get("doc_id")
+            if doc_id in excluded:
+                continue
+
+            matches.append(
+                VectorChunkMatch(
+                    chunk_id=chunk_id,
+                    distance=distance,
+                    text=document,
+                )
+            )
+
+        return matches
 
 if __name__ == "__main__":
 
@@ -138,36 +186,36 @@ if __name__ == "__main__":
 
     pdf_path = Path("/home/stephen/teaching/419/syllabus.pdf")
 
-    with TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    tmpdir = Path("/tmp/embedder")
+    if not tmpdir.is_dir():
+        tmpdir.mkdir(parents=True)
+    db_path = tmpdir / "kurrent.db"
+    chroma_path = tmpdir / "chroma"
 
-        db_path = tmpdir / "kurrent.db"
-        chroma_path = tmpdir / "chroma"
+    with StateStore(db_path) as store:
+        doc_id = ingest_pdf(pdf_path, store)
 
-        with StateStore(db_path) as store:
-            doc_id = ingest_pdf(pdf_path, store)
+        embedder = Embedder(chroma_path)
+        embedder.index_chunks(doc_id, store)
 
-            embedder = Embedder(chroma_path)
-            embedder.index_chunks(doc_id, store)
+        results = embedder.collection.get(
+            where={"doc_id": doc_id},
+            include=["documents", "metadatas", "embeddings"],
+        )
 
-            results = embedder.collection.get(
-                where={"doc_id": doc_id},
-                include=["documents", "metadatas", "embeddings"],
-            )
+        print(f"Indexed document: {doc_id}")
+        print(f"Collection: {embedder.collection_name}")
+        print(f"Indexed chunks: {len(results['ids'])}")
 
-            print(f"Indexed document: {doc_id}")
-            print(f"Collection: {embedder.collection_name}")
-            print(f"Indexed chunks: {len(results['ids'])}")
+        for i, chunk_id in enumerate(results["ids"]):
+            print(f"\nChunk ID: {chunk_id}")
+            print("Metadata:")
+            pprint(results["metadatas"][i])
 
-            for i, chunk_id in enumerate(results["ids"]):
-                print(f"\nChunk ID: {chunk_id}")
-                print("Metadata:")
-                pprint(results["metadatas"][i])
+            print("\nEmbedding preview:")
+            embedding = results["embeddings"][i]
+            print(embedding[:8])
+            print(f"Embedding dimensions: {len(embedding)}")
 
-                print("\nEmbedding preview:")
-                embedding = results["embeddings"][i]
-                print(embedding[:8])
-                print(f"Embedding dimensions: {len(embedding)}")
-
-                print("\nText preview:")
-                print(results["documents"][i][:500])
+            print("\nText preview:")
+            print(results["documents"][i][:500])
