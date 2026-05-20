@@ -5,7 +5,13 @@ from uuid import uuid4
 import pytest
 
 from kurrent.chunker import chunker_version
-from kurrent.schema import Chunk, ChunkHit, Document, VectorChunkMatch
+from kurrent.schema import (
+    Chunk,
+    ChunkHit,
+    Document,
+    DocumentHit,
+    VectorChunkMatch,
+)
 from kurrent.searcher import Searcher
 from kurrent.state_store import StateStore
 
@@ -261,3 +267,212 @@ def test_semantic_chunk_search_raises_for_missing_chunk(store):
 
     with pytest.raises(ValueError, match="not found in kurrent state"):
         searcher.semantic_chunk_search("orphan query", n_results=1)
+
+
+def test_semantic_document_search_groups_chunks_by_document(store):
+    doc_a = make_document(
+        doc_id="doc-a",
+        pdf_path=Path("/tmp/doc-a.pdf"),
+        title="Document A",
+        authors="Alice A.",
+        year=2020,
+    )
+    doc_b = make_document(
+        doc_id="doc-b",
+        pdf_path=Path("/tmp/doc-b.pdf"),
+        title="Document B",
+        authors="Bob B.",
+        year=2021,
+    )
+
+    store.insert_document(doc_a)
+    store.insert_document(doc_b)
+
+    chunk_a0 = make_chunk(doc_a.doc_id, 0, "Doc A first relevant chunk.")
+    chunk_a1 = make_chunk(doc_a.doc_id, 1, "Doc A best relevant chunk.")
+    chunk_b0 = make_chunk(doc_b.doc_id, 0, "Doc B relevant chunk.")
+
+    store.insert_chunks([chunk_a0, chunk_a1, chunk_b0])
+
+    embedder = FakeEmbedder(
+        matches=[
+            VectorChunkMatch(chunk_id=chunk_a0.chunk_id, distance=0.30),
+            VectorChunkMatch(chunk_id=chunk_b0.chunk_id, distance=0.20),
+            VectorChunkMatch(chunk_id=chunk_a1.chunk_id, distance=0.10),
+        ]
+    )
+    searcher = Searcher(
+        state_store=store,
+        embedder=embedder,
+    )
+
+    hits = searcher.semantic_document_search(
+        "some query",
+        max_documents=10,
+    )
+
+    assert hits == [
+        DocumentHit(
+            doc_id=doc_a.doc_id,
+            path=Path("/tmp/doc-a.pdf"),
+            title="Document A",
+            authors="Alice A.",
+            year=2020,
+            score=0.10,
+            best_chunk_id=chunk_a1.chunk_id,
+        ),
+        DocumentHit(
+            doc_id=doc_b.doc_id,
+            path=Path("/tmp/doc-b.pdf"),
+            title="Document B",
+            authors="Bob B.",
+            year=2021,
+            score=0.20,
+            best_chunk_id=chunk_b0.chunk_id,
+        ),
+    ]
+
+
+def test_semantic_document_search_ranks_by_best_chunk_distance(store):
+    doc_a = make_document(doc_id="doc-a", pdf_path=Path("/tmp/doc-a.pdf"))
+    doc_b = make_document(doc_id="doc-b", pdf_path=Path("/tmp/doc-b.pdf"))
+    doc_c = make_document(doc_id="doc-c", pdf_path=Path("/tmp/doc-c.pdf"))
+
+    store.insert_document(doc_a)
+    store.insert_document(doc_b)
+    store.insert_document(doc_c)
+
+    chunk_a0 = make_chunk(doc_a.doc_id, 0, "Doc A okay chunk.")
+    chunk_a1 = make_chunk(doc_a.doc_id, 1, "Doc A best chunk.")
+    chunk_b0 = make_chunk(doc_b.doc_id, 0, "Doc B chunk.")
+    chunk_c0 = make_chunk(doc_c.doc_id, 0, "Doc C chunk.")
+
+    store.insert_chunks([chunk_a0, chunk_a1, chunk_b0, chunk_c0])
+
+    embedder = FakeEmbedder(
+        matches=[
+            VectorChunkMatch(chunk_id=chunk_c0.chunk_id, distance=0.40),
+            VectorChunkMatch(chunk_id=chunk_a0.chunk_id, distance=0.30),
+            VectorChunkMatch(chunk_id=chunk_b0.chunk_id, distance=0.20),
+            VectorChunkMatch(chunk_id=chunk_a1.chunk_id, distance=0.10),
+        ]
+    )
+    searcher = Searcher(
+        state_store=store,
+        embedder=embedder,
+    )
+
+    hits = searcher.semantic_document_search(
+        "some query",
+        max_documents=10,
+    )
+
+    assert [hit.doc_id for hit in hits] == [
+        doc_a.doc_id,
+        doc_b.doc_id,
+        doc_c.doc_id,
+    ]
+    assert [hit.score for hit in hits] == [0.10, 0.20, 0.40]
+    assert [hit.best_chunk_id for hit in hits] == [
+        chunk_a1.chunk_id,
+        chunk_b0.chunk_id,
+        chunk_c0.chunk_id,
+    ]
+
+
+def test_semantic_document_search_respects_max_documents(store):
+    doc_a = make_document(doc_id="doc-a", pdf_path=Path("/tmp/doc-a.pdf"))
+    doc_b = make_document(doc_id="doc-b", pdf_path=Path("/tmp/doc-b.pdf"))
+    doc_c = make_document(doc_id="doc-c", pdf_path=Path("/tmp/doc-c.pdf"))
+
+    store.insert_document(doc_a)
+    store.insert_document(doc_b)
+    store.insert_document(doc_c)
+
+    chunk_a = make_chunk(doc_a.doc_id, 0, "Best chunk.")
+    chunk_b = make_chunk(doc_b.doc_id, 0, "Second best chunk.")
+    chunk_c = make_chunk(doc_c.doc_id, 0, "Third best chunk.")
+
+    store.insert_chunks([chunk_a, chunk_b, chunk_c])
+
+    embedder = FakeEmbedder(
+        matches=[
+            VectorChunkMatch(chunk_id=chunk_a.chunk_id, distance=0.10),
+            VectorChunkMatch(chunk_id=chunk_b.chunk_id, distance=0.20),
+            VectorChunkMatch(chunk_id=chunk_c.chunk_id, distance=0.30),
+        ]
+    )
+    searcher = Searcher(
+        state_store=store,
+        embedder=embedder,
+    )
+
+    hits = searcher.semantic_document_search(
+        "some query",
+        max_documents=2,
+    )
+
+    assert [hit.doc_id for hit in hits] == [
+        doc_a.doc_id,
+        doc_b.doc_id,
+    ]
+
+
+def test_semantic_document_search_passes_arguments_to_chunk_search(store):
+    embedder = FakeEmbedder(matches=[])
+    searcher = Searcher(
+        state_store=store,
+        embedder=embedder,
+    )
+
+    hits = searcher.semantic_document_search(
+        "bounded confidence",
+        max_documents=4,
+        max_distance=0.25,
+    )
+
+    assert hits == []
+    assert embedder.query_calls == [
+        {
+            "search_text": "bounded confidence",
+            "n_results": 25,
+            "max_distance": 0.25,
+            "exclude_doc_ids": None,
+        }
+    ]
+
+
+def test_semantic_document_search_returns_empty_list_for_no_chunk_hits(store):
+    embedder = FakeEmbedder(matches=[])
+    searcher = Searcher(
+        state_store=store,
+        embedder=embedder,
+    )
+
+    hits = searcher.semantic_document_search(
+        "no matching documents",
+        max_documents=10,
+    )
+
+    assert hits == []
+
+
+def test_semantic_document_search_raises_for_missing_chunk(store):
+    embedder = FakeEmbedder(
+        matches=[
+            VectorChunkMatch(
+                chunk_id="missing-doc:simple-v1:0",
+                distance=0.10,
+            ),
+        ]
+    )
+    searcher = Searcher(
+        state_store=store,
+        embedder=embedder,
+    )
+
+    with pytest.raises(ValueError, match="not found in kurrent state"):
+        searcher.semantic_document_search(
+            "orphaned vector result",
+            max_documents=10,
+        )
