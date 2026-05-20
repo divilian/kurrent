@@ -168,12 +168,36 @@ class ConfirmedLink:
     relationship_type: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class VectorChunkMatch:
-    """Raw-ish vector result returned from Chroma."""
+def parse_chunk_id(chunk_id: str) -> tuple[str, str, int]:
+    """Parse a kurrent chunk ID into its component parts.
+
+    Chunk IDs have the form:
+
+        doc_id:chunker_version:chunk_index
+
+    where chunk_index is zero-based.
+    """
+    parts = chunk_id.split(":", 2)
+
+    if len(parts) != 3:
+        raise ValueError(f"Malformed chunk_id: {chunk_id!r}")
+
+    doc_id, chunker_version, raw_chunk_index = parts
+
+    try:
+        chunk_index = int(raw_chunk_index)
+    except ValueError as exc:
+        raise ValueError(
+            f"Malformed chunk_index in chunk_id: {chunk_id!r}"
+        ) from exc
+
+    return doc_id, chunker_version, chunk_index
+
+
+class ChunkIdProperties:
+    """Shared convenience properties for objects with a chunk_id field."""
+
     chunk_id: str
-    distance: float
-    text: str | None = None
 
     @property
     def doc_id(self) -> str:
@@ -185,11 +209,31 @@ class VectorChunkMatch:
 
     @property
     def chunk_index(self) -> int:
-        return int(self.chunk_id_parts[2])
+        return self.chunk_id_parts[2]
 
     @property
-    def chunk_id_parts(self) -> tuple[str, str, str]:
-        parts = self.chunk_id.split(":", 2)
-        if len(parts) != 3:
-            raise ValueError(f"Malformed chunk_id: {self.chunk_id!r}")
-        return parts[0], parts[1], parts[2]
+    def chunk_id_parts(self) -> tuple[str, str, int]:
+        return parse_chunk_id(self.chunk_id)
+
+
+@dataclass(frozen=True, slots=True)
+class VectorChunkMatch(ChunkIdProperties):
+    """Raw-ish vector result returned from Chroma."""
+
+    chunk_id: str
+    distance: float
+    text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkHit(ChunkIdProperties):
+    """A chunk-level search result enriched with kurrent state."""
+
+    chunk_id: str
+    distance: float | None
+    text: str
+
+    path: Path | None = None
+    title: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
