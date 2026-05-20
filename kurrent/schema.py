@@ -237,3 +237,17 @@ class ChunkHit(ChunkIdProperties):
     title: str | None = None
     page_start: int | None = None
     page_end: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentHit:
+    """A document-level search result."""
+
+    doc_id: str
+    path: Path
+
+    title: str | None = None
+    authors: str | None = None
+    year: int | None = None
+
+    score: float | None = None

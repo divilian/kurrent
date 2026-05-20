@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from kurrent.embedder import Embedder
-from kurrent.schema import ChunkHit
+from kurrent.schema import ChunkHit, DocumentHit
 from kurrent.state_store import StateStore
 
 
@@ -81,13 +81,65 @@ class Searcher:
     def semantic_document_search(
         self,
         search_text: str,
-        *,
-        n_results: int = 10,
-        chunks_per_document: int = 3,
-        exclude_document_ids: Sequence[int] | None = None,
+        max_documents: int = 10,
+        max_distance: float | None = None,
     ) -> list[DocumentHit]:
-        """Find documents by aggregating semantic chunk hits."""
-        ...
+        """Find documents by aggregating semantic chunk search results.
+
+        This searches chunks first, groups matching chunks by parent document,
+        and ranks documents by each document's best chunk distance.
+        """
+        # A best guess heuristic.
+        chunk_results = max(25, max_documents * 5)
+
+        chunk_hits = self.semantic_chunk_search(
+            search_text,
+            n_results=chunk_results,
+            max_distance=max_distance,
+        )
+
+        best_hit_by_doc_id: dict[str, ChunkHit] = {}
+
+        for hit in chunk_hits:
+            curr_best = best_hit_by_doc_id.get(hit.doc_id)
+
+            if curr_best is None:
+                best_hit_by_doc_id[hit.doc_id] = hit
+                continue
+
+            if hit.distance is None:
+                continue
+
+            if curr_best.distance is None or hit.distance < curr_best.distance:
+                best_hit_by_doc_id[hit.doc_id] = hit
+
+        document_hits: list[DocumentHit] = []
+
+        for doc_id, best_hit in best_hit_by_doc_id.items():
+            document = self.state_store.get_document(doc_id)
+
+            if document is None:
+                raise ValueError(
+                    "Chunk search returned a hit whose parent document is "
+                    f"missing from kurrent state: {doc_id!r}"
+                )
+
+            document_hits.append(
+                DocumentHit(
+                    doc_id=doc_id,
+                    path=document.pdf_path,
+                    title=document.title,
+                    authors=document.authors,
+                    year=document.year,
+                    score=best_hit.distance,
+                )
+            )
+
+        document_hits.sort(
+            key=lambda hit: float("inf") if hit.score is None else hit.score
+        )
+
+        return document_hits[:max_documents]
 
     def metadata_search(
         self,
