@@ -107,7 +107,7 @@ def test_insert_and_get_chunk(store):
     chunk = make_chunk(doc.doc_id)
     store.insert_chunks([chunk])
 
-    retrieved = store.get_chunk(
+    retrieved = store.get_chunk_by_parts(
         doc_id=doc.doc_id,
         chunker_version=chunk.chunker_version,
         chunk_index=chunk.chunk_index,
@@ -117,7 +117,7 @@ def test_insert_and_get_chunk(store):
 
 
 def test_missing_chunk_returns_none(store):
-    retrieved = store.get_chunk(
+    retrieved = store.get_chunk_by_parts(
         doc_id="not-a-real-id",
         chunker_version="word-aware-fixed-char-v1",
         chunk_index=0,

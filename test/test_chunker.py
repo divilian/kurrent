@@ -194,7 +194,7 @@ def test_chunk_document_stores_chunks(store, tmp_path):
 
     assert len(chunks) == 1
 
-    stored_chunk = store.get_chunk(
+    stored_chunk = store.get_chunk_by_parts(
         doc_id=doc.doc_id,
         chunker_version=chunks[0].chunker_version,
         chunk_index=chunks[0].chunk_index,

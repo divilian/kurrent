@@ -7,6 +7,7 @@ from kurrent.file_utils import normalize_path
 from kurrent.schema import (
     Document,
     Chunk,
+    parse_chunk_id,
     ProximityAlert,
     ConfirmedLink,
     PAStatus,
@@ -178,7 +179,7 @@ class StateStore:
                 ],
             )
 
-    def get_chunk(
+    def get_chunk_by_parts(
         self,
         doc_id: str,
         chunker_version: str,
@@ -197,6 +198,15 @@ class StateStore:
             return None
 
         return self._row_to_chunk(row)
+
+    def get_chunk(self, chunk_id: str) -> Chunk | None:
+        doc_id, chunker_version, chunk_index = parse_chunk_id(chunk_id)
+
+        return self.get_chunk_by_parts(
+            doc_id=doc_id,
+            chunker_version=chunker_version,
+            chunk_index=chunk_index,
+        )
 
     def get_chunks_for_document(
         self,
