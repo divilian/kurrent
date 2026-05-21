@@ -244,8 +244,6 @@ class StateStore:
         Idempotent. If this PA has already been recorded in the DB, don't add
         another.
         """
-
-    def insert_proximity_alert(self, pa: ProximityAlertRecord) -> None:
         existing = self.get_proximity_alert_by_chunk_ids(
             pa.chunk_a_id,
             pa.chunk_b_id,
