@@ -6,6 +6,8 @@
 - [x] text extraction
 - [x] chunking
 - [x] embedding into Chroma
+- [ ] smarter chunking (section-aware)
+- [ ] ingest and store metadata (authors, year, title)
 - [ ] document summaries via Ollama
 - [ ] proximity alert detection
 - [ ] user confirmation/rejection of alerts
