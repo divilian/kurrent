@@ -72,6 +72,7 @@ def ingest_pdfs_recursively(
     root_dir: str | Path,
     store: StateStore,
     embedder: Embedder | None = None,
+    no_more_than: int | None = None,
     verbose: bool | None = True,
 ) -> dict[Path, str]:
     """Recursively ingest all PDF files under root_dir.
@@ -84,7 +85,12 @@ def ingest_pdfs_recursively(
 
     doc_ids: dict[Path, str] = {}
 
-    for pdf_path in discover_pdfs(root_dir):
+    discovered_pdfs = discover_pdfs(root_dir)
+
+    if no_more_than is not None:
+        discovered_pdfs = discovered_pdfs[:no_more_than]
+
+    for pdf_path in discovered_pdfs:
         try:
             doc_id = ingest_pdf(pdf_path, store)
 
