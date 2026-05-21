@@ -289,3 +289,11 @@ class ProximityAlert:
     source_page_end: int | None = None
     target_page_start: int | None = None
     target_page_end: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractedMetadata:
+    title: str | None = None
+    authors: str | None = None
+    year: int | None = None
+    doi: str | None = None
