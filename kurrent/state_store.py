@@ -11,6 +11,7 @@ from kurrent.schema import (
     ProximityAlertRecord,
     ConfirmedLink,
     PAStatus,
+    ExtractedMetadata,
 )
 
 
@@ -103,6 +104,7 @@ class StateStore:
         self,
         pdf_path: str | Path,
         pdf_sha256: str,
+        metadata: ExtractedMetadata | None = None,
     ) -> Document:
         """
         Attempt to create a document with the given contents. Oh, but if those
@@ -117,6 +119,7 @@ class StateStore:
         doc = Document.for_pdf(
             pdf_path=Path(pdf_path),
             pdf_sha256=pdf_sha256,
+            metadata=metadata,
         )
 
         self.insert_document(doc)

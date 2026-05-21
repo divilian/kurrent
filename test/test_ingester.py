@@ -86,7 +86,7 @@ def test_ingest_pdf_creates_document(store, tmp_path):
     assert doc.pdf_path == pdf_path.resolve()
     assert doc.pdf_sha256 is not None
     assert doc.storage_mode == "external"
-    assert doc.title is None
+    assert doc.title == "paper"
     assert doc.authors is None
     assert doc.year is None
     assert doc.doi is None

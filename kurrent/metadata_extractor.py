@@ -16,7 +16,11 @@ kurrent. It is not intended to be authoritative citation metadata.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import re
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, quote
+from urllib.request import Request, urlopen
 
 import pymupdf
 
@@ -41,6 +45,8 @@ BAD_TITLE_PATTERNS = [
     "layout",
     "proof",
 ]
+
+CROSSREF_API_BASE_URL = "https://api.crossref.org/works"
 
 
 def clean_metadata_text(value: str | None) -> str | None:
@@ -296,6 +302,101 @@ def guess_metadata_from_filename(pdf_path: str | Path) -> ExtractedMetadata:
     )
 
 
+def _crossref_author_name(author: dict) -> str | None:
+    """Convert one Crossref author object into a display name."""
+
+    given = clean_metadata_text(author.get("given"))
+    family = clean_metadata_text(author.get("family"))
+
+    if given is not None and family is not None:
+        return f"{given} {family}"
+
+    if family is not None:
+        return family
+
+    if given is not None:
+        return given
+
+    return clean_metadata_text(author.get("name"))
+
+
+def _crossref_year(work: dict) -> int | None:
+    """Extract a publication year from Crossref work metadata."""
+
+    for key in [
+        "published-print",
+        "published-online",
+        "published",
+        "issued",
+    ]:
+        date_parts = work.get(key, {}).get("date-parts")
+
+        if not date_parts:
+            continue
+
+        first_date = date_parts[0]
+
+        if first_date:
+            return int(first_date[0])
+
+    return None
+
+
+def metadata_from_crossref_work(work: dict) -> ExtractedMetadata:
+    """Normalize one Crossref work record into ExtractedMetadata."""
+
+    titles = work.get("title") or []
+    title = clean_metadata_text(titles[0]) if titles else None
+
+    author_names = [
+        name
+        for name in (
+            _crossref_author_name(author)
+            for author in work.get("author", [])
+        )
+        if name is not None
+    ]
+
+    authors = ", ".join(author_names) if author_names else None
+    doi = clean_metadata_text(work.get("DOI"))
+
+    return ExtractedMetadata(
+        title=title,
+        authors=authors,
+        year=_crossref_year(work),
+        doi=doi,
+    )
+
+
+def lookup_crossref_metadata(
+    doi: str,
+    crossref_mailto: str | None = None,
+    timeout: float = 10.0,
+) -> ExtractedMetadata:
+    """Look up bibliographic metadata for a DOI using Crossref."""
+
+    url = f"{CROSSREF_API_BASE_URL}/{quote(doi, safe='')}"
+
+    if crossref_mailto is not None:
+        url = f"{url}?{urlencode({'mailto': crossref_mailto})}"
+
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "kurrent DOI metadata lookup",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return ExtractedMetadata()
+
+    return metadata_from_crossref_work(payload.get("message", {}))
+
+
 def merge_metadata(
     primary: ExtractedMetadata,
     fallback: ExtractedMetadata,
@@ -310,7 +411,11 @@ def merge_metadata(
     )
 
 
-def extract_metadata(pdf_path: str | Path) -> ExtractedMetadata:
+def extract_metadata(
+    pdf_path: str | Path,
+    doi_lookup: bool = False,
+    crossref_mailto: str | None = None,
+) -> ExtractedMetadata:
     """Extract best-effort bibliographic metadata for a PDF."""
 
     pdf_path = Path(pdf_path)
@@ -320,6 +425,13 @@ def extract_metadata(pdf_path: str | Path) -> ExtractedMetadata:
 
     doi = extract_doi(early_text)
     year = extract_year(early_text)
+
+    crossref = ExtractedMetadata()
+    if doi_lookup and doi is not None:
+        crossref = lookup_crossref_metadata(
+            doi,
+            crossref_mailto=crossref_mailto,
+        )
 
     first_page_title = guess_title_from_first_page(early_text)
     first_page_authors = guess_authors_from_first_page(
@@ -335,7 +447,8 @@ def extract_metadata(pdf_path: str | Path) -> ExtractedMetadata:
     )
     filename_guess = guess_metadata_from_filename(pdf_path)
 
-    metadata = merge_metadata(embedded, text_guess)
+    metadata = merge_metadata(crossref, embedded)
+    metadata = merge_metadata(metadata, text_guess)
     metadata = merge_metadata(metadata, filename_guess)
 
     return metadata

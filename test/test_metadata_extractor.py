@@ -13,9 +13,11 @@ from kurrent.metadata_extractor import (
     guess_authors_from_first_page,
     guess_metadata_from_filename,
     guess_title_from_first_page,
+    lookup_crossref_metadata,
     looks_like_bad_title,
     looks_like_header_noise,
     merge_metadata,
+    metadata_from_crossref_work,
 )
 from kurrent.schema import ExtractedMetadata
 
@@ -300,3 +302,109 @@ def test_extract_metadata_combines_embedded_text_and_filename_sources(tmp_path):
     assert metadata.year == 2011
     assert metadata.doi == "10.1145/1897816.1897840"
     assert metadata.title is not None
+
+
+def test_metadata_from_crossref_work_normalizes_fields():
+    """Verify that Crossref work JSON becomes ExtractedMetadata."""
+
+    work = {
+        "title": ["Still Building the Memex"],
+        "author": [
+            {"given": "Stephen", "family": "Davies"},
+            {"family": "Solo"},
+        ],
+        "published-print": {"date-parts": [[2011, 2]]},
+        "DOI": "10.1145/1897816.1897840",
+    }
+
+    assert metadata_from_crossref_work(work) == ExtractedMetadata(
+        title="Still Building the Memex",
+        authors="Stephen Davies, Solo",
+        year=2011,
+        doi="10.1145/1897816.1897840",
+    )
+
+
+def test_lookup_crossref_metadata_returns_empty_metadata_on_error(monkeypatch):
+    """Verify that Crossref lookup failures degrade gracefully."""
+
+    def fake_urlopen(request, timeout=10.0):
+        raise TimeoutError("too slow")
+
+    monkeypatch.setattr(
+        "kurrent.metadata_extractor.urlopen",
+        fake_urlopen,
+    )
+
+    assert lookup_crossref_metadata("10.1234/example") == ExtractedMetadata()
+
+
+def test_extract_metadata_uses_crossref_when_doi_lookup_enabled(
+    tmp_path,
+    monkeypatch,
+):
+    """Verify that DOI lookup metadata wins over local guesses."""
+
+    pdf_path = write_text_pdf(
+        tmp_path / "local_guess_1945.pdf",
+        [
+            "doi:10.1145/1897816.1897840\n"
+            "Local Guess Title\n"
+            "by Local Author\n"
+            "Bush wrote about the memex in 1945."
+        ],
+    )
+
+    def fake_lookup(doi, crossref_mailto=None):
+        return ExtractedMetadata(
+            title="Still Building the Memex",
+            authors="Stephen Davies",
+            year=2011,
+            doi=doi,
+        )
+
+    monkeypatch.setattr(
+        "kurrent.metadata_extractor.lookup_crossref_metadata",
+        fake_lookup,
+    )
+
+    metadata = extract_metadata(
+        pdf_path,
+        doi_lookup=True,
+        crossref_mailto="stephen@example.edu",
+    )
+
+    assert metadata == ExtractedMetadata(
+        title="Still Building the Memex",
+        authors="Stephen Davies",
+        year=2011,
+        doi="10.1145/1897816.1897840",
+    )
+
+
+def test_extract_metadata_skips_crossref_when_doi_lookup_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    """Verify that DOI lookup is opt-in."""
+
+    pdf_path = write_text_pdf(
+        tmp_path / "local_guess.pdf",
+        [
+            "doi:10.1145/1897816.1897840\n"
+            "Local Guess Title\n"
+            "by Local Author"
+        ],
+    )
+
+    def fake_lookup(doi, crossref_mailto=None):
+        raise AssertionError("Crossref lookup should not be called")
+
+    monkeypatch.setattr(
+        "kurrent.metadata_extractor.lookup_crossref_metadata",
+        fake_lookup,
+    )
+
+    metadata = extract_metadata(pdf_path, doi_lookup=False)
+
+    assert metadata.doi == "10.1145/1897816.1897840"

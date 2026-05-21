@@ -33,6 +33,7 @@ class Document:
         pdf_path: Path,
         pdf_sha256: str,
         storage_mode: StorageMode = "external",
+        metadata: ExtractedMetadata | None = None,
     ) -> Self:
         """
         Blindly create a new Document object for this PDF.
@@ -40,12 +41,18 @@ class Document:
         This does not check whether the PDF content already exists in
         kurrent. That check belongs upstream, in StateStore.
         """
+        metadata = metadata or ExtractedMetadata()
+
         return cls(
             doc_id=str(uuid4()),
             pdf_sha256=pdf_sha256,
             storage_mode=storage_mode,
             pdf_path=pdf_path,
             ingested_at=datetime.now(timezone.utc),
+            title=metadata.title,
+            authors=metadata.authors,
+            year=metadata.year,
+            doi=metadata.doi,
         )
 
 

@@ -6,19 +6,25 @@
 # - optionally discovers PDFs in a filesystem hierarchy
 
 from pathlib import Path
+import time
 from typing import Sequence
 
 from kurrent.embedder import Embedder
 from kurrent.file_utils import normalize_path, is_pdf, sha256_file
+from kurrent.metadata_extractor import extract_metadata
 from kurrent.state_store import StateStore
 from kurrent.chunker import chunk_document
 
+
+CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 
 
 def ingest_pdf(
     path: str | Path,
     store: StateStore,
     embedder: Embedder | None = None,
+    doi_lookup: bool = False,
+    crossref_mailto: str | None = None,
 ) -> str:
     """
     Ingests the PDF into kurrent, and returns the doc_id for it. This could be
@@ -39,8 +45,17 @@ def ingest_pdf(
         raise ValueError(f"No such PDF file {path}")
 
     sha256 = sha256_file(path)
+    metadata = extract_metadata(
+        path,
+        doi_lookup=doi_lookup,
+        crossref_mailto=crossref_mailto,
+    )
 
-    doc = store.get_or_create_document(path, sha256)
+    doc = store.get_or_create_document(
+        path,
+        sha256,
+        metadata=metadata,
+    )
     chunk_document(doc.doc_id, store)   # idempotent
     if embedder is not None:
         # This is possibly slow if this document has been previously ingested.
@@ -74,6 +89,8 @@ def ingest_pdfs_recursively(
     embedder: Embedder | None = None,
     no_more_than: int | None = None,
     verbose: bool | None = True,
+    doi_lookup: bool = False,
+    crossref_mailto: str | None = None,
 ) -> dict[Path, str]:
     """Recursively ingest all PDF files under root_dir.
 
@@ -90,9 +107,20 @@ def ingest_pdfs_recursively(
     if no_more_than is not None:
         discovered_pdfs = discovered_pdfs[:no_more_than]
 
-    for pdf_path in discovered_pdfs:
+    if doi_lookup and verbose:
+        print(
+            "DOI lookup is enabled; additional time here is Crossref "
+            "metadata lookup, not slow kurrent ingestion."
+        )
+
+    for i, pdf_path in enumerate(discovered_pdfs, start=1):
         try:
-            doc_id = ingest_pdf(pdf_path, store)
+            doc_id = ingest_pdf(
+                pdf_path,
+                store,
+                doi_lookup=doi_lookup,
+                crossref_mailto=crossref_mailto,
+            )
 
             if embedder is not None:
                 embedder.index_chunks(doc_id, store)
@@ -101,6 +129,9 @@ def ingest_pdfs_recursively(
             print(f"Ingested {pdf_path.name} as {doc_id}")
         except Exception as e:
             print(f"Could not ingest {pdf_path.name}: {e}")
+
+        if doi_lookup and i < len(discovered_pdfs):
+            time.sleep(CROSSREF_REQUEST_INTERVAL_SECONDS)
 
     return doc_ids
 

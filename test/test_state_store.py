@@ -9,6 +9,7 @@ from kurrent.schema import (
     Chunk,
     ConfirmedLink,
     Document,
+    ExtractedMetadata,
     ProximityAlertRecord,
 )
 from kurrent.state_store import StateStore
@@ -38,6 +39,58 @@ def test_insert_and_get_document(store):
 
 def test_missing_document_returns_none(store):
     assert store.get_document("not-a-real-id") is None
+
+
+def test_get_or_create_document_uses_metadata_for_new_document(store):
+    """Verify that metadata is used when creating a new document."""
+
+    metadata = ExtractedMetadata(
+        title="Still Building the Memex",
+        authors="Stephen Davies",
+        year=2011,
+        doi="10.1145/1897816.1897840",
+    )
+
+    doc = store.get_or_create_document(
+        Path("/tmp/memex.pdf"),
+        "fake-sha256",
+        metadata=metadata,
+    )
+
+    assert doc.title == "Still Building the Memex"
+    assert doc.authors == "Stephen Davies"
+    assert doc.year == 2011
+    assert doc.doi == "10.1145/1897816.1897840"
+
+
+def test_get_or_create_document_ignores_metadata_for_existing_document(store):
+    """Verify that metadata does not overwrite an existing document."""
+
+    first_metadata = ExtractedMetadata(
+        title="Original Title",
+        authors="Original Author",
+        year=2011,
+        doi="10.1/original",
+    )
+    replacement_metadata = ExtractedMetadata(
+        title="Replacement Title",
+        authors="Replacement Author",
+        year=2020,
+        doi="10.1/replacement",
+    )
+
+    first_doc = store.get_or_create_document(
+        Path("/tmp/original.pdf"),
+        "fake-sha256",
+        metadata=first_metadata,
+    )
+    second_doc = store.get_or_create_document(
+        Path("/tmp/replacement.pdf"),
+        "fake-sha256",
+        metadata=replacement_metadata,
+    )
+
+    assert second_doc == first_doc
 
 
 def test_insert_and_get_chunk(store):
