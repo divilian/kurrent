@@ -144,7 +144,6 @@ class Searcher:
 
     def metadata_search(
         self,
-        *,
         title: str | None = None,
         author: str | None = None,
         year: int | None = None,
@@ -163,19 +162,6 @@ class Searcher:
         """Find chunks/documents using lexical or exact-ish text matching."""
         ...
 
-    def get_document(
-        self,
-        document_id: int,
-    ) -> DocumentHit | None:
-        """Retrieve one document by kurrent document ID."""
-        ...
-
-    def get_chunk(
-        self,
-        chunk_id: int,
-    ) -> SemanticChunkHit | None:
-        """Retrieve one chunk by kurrent chunk ID."""
-        ...
 
 
 def make_smoke_searcher() -> dict:

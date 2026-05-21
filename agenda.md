@@ -2,10 +2,10 @@
 
 ## MVP priorities
 
-- [ ] PDF ingestion
-- [ ] text extraction
-- [ ] chunking
-- [ ] embedding into Chroma
+- [x] PDF ingestion
+- [x] text extraction
+- [x] chunking
+- [x] embedding into Chroma
 - [ ] document summaries via Ollama
 - [ ] proximity alert detection
 - [ ] user confirmation/rejection of alerts
@@ -15,10 +15,10 @@
 
 ## Leftover stuff
 
-- [ ] Write `corpus_store.py` functions
-- [ ] Write `ingester.py` functions
+- [x] Write `corpus_store.py` functions
+- [x] Write `ingester.py` functions
 - [ ] Filter out unnecessary code from `llm_backend.py` and focus it
-- [ ] Migrate from pypdf to PyMuPdf/fitz
+- [x] Migrate from pypdf to PyMuPdf/fitz
 - [ ] Be sure to enable SQLite foreign keys from Python
 
 ## Later
