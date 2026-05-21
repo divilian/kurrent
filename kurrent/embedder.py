@@ -175,6 +175,63 @@ class Embedder:
 
         return matches
 
+    def query_similar_chunks_by_chunk_id(
+        self,
+        chunk_id: str,
+        n_results: int = 10,
+        max_distance: float | None = None,
+        exclude_doc_ids: Sequence[str] | None = None,
+    ) -> list[VectorChunkMatch]:
+        """Query Chroma for chunks similar to an already-indexed chunk."""
+
+        source = self.collection.get(
+            ids=[chunk_id],
+            include=["embeddings"],
+        )
+
+        if not source["ids"]:
+            raise ValueError(f"Chunk not found in vector index: {chunk_id!r}")
+
+        embedding = source["embeddings"][0]
+
+        results = self.collection.query(
+            query_embeddings=[embedding],
+            n_results=n_results,
+            include=["documents", "metadatas", "distances"],
+        )
+
+        chunk_ids = results["ids"][0]
+        documents = results["documents"][0]
+        metadatas = results["metadatas"][0]
+        distances = results["distances"][0]
+
+        excluded = set(exclude_doc_ids or [])
+
+        matches: list[VectorChunkMatch] = []
+
+        for result_chunk_id, document, metadata, distance in zip(
+            chunk_ids,
+            documents,
+            metadatas,
+            distances,
+        ):
+            if max_distance is not None and distance > max_distance:
+                continue
+
+            doc_id = metadata.get("doc_id")
+            if doc_id in excluded:
+                continue
+
+            matches.append(
+                VectorChunkMatch(
+                    chunk_id=result_chunk_id,
+                    distance=distance,
+                    text=document,
+                )
+            )
+
+        return matches
+
 if __name__ == "__main__":
 
     # Smoke test.

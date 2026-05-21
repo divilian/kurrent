@@ -8,7 +8,7 @@ from kurrent.schema import (
     Document,
     Chunk,
     parse_chunk_id,
-    ProximityAlert,
+    ProximityAlertRecord,
     ConfirmedLink,
     PAStatus,
 )
@@ -226,7 +226,7 @@ class StateStore:
 
         return [self._row_to_chunk(row) for row in rows]
 
-    def insert_proximity_alert(self, pa: ProximityAlert) -> None:
+    def insert_proximity_alert(self, pa: ProximityAlertRecord) -> None:
         with self.conn:
             self.conn.execute("""
                 INSERT INTO proximity_alerts
@@ -267,7 +267,7 @@ class StateStore:
                 )
             )
 
-    def get_proximity_alert(self, pa_id: str) -> ProximityAlert | None:
+    def get_proximity_alert(self, pa_id: str) -> ProximityAlertRecord | None:
         row = self.conn.execute(
             """
             SELECT *
@@ -280,7 +280,7 @@ class StateStore:
         if row is None:
             return None
 
-        return ProximityAlert(
+        return ProximityAlertRecord(
             pa_id=row["pa_id"],
             doc_a_id=row["doc_a_id"],
             chunker_a_version=row["chunker_a_version"],

@@ -9,7 +9,7 @@ from kurrent.schema import (
     Chunk,
     ConfirmedLink,
     Document,
-    ProximityAlert,
+    ProximityAlertRecord,
 )
 from kurrent.state_store import StateStore
 
@@ -57,7 +57,7 @@ def make_proximity_alert(
     chunk_a: Chunk,
     chunk_b: Chunk,
     **overrides,
-) -> ProximityAlert:
+) -> ProximityAlertRecord:
     values = {
         "pa_id": str(uuid4()),
         "doc_a_id": chunk_a.doc_id,
@@ -73,7 +73,7 @@ def make_proximity_alert(
         "decided_at": None,
     }
     values.update(overrides)
-    return ProximityAlert(**values)
+    return ProximityAlertRecord(**values)
 
 
 def make_confirmed_link(pa_id: str, **overrides) -> ConfirmedLink:
