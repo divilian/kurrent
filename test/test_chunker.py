@@ -13,6 +13,7 @@ from kurrent.chunker import (
 )
 from kurrent.schema import Document
 from kurrent.state_store import StateStore
+from test.factories import make_document
 
 
 def write_pdf(path: Path, pages: list[str]) -> Path:
@@ -34,25 +35,6 @@ def store(tmp_path):
 
     with StateStore(db_path) as store:
         yield store
-
-
-def make_document(pdf_path: Path, **overrides) -> Document:
-    doc_id = str(uuid4())
-
-    values = {
-        "doc_id": doc_id,
-        "pdf_sha256": f"fake-sha256-{doc_id}",
-        "storage_mode": "external",
-        "pdf_path": pdf_path.resolve(),
-        "ingested_at": datetime.now(timezone.utc),
-        "title": None,
-        "authors": None,
-        "year": None,
-        "doi": None,
-    }
-    values.update(overrides)
-
-    return Document(**values)
 
 
 def test_sha256_text_is_deterministic():

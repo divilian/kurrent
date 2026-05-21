@@ -14,6 +14,19 @@ from kurrent.schema import (
 )
 
 
+def canonical_chunk_pair(
+    chunk_a_id: str,
+    chunk_b_id: str,
+) -> tuple[str, str]:
+    """Return chunk ids in canonical order for undirected PA lookup."""
+
+    if chunk_a_id == chunk_b_id:
+        raise ValueError(
+            f"Proximity alert cannot link a chunk to itself: {chunk_a_id!r}"
+        )
+
+    return tuple(sorted([chunk_a_id, chunk_b_id]))
+
 class StateStore:
     """
     Maintains all basic information for kurrent in an SQLite database (missing
@@ -227,8 +240,23 @@ class StateStore:
         return [self._row_to_chunk(row) for row in rows]
 
     def insert_proximity_alert(self, pa: ProximityAlertRecord) -> None:
+        """
+        Idempotent. If this PA has already been recorded in the DB, don't add
+        another.
+        """
+
+    def insert_proximity_alert(self, pa: ProximityAlertRecord) -> None:
+        existing = self.get_proximity_alert_by_chunk_ids(
+            pa.chunk_a_id,
+            pa.chunk_b_id,
+        )
+
+        if existing is not None:
+            return
+
         with self.conn:
-            self.conn.execute("""
+            self.conn.execute(
+                """
                 INSERT INTO proximity_alerts
                 (
                     pa_id,
@@ -264,7 +292,7 @@ class StateStore:
                         if pa.decided_at is not None
                         else None
                     ),
-                )
+                ),
             )
 
     def get_proximity_alert(self, pa_id: str) -> ProximityAlertRecord | None:
@@ -275,6 +303,77 @@ class StateStore:
             WHERE pa_id = ?
             """,
             (pa_id,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return ProximityAlertRecord(
+            pa_id=row["pa_id"],
+            doc_a_id=row["doc_a_id"],
+            chunker_a_version=row["chunker_a_version"],
+            chunk_a_index=row["chunk_a_index"],
+            doc_b_id=row["doc_b_id"],
+            chunker_b_version=row["chunker_b_version"],
+            chunk_b_index=row["chunk_b_index"],
+            score=row["score"],
+            status=row["status"],
+            explanation=row["explanation"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            decided_at=(
+                datetime.fromisoformat(row["decided_at"])
+                if row["decided_at"] is not None
+                else None
+            ),
+        )
+
+    def get_proximity_alert_by_chunk_ids(
+        self,
+        chunk_a_id: str,
+        chunk_b_id: str,
+    ) -> ProximityAlertRecord | None:
+        """Retrieve a PA record by its two chunk ids.
+
+        PA chunk pairs are treated as undirected, so the lookup canonicalizes
+        the pair before querying. This means A/B and B/A find the same PA
+        record.
+        """
+        chunk_a_id, chunk_b_id = canonical_chunk_pair(
+            chunk_a_id,
+            chunk_b_id,
+        )
+
+        (
+            doc_a_id,
+            chunker_a_version,
+            chunk_a_index,
+        ) = parse_chunk_id(chunk_a_id)
+
+        (
+            doc_b_id,
+            chunker_b_version,
+            chunk_b_index,
+        ) = parse_chunk_id(chunk_b_id)
+
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM proximity_alerts
+            WHERE doc_a_id = ?
+              AND chunker_a_version = ?
+              AND chunk_a_index = ?
+              AND doc_b_id = ?
+              AND chunker_b_version = ?
+              AND chunk_b_index = ?
+            """,
+            (
+                doc_a_id,
+                chunker_a_version,
+                chunk_a_index,
+                doc_b_id,
+                chunker_b_version,
+                chunk_b_index,
+            ),
         ).fetchone()
 
         if row is None:

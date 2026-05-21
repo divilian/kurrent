@@ -21,9 +21,38 @@ from typing import Sequence
 
 from kurrent.chunker import chunker_version
 from kurrent.embedder import Embedder
-from kurrent.schema import Chunk, ProximityAlert
+from kurrent.schema import Chunk, ProximityAlert, ProximityAlertRecord
 from kurrent.state_store import StateStore
 
+
+def make_proximity_alert_record(
+    alert: ProximityAlert,
+    explanation: str = "",
+) -> ProximityAlertRecord:
+    """Convert a generated proximity alert into a persisted PA record."""
+
+    chunk_a_id, chunk_b_id = sorted([
+        alert.source_chunk_id,
+        alert.target_chunk_id,
+    ])
+
+    doc_a_id, chunker_a_version, chunk_a_index = parse_chunk_id(chunk_a_id)
+    doc_b_id, chunker_b_version, chunk_b_index = parse_chunk_id(chunk_b_id)
+
+    return ProximityAlertRecord(
+        pa_id=str(uuid4()),
+        doc_a_id=doc_a_id,
+        chunker_a_version=chunker_a_version,
+        chunk_a_index=chunk_a_index,
+        doc_b_id=doc_b_id,
+        chunker_b_version=chunker_b_version,
+        chunk_b_index=chunk_b_index,
+        score=alert.distance,
+        status="pending",
+        explanation=explanation,
+        created_at=datetime.now(timezone.utc),
+        decided_at=None,
+    )
 
 class ProximityAlerter:
     """Find candidate proximity alerts using the vector index."""

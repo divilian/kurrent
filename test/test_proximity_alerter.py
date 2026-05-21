@@ -8,6 +8,7 @@ from kurrent.chunker import chunker_version
 from kurrent.proximity_alerter import ProximityAlerter
 from kurrent.schema import Chunk, Document, ProximityAlert, VectorChunkMatch
 from kurrent.state_store import StateStore
+from test.factories import make_chunk, make_document
 
 
 class FakeEmbedder:
@@ -44,45 +45,6 @@ def store(tmp_path):
 
     with StateStore(db_path) as store:
         yield store
-
-
-def make_document(**overrides) -> Document:
-    doc_id = str(uuid4())
-
-    values = {
-        "doc_id": doc_id,
-        "pdf_sha256": f"fake-sha256-{doc_id}",
-        "storage_mode": "external",
-        "pdf_path": Path(f"/tmp/{doc_id}.pdf"),
-        "ingested_at": datetime.now(timezone.utc),
-        "title": None,
-        "authors": None,
-        "year": None,
-        "doi": None,
-    }
-    values.update(overrides)
-
-    return Document(**values)
-
-
-def make_chunk(
-    doc_id: str,
-    chunk_index: int,
-    text: str,
-    **overrides,
-) -> Chunk:
-    values = {
-        "doc_id": doc_id,
-        "chunker_version": chunker_version(),
-        "chunk_index": chunk_index,
-        "text": text,
-        "text_sha256": f"fake-text-sha256-{doc_id}-{chunk_index}",
-        "page_start": chunk_index + 1,
-        "page_end": chunk_index + 1,
-    }
-    values.update(overrides)
-
-    return Chunk(**values)
 
 
 def test_find_alerts_for_document_queries_each_source_chunk(store):
