@@ -105,6 +105,16 @@ class SearchHit:
         )
 
 
+# Justification: we distinguish ProximityAlert (bottom of this file) from
+# ProximityAlertRecord (here) because generated proximity alerts can be useful
+# as temporary candidates: kurrent may generate them for inspection, tuning, or
+# review without immediately persisting them.
+#
+# Documents and Chunks, by contrast, are core kurrent state objects. In normal
+# use, once a document or chunk exists in kurrent, it is expected to be
+# persisted in StateStore. So Document and Chunk do not need separate
+# "candidate" and "record" dataclasses.
+
 @dataclass(slots=True)
 class ProximityAlertRecord:
     """A persisted proximity-alert row in kurrent state.
