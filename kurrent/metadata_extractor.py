@@ -27,8 +27,13 @@ import pymupdf
 from kurrent.schema import ExtractedMetadata
 
 
+DOI_URL_RE = re.compile(
+    r"https?://(?:dx\.)?doi\.org/(?P<doi>10\.\d{4,9}/[^\s<>'\"]+)",
+    re.IGNORECASE,
+)
+
 DOI_RE = re.compile(
-    r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+",
+    r"\b(?P<doi>10\.\d{4,9}/[^\s<>'\"]+)",
     re.IGNORECASE,
 )
 
@@ -115,16 +120,82 @@ def extract_text_from_first_pages(
     return "\n".join(pieces)
 
 
-def extract_doi(text: str) -> str | None:
-    """Extract the first DOI-like string from text."""
+def clean_doi_candidate(candidate: str) -> str | None:
+    """Clean and validate one DOI candidate extracted from PDF text."""
 
-    match = DOI_RE.search(text)
+    candidate = candidate.strip()
+    candidate = candidate.replace("\u200b", "")
+    candidate = candidate.replace("\ufeff", "")
 
-    if match is None:
+    candidate = re.sub(
+        r"^https?://(?:dx\.)?doi\.org/",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+
+    # PNAS supplement URLs often look like:
+    #
+    #     10.1073/pnas.2400689121/-/DCSupplemental
+    #
+    # The DOI is the part before /-/.
+    candidate = candidate.split("/-/")[0]
+
+    # Drop common trailing punctuation from surrounding prose.
+    candidate = candidate.rstrip(".,;:)]}'\"")
+
+    if not candidate.lower().startswith("10."):
         return None
 
-    doi = match.group(0).rstrip(".,;:)]}'\"")
-    return doi
+    if "/" not in candidate:
+        return None
+
+    prefix, suffix = candidate.split("/", maxsplit=1)
+
+    if not prefix or not suffix:
+        return None
+
+    # Very short / non-specific suffixes like "pnas" are usually fragments
+    # produced by line-wrapped DOI URLs, not usable DOIs.
+    if not any(char.isdigit() for char in suffix):
+        return None
+
+    return candidate
+
+
+def doi_candidate_score(candidate: str, from_doi_url: bool) -> tuple[int, int]:
+    """Score DOI candidates so complete DOI URLs beat short fragments."""
+
+    return (int(from_doi_url), len(candidate))
+
+
+def extract_doi(text: str) -> str | None:
+    """Extract the best DOI-like string from text.
+
+    Prefer DOI candidates from complete DOI URLs. Otherwise prefer the
+    longest cleaned DOI-like candidate. This avoids choosing early fragments
+    such as ``10.1073/pnas`` when a later footer contains the full DOI.
+    """
+
+    candidates: list[tuple[tuple[int, int], str]] = []
+
+    for match in DOI_URL_RE.finditer(text):
+        doi = clean_doi_candidate(match.group("doi"))
+
+        if doi is not None:
+            candidates.append((doi_candidate_score(doi, True), doi))
+
+    for match in DOI_RE.finditer(text):
+        doi = clean_doi_candidate(match.group("doi"))
+
+        if doi is not None:
+            candidates.append((doi_candidate_score(doi, False), doi))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 PUBLICATION_YEAR_PATTERNS = [
@@ -328,16 +399,33 @@ def _crossref_year(work: dict) -> int | None:
         "published-online",
         "published",
         "issued",
+        "created",
+        "deposited",
     ]:
-        date_parts = work.get(key, {}).get("date-parts")
+        date_info = work.get(key)
+
+        if not isinstance(date_info, dict):
+            continue
+
+        date_parts = date_info.get("date-parts")
 
         if not date_parts:
             continue
 
         first_date = date_parts[0]
 
-        if first_date:
-            return int(first_date[0])
+        if not first_date:
+            continue
+
+        year = first_date[0]
+
+        if year is None:
+            continue
+
+        try:
+            return int(year)
+        except (TypeError, ValueError):
+            continue
 
     return None
 
@@ -391,10 +479,19 @@ def lookup_crossref_metadata(
     try:
         with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
-        return ExtractedMetadata()
 
-    return metadata_from_crossref_work(payload.get("message", {}))
+        return metadata_from_crossref_work(payload.get("message", {}))
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+    ):
+        return ExtractedMetadata()
 
 
 def merge_metadata(
