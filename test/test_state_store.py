@@ -421,3 +421,95 @@ def test_insert_proximity_alert_is_idempotent_for_reversed_pair(store):
     ).fetchone()
 
     assert row["n"] == 1
+
+
+def insert_test_document(store):
+    """Insert one document for StateStore metadata update tests."""
+
+    document = Document.for_pdf(
+        pdf_path=Path("/tmp/example.pdf"),
+        pdf_sha256="abc123",
+        metadata=ExtractedMetadata(
+            title="Old Title",
+            authors="Old Author",
+            year=1999,
+            doi="10.0000/old",
+        ),
+    )
+
+    store.insert_document(document)
+
+    return document.doc_id
+
+
+def test_update_document_metadata_updates_selected_fields(store):
+    """Verify that all supplied metadata fields are updated."""
+
+    doc_id = insert_test_document(store)
+
+    updated = store.update_document_metadata(
+        doc_id,
+        title="New Title",
+        authors="New Author",
+        year=2005,
+        doi="10.1234/new",
+    )
+
+    assert updated.doc_id == doc_id
+    assert updated.title == "New Title"
+    assert updated.authors == "New Author"
+    assert updated.year == 2005
+    assert updated.doi == "10.1234/new"
+
+
+def test_update_document_metadata_persists_selected_field_updates(store):
+    """Verify that metadata updates are written to SQLite, not just returned."""
+
+    doc_id = insert_test_document(store)
+
+    store.update_document_metadata(
+        doc_id,
+        title="Persisted Title",
+        year=2010,
+    )
+
+    reloaded = store.get_document(doc_id)
+
+    assert reloaded is not None
+    assert reloaded.title == "Persisted Title"
+    assert reloaded.year == 2010
+
+
+def test_update_document_metadata_preserves_none_fields(store):
+    """Verify that fields passed as None are left unchanged."""
+
+    doc_id = insert_test_document(store)
+
+    updated = store.update_document_metadata(
+        doc_id,
+        title="New Title",
+    )
+
+    assert updated.title == "New Title"
+    assert updated.authors == "Old Author"
+    assert updated.year == 1999
+    assert updated.doi == "10.0000/old"
+
+
+def test_update_document_metadata_rejects_empty_update(store):
+    """Verify that calling the method without fields raises ValueError."""
+
+    doc_id = insert_test_document(store)
+
+    with pytest.raises(ValueError, match="No metadata fields"):
+        store.update_document_metadata(doc_id)
+
+
+def test_update_document_metadata_rejects_unknown_document(store):
+    """Verify that updating a nonexistent document raises ValueError."""
+
+    with pytest.raises(ValueError, match="Document not found"):
+        store.update_document_metadata(
+            "no-such-doc",
+            title="New Title",
+        )

@@ -140,6 +140,59 @@ class StateStore:
 
         return self._row_to_document(row)
 
+    def update_document_metadata(
+        self,
+        doc_id: str,
+        title: str | None = None,
+        authors: str | None = None,
+        year: int | None = None,
+        doi: str | None = None,
+    ) -> Document:
+        """Update selected metadata fields for an existing document.
+
+        Fields passed as None are unchanged.
+        """
+
+        if self.get_document(doc_id) is None:
+            raise ValueError(f"Document not found: {doc_id}")
+
+        updates = {}
+
+        if title is not None:
+            updates["title"] = title
+
+        if authors is not None:
+            updates["authors"] = authors
+
+        if year is not None:
+            updates["year"] = year
+
+        if doi is not None:
+            updates["doi"] = doi
+
+        if not updates:
+            raise ValueError("No metadata fields were provided for update.")
+
+        set_clause = ", ".join(f"{field} = ?" for field in updates)
+        values = list(updates.values()) + [doc_id]
+
+        with self.conn:
+            self.conn.execute(
+                f"""
+                UPDATE documents
+                SET {set_clause}
+                WHERE doc_id = ?
+                """,
+                values,
+            )
+
+        document = self.get_document(doc_id)
+
+        if document is None:
+            raise ValueError(f"Document disappeared after update: {doc_id}")
+
+        return document
+
     def _row_to_document(self, row: sqlite3.Row) -> Document:
         return Document(
             doc_id=row["doc_id"],
