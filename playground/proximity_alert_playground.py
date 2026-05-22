@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+import shutil
 import sys
 import textwrap
 
@@ -27,6 +28,75 @@ from kurrent.state_store import StateStore
 DEFAULT_ROOT_DIR = Path("/home/stephen/teaching/420")
 PLAYGROUND_DIR = Path("/tmp/kurrent-proximity-alert-playground")
 QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
+
+
+def existing_playground_paths(db_path: Path, chroma_path: Path) -> list[Path]:
+    """Return existing playground database and Chroma paths."""
+
+    candidates = [
+        db_path,
+        db_path.with_name(f"{db_path.name}-wal"),
+        db_path.with_name(f"{db_path.name}-shm"),
+        chroma_path,
+    ]
+
+    return [path for path in candidates if path.exists()]
+
+
+def prepare_fresh_playground_state(db_path: Path, chroma_path: Path) -> None:
+    """Delete existing playground state after confirmation."""
+
+    existing_paths = existing_playground_paths(db_path, chroma_path)
+
+    if not existing_paths:
+        return
+
+    print()
+    print("Existing playground state found.")
+    print("This playground is intended to start with fresh state each run.")
+    print()
+    print("Files/directories to delete:")
+
+    for path in existing_paths:
+        print(f"  {path}")
+
+    print()
+
+    try:
+        response = input("Delete existing playground state? [Y/n] ")
+    except EOFError:
+        raise SystemExit(
+            "Existing playground state was not deleted; aborting."
+        )
+
+    response = response.strip().lower()
+
+    if response not in {"", "y", "yes"}:
+        raise SystemExit("Cancelled; existing playground state left in place.")
+
+    for path in existing_paths:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    print("Deleted existing playground state.")
+
+
+def cleanup_playground_state(db_path: Path, chroma_path: Path) -> None:
+    """Delete playground state on normal program exit."""
+
+    existing_paths = existing_playground_paths(db_path, chroma_path)
+
+    for path in existing_paths:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    if existing_paths:
+        print()
+        print("Deleted playground state.")
 
 
 def boxed(text: str) -> str:
@@ -398,38 +468,42 @@ if __name__ == "__main__":
 
     db_path = PLAYGROUND_DIR / "kurrent.db"
     chroma_path = PLAYGROUND_DIR / "chroma"
+    prepare_fresh_playground_state(db_path, chroma_path)
 
     store = StateStore(db_path)
     embedder = Embedder(chroma_path=chroma_path)
 
-    print(f"Ingesting PDFs under: {root_dir}")
-    print(f"Database path:        {db_path}")
-    print(f"Chroma path:          {chroma_path}")
-    print()
+    try:
+        print(f"Ingesting PDFs under: {root_dir}")
+        print(f"Database path:        {db_path}")
+        print(f"Chroma path:          {chroma_path}")
+        print()
 
-    doc_ids_by_path = ingest_pdfs_recursively(
-        root_dir=root_dir,
-        store=store,
-        embedder=embedder,
-    )
+        doc_ids_by_path = ingest_pdfs_recursively(
+            root_dir=root_dir,
+            store=store,
+            embedder=embedder,
+        )
 
-    documents = get_documents_from_ingest_result(
-        store=store,
-        doc_ids_by_path=doc_ids_by_path,
-    )
+        documents = get_documents_from_ingest_result(
+            store=store,
+            doc_ids_by_path=doc_ids_by_path,
+        )
 
-    alerter = ProximityAlerter(
-        state_store=store,
-        embedder=embedder,
-    )
+        alerter = ProximityAlerter(
+            state_store=store,
+            embedder=embedder,
+        )
 
-    print()
-    print(f"Documents ingested/indexed: {len(documents)}")
+        print()
+        print(f"Documents ingested/indexed: {len(documents)}")
 
-    proximity_alert_loop(
-        store=store,
-        alerter=alerter,
-        documents=documents,
-        n_results_per_chunk=5,
-        max_distance=None,
-    )
+        proximity_alert_loop(
+            store=store,
+            alerter=alerter,
+            documents=documents,
+            n_results_per_chunk=5,
+            max_distance=None,
+        )
+    finally:
+        cleanup_playground_state(db_path, chroma_path)
