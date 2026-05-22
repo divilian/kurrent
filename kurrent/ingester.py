@@ -10,11 +10,18 @@ import time
 from typing import Sequence
 
 from kurrent.embedder import Embedder
-from kurrent.file_utils import normalize_path, is_pdf, sha256_file
+from kurrent.file_utils import (
+    normalize_path,
+    is_pdf,
+    sha256_file,
+    silence_mupdf_messages,
+)
 from kurrent.metadata_extractor import extract_metadata
 from kurrent.state_store import StateStore
 from kurrent.chunker import chunk_document
 
+
+silence_mupdf_messages()
 
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 

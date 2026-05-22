@@ -3,6 +3,9 @@
 import hashlib
 from pathlib import Path
 
+import pymupdf
+
+
 def is_pdf(path: str | Path) -> bool:
     path = normalize_path(path)
     if not path.is_file():
@@ -21,3 +24,10 @@ def sha256_file(path: str | Path) -> str:
 
 def normalize_path(path: str | Path) -> Path:
     return Path(path).expanduser().resolve()
+
+
+def silence_mupdf_messages() -> None:
+    """Suppress noisy MuPDF parser diagnostics during normal ingestion."""
+
+    pymupdf.TOOLS.mupdf_display_errors(False)
+    pymupdf.TOOLS.mupdf_display_warnings(False)

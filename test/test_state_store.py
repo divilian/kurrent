@@ -513,3 +513,151 @@ def test_update_document_metadata_rejects_unknown_document(store):
             "no-such-doc",
             title="New Title",
         )
+
+def test_search_documents_by_metadata_matches_title(store):
+    """Verify that metadata search matches document titles."""
+
+    matching_doc = Document.for_pdf(
+        pdf_path=Path("/tmp/bounded-confidence.pdf"),
+        pdf_sha256="sha-title-match",
+        metadata=ExtractedMetadata(
+            title="Bounded Confidence in Social Influence",
+            authors="Alice Example",
+            year=2001,
+            doi="10.1234/title-match",
+        ),
+    )
+    other_doc = Document.for_pdf(
+        pdf_path=Path("/tmp/weak-ties.pdf"),
+        pdf_sha256="sha-title-other",
+        metadata=ExtractedMetadata(
+            title="The Strength of Weak Ties",
+            authors="Mark Granovetter",
+            year=1973,
+            doi="10.1234/weak-ties",
+        ),
+    )
+
+    store.insert_document(matching_doc)
+    store.insert_document(other_doc)
+
+    results = store.search_documents_by_metadata("bounded confidence")
+
+    assert results == [matching_doc]
+
+
+def test_search_documents_by_metadata_matches_authors_year_doi_and_path(store):
+    """Verify that metadata search checks authors, year, DOI, and PDF path."""
+
+    doc = Document.for_pdf(
+        pdf_path=Path("/tmp/granovetter1973.pdf"),
+        pdf_sha256="sha-metadata-match",
+        metadata=ExtractedMetadata(
+            title="The Strength of Weak Ties",
+            authors="Mark Granovetter",
+            year=1973,
+            doi="10.1086/225469",
+        ),
+    )
+
+    store.insert_document(doc)
+
+    assert store.search_documents_by_metadata("Granovetter") == [doc]
+    assert store.search_documents_by_metadata("1973") == [doc]
+    assert store.search_documents_by_metadata("10.1086") == [doc]
+    assert store.search_documents_by_metadata("granovetter1973") == [doc]
+
+
+def test_search_documents_by_metadata_returns_empty_list_for_blank_search(store):
+    """Verify that blank metadata searches return no results."""
+
+    doc = make_document()
+    store.insert_document(doc)
+
+    assert store.search_documents_by_metadata("") == []
+    assert store.search_documents_by_metadata("   ") == []
+
+
+def test_search_chunks_text_returns_matching_chunk_hits(store):
+    """Verify that text search returns chunk-level hits with document metadata."""
+
+    doc = Document.for_pdf(
+        pdf_path=Path("/tmp/social-influence.pdf"),
+        pdf_sha256="sha-content-match",
+        metadata=ExtractedMetadata(
+            title="Social Influence and Diffusion",
+            authors="Alice Example",
+            year=2005,
+            doi="10.1234/social-influence",
+        ),
+    )
+    store.insert_document(doc)
+
+    matching_chunk = make_chunk(
+        doc.doc_id,
+        chunk_index=0,
+        text="This chunk discusses bounded confidence models.",
+    )
+    other_chunk = make_chunk(
+        doc.doc_id,
+        chunk_index=1,
+        text="This chunk discusses something else.",
+    )
+
+    store.insert_chunks([matching_chunk, other_chunk])
+
+    results = store.search_chunks_by_fulltext("bounded confidence")
+
+    assert len(results) == 1
+
+    hit = results[0]
+
+    assert hit.chunk_id == matching_chunk.chunk_id
+    assert hit.distance is None
+    assert hit.text == matching_chunk.text
+    assert hit.path == doc.pdf_path
+    assert hit.title == "Social Influence and Diffusion"
+    assert hit.page_start == matching_chunk.page_start
+    assert hit.page_end == matching_chunk.page_end
+
+
+def test_search_chunks_text_returns_empty_list_for_blank_search(store):
+    """Verify that blank text searches return no chunk hits."""
+
+    doc = make_document()
+    store.insert_document(doc)
+
+    chunk = make_chunk(
+        doc.doc_id,
+        chunk_index=0,
+        text="This chunk discusses bounded confidence models.",
+    )
+    store.insert_chunks([chunk])
+
+    assert store.search_chunks_by_fulltext("") == []
+    assert store.search_chunks_by_fulltext("   ") == []
+
+
+def test_search_chunks_text_treats_like_wildcards_as_literal_text(store):
+    """Verify that %, _, and backslash are not treated as LIKE wildcards."""
+
+    doc = make_document()
+    store.insert_document(doc)
+
+    wildcard_chunk = make_chunk(
+        doc.doc_id,
+        chunk_index=0,
+        text="This chunk literally contains 100% coverage.",
+    )
+    ordinary_chunk = make_chunk(
+        doc.doc_id,
+        chunk_index=1,
+        text="This chunk contains 1000 coverage but no percent sign.",
+    )
+
+    store.insert_chunks([wildcard_chunk, ordinary_chunk])
+
+    results = store.search_chunks_by_fulltext("100%")
+
+    assert len(results) == 1
+    assert results[0].chunk_id == wildcard_chunk.chunk_id

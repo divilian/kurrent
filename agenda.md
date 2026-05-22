@@ -7,12 +7,13 @@
 - [x] chunking
 - [x] embedding into Chroma
 - [ ] smarter chunking (section-aware)
-- [ ] ingest and store metadata (authors, year, title)
+- [x] ingest and store metadata (authors, year, title)
 - [ ] document summaries via Ollama
-- [ ] proximity alert detection
+- [x] proximity alert detection
 - [ ] user confirmation/rejection of alerts
 - [ ] persistent confirmed links
-- [ ] basic search
+- [x] basic search - metadata
+- [x] basic search - full text (simple LIKE-based)
 - [ ] basic RAG chat over a selected corpus
 
 ## Leftover stuff
@@ -31,6 +32,7 @@
 - [ ] integrations beyond Zotero
 - [ ] advanced section-aware chunking
 - [ ] advanced relationship taxonomies
+- [ ] metadata quality check, and auto-Crossref if it looks sus
 
 
 # Design decisions

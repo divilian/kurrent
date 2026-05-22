@@ -7,6 +7,8 @@ from kurrent.file_utils import normalize_path
 from kurrent.schema import (
     Document,
     Chunk,
+    ChunkHit,
+    make_chunk_id,
     parse_chunk_id,
     ProximityAlertRecord,
     ConfirmedLink,
@@ -294,6 +296,136 @@ class StateStore:
         ).fetchall()
 
         return [self._row_to_chunk(row) for row in rows]
+
+
+    @staticmethod
+    def _like_search_pattern(search_text: str) -> str:
+        """Return a literal SQLite LIKE pattern for substring search.
+
+        %, _, and backslash are escaped so user search text is treated as
+        ordinary text rather than as LIKE wildcard syntax.
+        """
+
+        escaped = (
+            search_text
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+
+        return f"%{escaped}%"
+
+    def search_documents_by_metadata(
+        self,
+        search_text: str,
+        limit: int = 20,
+    ) -> list[Document]:
+        """Return documents whose metadata contains the search text.
+
+        This is a simple SQLite LIKE search across title, authors, year, DOI,
+        and PDF path. It intentionally does not use embeddings or FTS5.
+        """
+
+        search_text = search_text.strip()
+
+        if not search_text:
+            return []
+
+        pattern = self._like_search_pattern(search_text)
+
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM documents
+            WHERE title LIKE ? ESCAPE '\\'
+               OR authors LIKE ? ESCAPE '\\'
+               OR CAST(year AS TEXT) LIKE ? ESCAPE '\\'
+               OR doi LIKE ? ESCAPE '\\'
+               OR pdf_path LIKE ? ESCAPE '\\'
+            ORDER BY
+                year IS NULL,
+                year,
+                title IS NULL,
+                title COLLATE NOCASE,
+                pdf_path COLLATE NOCASE
+            LIMIT ?
+            """,
+            (
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                pattern,
+                limit,
+            ),
+        ).fetchall()
+
+        return [self._row_to_document(row) for row in rows]
+
+    def search_chunks_by_fulltext(
+        self,
+        search_text: str,
+        limit: int = 20,
+    ) -> list[ChunkHit]:
+        """Return chunk hits whose text contains the search text.
+
+        This is a simple SQLite LIKE search over stored chunk text. Results
+        are chunk-level because the match occurs inside a specific chunk, but
+        each result is enriched with document metadata for display.
+        """
+
+        search_text = search_text.strip()
+
+        if not search_text:
+            return []
+
+        pattern = self._like_search_pattern(search_text)
+
+        rows = self.conn.execute(
+            """
+            SELECT
+                chunks.doc_id,
+                chunks.chunker_version,
+                chunks.chunk_index,
+                chunks.text,
+                chunks.page_start,
+                chunks.page_end,
+                documents.pdf_path,
+                documents.title
+            FROM chunks
+            JOIN documents
+              ON chunks.doc_id = documents.doc_id
+            WHERE chunks.text LIKE ? ESCAPE '\\'
+            ORDER BY
+                documents.title IS NULL,
+                documents.title COLLATE NOCASE,
+                documents.pdf_path COLLATE NOCASE,
+                chunks.chunker_version,
+                chunks.chunk_index
+            LIMIT ?
+            """,
+            (
+                pattern,
+                limit,
+            ),
+        ).fetchall()
+
+        return [
+            ChunkHit(
+                chunk_id=make_chunk_id(
+                    row["doc_id"],
+                    row["chunker_version"],
+                    row["chunk_index"],
+                ),
+                distance=None,
+                text=row["text"],
+                path=normalize_path(row["pdf_path"]),
+                title=row["title"],
+                page_start=row["page_start"],
+                page_end=row["page_end"],
+            )
+            for row in rows
+        ]
 
     def insert_proximity_alert(self, pa: ProximityAlertRecord) -> None:
         """

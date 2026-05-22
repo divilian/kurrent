@@ -24,7 +24,11 @@ from urllib.request import Request, urlopen
 
 import pymupdf
 
+from kurrent.file_utils import silence_mupdf_messages
 from kurrent.schema import ExtractedMetadata
+
+
+silence_mupdf_messages()
 
 
 DOI_URL_RE = re.compile(
