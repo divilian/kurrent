@@ -11,7 +11,6 @@
 - [ ] document summaries via Ollama
 - [x] proximity alert detection
 - [ ] user confirmation/rejection of alerts
-- [ ] persistent confirmed links
 - [x] basic search - metadata
 - [x] basic search - full text (simple LIKE-based)
 - [ ] basic RAG chat over a selected corpus
