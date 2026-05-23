@@ -6,13 +6,16 @@
 - [x] text extraction
 - [x] chunking
 - [x] embedding into Chroma
-- [ ] smarter chunking (section-aware)
+- [x] smarter chunking (section-aware)
+- [ ] cascading chunking preferences: paragraph, sentence, word (chat called
+  this a "modest boundary-aware chunker")
 - [x] ingest and store metadata (authors, year, title)
 - [ ] document summaries via Ollama
 - [x] proximity alert detection
 - [ ] user confirmation/rejection of alerts
-- [x] basic search - metadata
-- [x] basic search - full text (simple LIKE-based)
+- [ ] basic search - metadata (wire in to cli.py)
+- [ ] basic search - full text (simple LIKE-based) (wire in to cli.py)
+- [ ] semantic search (wire in to cli.py)
 - [ ] basic RAG chat over a selected corpus
 
 ## Leftover stuff

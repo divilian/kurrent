@@ -16,102 +16,15 @@ The -y/--yes flag skips interactive metadata and heading review.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-import re
 import sys
 import time
 
 
+
 QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
-
-COMMON_SECTION_HEADINGS = {
-    "abstract",
-    "introduction",
-    "background",
-    "related work",
-    "literature review",
-    "theory",
-    "model",
-    "models",
-    "methods",
-    "method",
-    "materials and methods",
-    "data",
-    "results",
-    "analysis",
-    "discussion",
-    "conclusion",
-    "conclusions",
-    "limitations",
-    "future work",
-    "acknowledgments",
-    "acknowledgements",
-    "references",
-    "bibliography",
-    "appendix",
-    "supplementary material",
-    "supporting information",
-}
-
-BAD_HEADING_PATTERNS = [
-    r"^doi\b",
-    r"^https?://",
-    r"^www\.",
-    r"^copyright\b",
-    r"^©",
-    r"^received\b",
-    r"^accepted\b",
-    r"^published\b",
-    r"^author contributions\b",
-    r"^the authors declare\b",
-    r"^to whom correspondence\b",
-    r"^this article",
-    r"^pnas\b",
-    r"^\d+\s+of\s+\d+$",
-    r"^\d+$",
-    r"^physical review\b",
-    r"^journal of\b",
-    r"^proceedings of\b",
-    r"^proc\.\b",
-    r"^vol\.\b",
-    r"^volume\b",
-    r"^no\.\b",
-    r"^school of\b",
-    r"^department of\b",
-    r"^university of\b",
-    r"^institute of\b",
-    r"^college of\b",
-    r"^faculty of\b",
-    r"^center for\b",
-    r"^centre for\b",
-    r"^pacs number",
-    r"^\(received\b",
-    r"^\(revised\b",
-    r"^\(accepted\b",
-    r"^nih public access$",
-    r"^author manuscript$",
-    r"^nih-pa author manuscript$",
-    r"^pmc\b",
-    r"^available in pmc\b",
-    r"^published in final edited form\b",
-    r"^as:$",
-    r"^corresponding author\b",
-    r"^email:",
-    r"^e-mail:",
-    r"^tel:",
-    r"^fax:",
-    r"^\*",
-    r"^†",
-    r"^‡",
-    r"^\d+\s*(program|center|centre|department|school|college|faculty|"
-    r"institute|laboratory|lab)\b",
-    r"^\(?ministry of education\)?",
-    r"^canada\s+[a-z]\d[a-z]\s*\d[a-z]\d$",
-    r"^usa$",
-]
 
 
 @dataclass(slots=True)
@@ -130,154 +43,6 @@ class IngestOutcome:
 
     doc_id: str
     already_existed: bool
-
-
-def normalize_line(line: str) -> str:
-    """Normalize one extracted-text line for heading review."""
-
-    return re.sub(r"\s+", " ", line).strip()
-
-
-def looks_like_bad_heading(line: str) -> bool:
-    """Return True for obvious header/footer/citation junk."""
-
-    lowered = line.lower().strip()
-
-    if not lowered:
-        return True
-
-    return any(re.search(pattern, lowered) for pattern in BAD_HEADING_PATTERNS)
-
-
-def looks_like_author_or_affiliation_line(line: str) -> bool:
-    """Return whether a line looks like authors/affiliations, not a heading."""
-
-    line = normalize_line(line)
-
-    if re.search(r"\b[A-Z][A-Za-z.-]+[0-9,*†‡]", line):
-        if "," in line or " and " in line:
-            return True
-
-    if re.match(
-        r"^\d+\s*(program|center|centre|department|school|college|faculty|"
-        r"institute|laboratory|lab)\b",
-        line,
-        flags=re.IGNORECASE,
-    ):
-        return True
-
-    address_words = {
-        "university",
-        "college",
-        "school",
-        "department",
-        "institute",
-        "center",
-        "centre",
-        "laboratory",
-        "cambridge",
-        "beijing",
-        "china",
-        "canada",
-        "usa",
-    }
-    words = set(re.findall(r"[A-Za-z]+", line.lower()))
-
-    return len(words & address_words) >= 2
-
-
-def looks_like_numbered_heading(line: str) -> bool:
-    """Return whether a line looks like a numbered section heading."""
-
-    line = normalize_line(line)
-
-    patterns = [
-        r"^[IVXLCDM]+\.\s+[A-Z][A-Za-z0-9 ,;:/()&\-]+$",
-        r"^\d+(\.\d+)*\.?\s+[A-Z][A-Za-z0-9 ,;:/()&\-]+$",
-        r"^[A-Z]\.\s+[A-Z][A-Za-z0-9 ,;:/()&\-]+$",
-    ]
-
-    return any(re.match(pattern, line) for pattern in patterns)
-
-
-def looks_like_heading(line: str) -> bool:
-    """Return whether a line looks like a plausible section heading.
-
-    This intentionally favors precision over recall. False section headings are
-    more irritating in an interactive ingest flow than missed headings.
-    """
-
-    line = normalize_line(line)
-
-    if looks_like_bad_heading(line):
-        return False
-
-    if looks_like_author_or_affiliation_line(line):
-        return False
-
-    if len(line) < 3 or len(line) > 120:
-        return False
-
-    if line.lower() in COMMON_SECTION_HEADINGS:
-        return True
-
-    if looks_like_numbered_heading(line):
-        return True
-
-    return False
-
-
-def dedupe_preserving_order(values: Iterable[str]) -> list[str]:
-    """Return unique values while preserving first occurrence order."""
-
-    seen = set()
-    unique_values = []
-
-    for value in values:
-        key = value.lower()
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        unique_values.append(value)
-
-    return unique_values
-
-
-def extract_heading_candidates(
-    pdf_path: Path,
-    max_pages: int = 8,
-) -> list[str]:
-    """Return plausible section-heading candidates from early PDF text."""
-
-    import pymupdf
-
-    from kurrent.file_utils import silence_mupdf_messages
-
-    silence_mupdf_messages()
-
-    candidates: list[str] = []
-
-    with pymupdf.open(pdf_path) as pdf:
-        pages_examined = min(len(pdf), max_pages)
-
-        for page_index in range(pages_examined):
-            page = pdf.load_page(page_index)
-            text = page.get_text("text", sort=True)
-
-            for raw_line in text.splitlines():
-                line = normalize_line(raw_line)
-
-                if looks_like_heading(line):
-                    candidates.append(line)
-
-    candidates = dedupe_preserving_order(candidates)
-
-    if len(candidates) < 2:
-        return []
-
-    return candidates
 
 
 def print_metadata(metadata) -> None:
@@ -379,14 +144,11 @@ def parse_number_list(text: str, maximum: int) -> set[int]:
 
 
 def review_section_headings(pdf_path: Path) -> list[str]:
-    """Let the user remove bogus section-heading candidates.
+    """Let the user remove bogus section-heading candidates."""
 
-    These reviewed headings are not yet consumed by the current fixed-size
-    chunker. This is a UI/development scaffold for the upcoming
-    section-aware chunker.
-    """
+    from kurrent.sectioner import detect_heading_candidates
 
-    headings = extract_heading_candidates(pdf_path)
+    headings = detect_heading_candidates(pdf_path)
     print_heading_candidates(headings)
 
     if not headings:
@@ -428,11 +190,12 @@ def review_section_headings(pdf_path: Path) -> list[str]:
         return accepted
 
 
-def print_accepted_section_headings(pdf_path: Path) -> list[str]:
-    """Print headings that -y/--yes accepts without interactive review."""
+def accept_section_headings_without_review(pdf_path: Path) -> list[str]:
+    """Print and return headings that -y/--yes accepts without review."""
 
-    headings = extract_heading_candidates(pdf_path)
+    from kurrent.sectioner import detect_heading_candidates
 
+    headings = detect_heading_candidates(pdf_path)
     print_heading_candidates(headings)
 
     if headings:
@@ -463,12 +226,13 @@ def ingest_pdf_with_metadata(
     embedder,
     metadata,
     metadata_was_reviewed: bool,
+    reviewed_headings: list[str] | None,
 ) -> IngestOutcome:
     """Ingest one PDF using already-extracted metadata.
 
     This avoids doing Crossref lookup twice during interactive ingestion.
-    The returned outcome records whether the document row already existed in
-    kurrent state before this ingest command.
+    reviewed_headings=None means the chunker should detect headings itself;
+    a list means the CLI has supplied reviewed/accepted headings.
     """
 
     from kurrent.chunker import chunk_document
@@ -501,7 +265,11 @@ def ingest_pdf_with_metadata(
             if updates:
                 store.update_document_metadata(doc_id, **updates)
 
-    chunk_document(doc_id, store)
+    chunk_document(
+        doc_id,
+        store,
+        reviewed_headings=reviewed_headings,
+    )
     embedder.index_chunks(doc_id, store)
 
     return IngestOutcome(
@@ -535,11 +303,11 @@ def ingest_one_pdf(
 
     if assume_yes:
         print_metadata(metadata)
-        print_accepted_section_headings(pdf_path)
+        reviewed_headings = accept_section_headings_without_review(pdf_path)
     else:
         metadata = review_metadata(metadata)
         metadata_was_reviewed = True
-        review_section_headings(pdf_path)
+        reviewed_headings = review_section_headings(pdf_path)
 
     outcome = ingest_pdf_with_metadata(
         pdf_path=pdf_path,
@@ -547,6 +315,7 @@ def ingest_one_pdf(
         embedder=embedder,
         metadata=metadata,
         metadata_was_reviewed=metadata_was_reviewed,
+        reviewed_headings=reviewed_headings,
     )
 
     print()

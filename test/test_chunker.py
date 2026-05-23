@@ -7,11 +7,13 @@ import pytest
 
 from kurrent.chunker import (
     chunk_document,
+    chunker_version,
     extract_pdf_pages,
+    make_section_aware_fixed_size_chunks,
     make_word_aware_fixed_size_chunks,
     sha256_text,
 )
-from kurrent.schema import Document
+from kurrent.schema import Document, SectionSpan
 from kurrent.state_store import StateStore
 from test.factories import make_document
 
@@ -43,6 +45,12 @@ def test_sha256_text_is_deterministic():
 
     assert first == second
     assert first != sha256_text("goodbye world")
+
+
+def test_chunker_version_is_section_aware_by_default():
+    """Verify that kurrent's canonical chunker is now section-aware."""
+
+    assert chunker_version() == "section-aware-fixed-char-2000-v1"
 
 
 def test_extract_pdf_pages_returns_one_based_page_text(tmp_path):
@@ -158,6 +166,77 @@ def test_make_chunks_ignores_empty_pages():
     assert chunks[0].text == "real text"
     assert chunks[0].page_start == 2
     assert chunks[0].page_end == 2
+
+
+def test_make_section_aware_chunks_preserves_section_metadata():
+    """Verify that section-aware chunking copies section metadata to chunks."""
+
+    section = SectionSpan(
+        doc_id="doc-1",
+        section_index=2,
+        section_number="3.1",
+        section_title="LLM Setup",
+        page_start=3,
+        page_end=4,
+        text="alpha beta gamma delta",
+    )
+
+    chunks = make_section_aware_fixed_size_chunks(
+        sections=[section],
+        doc_id="doc-1",
+        target_chars=2000,
+    )
+
+    assert len(chunks) == 1
+
+    chunk = chunks[0]
+
+    assert chunk.chunker_version == "section-aware-fixed-char-2000-v1"
+    assert chunk.section_index == 2
+    assert chunk.section_number == "3.1"
+    assert chunk.section_title == "LLM Setup"
+    assert chunk.page_start == 3
+    assert chunk.page_end == 4
+
+
+def test_make_section_aware_chunks_does_not_cross_section_boundaries():
+    """Verify that section-aware chunks split each section independently."""
+
+    sections = [
+        SectionSpan(
+            doc_id="doc-1",
+            section_index=0,
+            section_number="1",
+            section_title="Introduction",
+            page_start=1,
+            page_end=1,
+            text="alpha beta",
+        ),
+        SectionSpan(
+            doc_id="doc-1",
+            section_index=1,
+            section_number="2",
+            section_title="Methods",
+            page_start=2,
+            page_end=2,
+            text="gamma delta",
+        ),
+    ]
+
+    chunks = make_section_aware_fixed_size_chunks(
+        sections=sections,
+        doc_id="doc-1",
+        target_chars=2000,
+    )
+
+    assert [chunk.text for chunk in chunks] == [
+        "alpha beta",
+        "gamma delta",
+    ]
+    assert [chunk.section_title for chunk in chunks] == [
+        "Introduction",
+        "Methods",
+    ]
 
 
 def test_chunk_document_stores_chunks(store, tmp_path):

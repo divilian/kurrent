@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from kurrent import cli
+from kurrent import sectioner
 
 
 def test_ingest_defaults_to_crossref_metadata():
@@ -115,29 +116,29 @@ def test_ingest_targets_recursively_finds_pdfs(tmp_path):
     assert targets == sorted([first_pdf.resolve(), second_pdf.resolve()])
 
 
-def test_looks_like_heading_accepts_common_and_numbered_headings():
+def test_sectioner_accepts_common_and_numbered_headings():
     """Verify that plausible section headings are accepted."""
 
-    assert cli.looks_like_heading("Abstract")
-    assert cli.looks_like_heading("I. Introduction")
-    assert cli.looks_like_heading("II. The Model")
-    assert cli.looks_like_heading("2.3 Simulation Results")
+    assert sectioner.looks_like_heading("Abstract")
+    assert sectioner.looks_like_heading("I. Introduction")
+    assert sectioner.looks_like_heading("II. The Model")
+    assert sectioner.looks_like_heading("2.3 Simulation Results")
 
 
-def test_looks_like_heading_rejects_front_matter_junk():
+def test_sectioner_rejects_front_matter_junk():
     """Verify that author, affiliation, and manuscript-junk lines are rejected."""
 
-    assert not cli.looks_like_heading(
+    assert not sectioner.looks_like_heading(
         "Feng Fu1,2, Christoph Hauert1,3, Martin A. Nowak1,4,*, "
         "and Long Wang2,†"
     )
-    assert not cli.looks_like_heading(
+    assert not sectioner.looks_like_heading(
         "1Program for Evolutionary Dynamics, Harvard University, "
         "One Brattle Square, Cambridge, MA 02138, USA"
     )
-    assert not cli.looks_like_heading("NIH Public Access")
-    assert not cli.looks_like_heading("Author Manuscript")
-    assert not cli.looks_like_heading("PHYSICAL REVIEW E 89, 042142 (2014)")
+    assert not sectioner.looks_like_heading("NIH Public Access")
+    assert not sectioner.looks_like_heading("Author Manuscript")
+    assert not sectioner.looks_like_heading("PHYSICAL REVIEW E 89, 042142 (2014)")
 
 
 def test_parse_number_list_parses_comma_separated_heading_numbers():
@@ -153,7 +154,7 @@ def test_parse_number_list_rejects_out_of_range_numbers():
         cli.parse_number_list("1, 6", maximum=5)
 
 
-def test_dedupe_preserving_order_is_case_insensitive():
+def test_sectioner_dedupe_preserving_order_is_case_insensitive():
     """Verify that duplicate headings are removed without reordering."""
 
     values = [
@@ -164,7 +165,7 @@ def test_dedupe_preserving_order_is_case_insensitive():
         "INTRODUCTION",
     ]
 
-    assert cli.dedupe_preserving_order(values) == [
+    assert sectioner.dedupe_preserving_order(values) == [
         "Abstract",
         "Introduction",
         "Methods",

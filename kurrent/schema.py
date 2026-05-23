@@ -81,6 +81,15 @@ class Chunk:
     page_start: int | None = None
     page_end: int | None = None
 
+    # Section metadata is intentionally denormalized onto chunks for now.
+    # section_index is kurrent's 0-based section sequence number within the
+    # document. section_number is the paper's visible section label, such as
+    # "2.5.1", "II", or "III.B". section_title is the human-readable heading
+    # text, such as "Methods" or "The Model".
+    section_index: int | None = None
+    section_number: str | None = None
+    section_title: str | None = None
+
     @property
     def chunk_id(self) -> str:
         return make_chunk_id(
@@ -88,6 +97,25 @@ class Chunk:
             self.chunker_version,
             self.chunk_index,
         )
+
+
+@dataclass(slots=True)
+class SectionSpan:
+    """A detected section of a document before it is chunked.
+
+    section_index is kurrent's 0-based section sequence number within the
+    document. section_number is the paper's visible section label, such as
+    "2.5.1", "II", or "III.B". section_title is the human-readable heading
+    text, such as "Methods" or "The Model".
+    """
+
+    doc_id: str
+    section_index: int
+    section_number: str | None
+    section_title: str | None
+    page_start: int | None
+    page_end: int | None
+    text: str
 
 
 @dataclass(slots=True)
@@ -252,6 +280,9 @@ class ChunkHit(ChunkIdProperties):
     title: str | None = None
     page_start: int | None = None
     page_end: int | None = None
+    section_index: int | None = None
+    section_number: str | None = None
+    section_title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

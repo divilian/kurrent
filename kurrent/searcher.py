@@ -17,6 +17,7 @@ from typing import Iterable, Sequence
 from kurrent.embedder import Embedder
 from kurrent.schema import ChunkHit, DocumentHit
 from kurrent.state_store import StateStore
+from kurrent.sectioner import is_reference_section_chunk
 
 
 class Searcher:
@@ -36,8 +37,14 @@ class Searcher:
         n_results: int = 10,
         max_distance: float | None = None,
         exclude_doc_ids: Sequence[str] | None = None,
+        include_reference_sections: bool = False,
     ) -> list[ChunkHit]:
-        """Find chunks semantically similar to a free-text search expression."""
+        """Find chunks semantically similar to a free-text search expression.
+
+        By default, chunks from reference/bibliography sections are excluded
+        because they often create high-vocabulary false positives. Pass
+        include_reference_sections=True to include them.
+        """
         vector_matches = self.embedder.query_chunks(
             search_text,
             n_results=n_results,
@@ -56,6 +63,12 @@ class Searcher:
                     f"kurrent state: {match.chunk_id!r}"
                 )
 
+            if (
+                not include_reference_sections
+                and is_reference_section_chunk(chunk)
+            ):
+                continue
+
             document = self.state_store.get_document(chunk.doc_id)
 
             if document is None:
@@ -73,6 +86,9 @@ class Searcher:
                     title=document.title,
                     page_start=chunk.page_start,
                     page_end=chunk.page_end,
+                    section_index=chunk.section_index,
+                    section_number=chunk.section_number,
+                    section_title=chunk.section_title,
                 )
             )
 
@@ -83,6 +99,7 @@ class Searcher:
         search_text: str,
         max_documents: int = 10,
         max_distance: float | None = None,
+        include_reference_sections: bool = False,
     ) -> list[DocumentHit]:
         """Find documents by aggregating semantic chunk search results.
 
@@ -96,6 +113,7 @@ class Searcher:
             search_text,
             n_results=chunk_results,
             max_distance=max_distance,
+            include_reference_sections=include_reference_sections,
         )
 
         best_hit_by_doc_id: dict[str, ChunkHit] = {}

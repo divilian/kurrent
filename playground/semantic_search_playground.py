@@ -19,6 +19,7 @@ from textwrap import shorten
 from kurrent.embedder import Embedder
 from kurrent.ingester import ingest_pdfs_recursively
 from kurrent.schema import DocumentHit
+from kurrent.sectioner import is_reference_section_chunk
 from kurrent.searcher import Searcher
 from kurrent.state_store import StateStore
 
@@ -126,7 +127,7 @@ def print_hit_detail(hit, index: int, *, preview_chars: int = 2000) -> None:
     """Print the selected chunk hit in detail."""
 
     print()
-    print(f"Hit {index}")
+    print(f"Hit {index}{reference_marker(hit)}")
     print(f"chunk_id: {hit.chunk_id}")
     print(f"doc_id:   {hit.doc_id}")
 
@@ -160,11 +161,7 @@ def semantic_search_loop(
 ) -> None:
     """Prompt repeatedly for semantic searches and print top PDF names."""
 
-    print()
-    print("Semantic search playground")
-    print("Type a search expression and press Enter.")
-    print("Type :q, :quit, quit, or exit to leave.")
-    print()
+    print_help()
 
     hits = []
     last_search_text: str | None = None
@@ -195,6 +192,10 @@ def semantic_search_loop(
         if not user_input:
             continue
 
+        if user_input == "help":
+            print_help()
+            continue
+
         if hits and user_input.isdigit():
             index = int(user_input)
 
@@ -211,6 +212,7 @@ def semantic_search_loop(
             user_input,
             n_results=n_results,
             max_distance=max_distance,
+            include_reference_sections=False,
         )
 
         print_current_hit_list()

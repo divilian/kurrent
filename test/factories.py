@@ -24,6 +24,9 @@ def make_chunk(
         "text_sha256": f"fake-text-sha256-{doc_id}-{chunk_index}",
         "page_start": chunk_index + 1,
         "page_end": chunk_index + 1,
+        "section_index": None,
+        "section_number": None,
+        "section_title": None,
     }
     values.update(overrides)
 

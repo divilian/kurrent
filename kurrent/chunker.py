@@ -1,28 +1,55 @@
 # Functions to split text into retrievable chunks.
+from __future__ import annotations
+
 from pathlib import Path
 import hashlib
+from collections.abc import Sequence
 
 import pymupdf
 
 from kurrent.file_utils import is_pdf
 from kurrent.state_store import StateStore
-from kurrent.schema import Document, Chunk
+from kurrent.schema import Chunk, SectionSpan
+from kurrent.sectioner import (
+    detect_heading_candidates,
+    make_section_spans_from_headings,
+)
 
-__all__ = ["chunk_document"]
+__all__ = [
+    "chunk_document",
+    "chunker_version",
+    "make_word_aware_fixed_size_chunks",
+    "make_section_aware_fixed_size_chunks",
+]
 
 
 def chunker_version(target_chars: int = 2000) -> str:
+    """Return kurrent's current canonical chunker version."""
+
+    return f"section-aware-fixed-char-{target_chars}-v1"
+
+
+def legacy_chunker_version(target_chars: int = 2000) -> str:
+    """Return the pre-section-aware chunker version string."""
+
     return f"word-aware-fixed-char-{target_chars}-v1"
 
 
 def chunk_document(
     doc_id: str,
     store: StateStore,
+    reviewed_headings: Sequence[str] | None = None,
 ) -> list[Chunk]:
+    """Extract, section, chunk, store, and return chunks for a document.
+
+    reviewed_headings=None means no human-reviewed heading list was supplied,
+    so headings are detected automatically.
+
+    reviewed_headings=list means use that caller-supplied heading list. An
+    empty list is meaningful: it says to use no section headings, producing
+    unsectioned chunks under the current section-aware chunker version.
     """
-    Extract text from a stored PDF document, convert it into Chunk objects,
-    store those chunks in kurrent state, and return them.
-    """
+
     doc = store.get_document(doc_id)
 
     if doc is None:
@@ -36,11 +63,21 @@ def chunk_document(
     if existing_chunks:
         return existing_chunks
 
-    pages = extract_pdf_pages(doc.pdf_path)
-    chunks = make_word_aware_fixed_size_chunks(
-        pages=pages,
+    if reviewed_headings is None:
+        headings = detect_heading_candidates(doc.pdf_path)
+    else:
+        headings = list(reviewed_headings)
+
+    sections = make_section_spans_from_headings(
+        pdf_path=doc.pdf_path,
+        doc_id=doc.doc_id,
+        headings=headings,
+    )
+    chunks = make_section_aware_fixed_size_chunks(
+        sections=sections,
         doc_id=doc.doc_id,
     )
+
     store.insert_chunks(chunks)
     return chunks
 
@@ -53,28 +90,11 @@ def make_word_aware_fixed_size_chunks(
     # embeddings are fairly focused.
     target_chars: int = 2000,
 ) -> list[Chunk]:
-    """
-    Convert page-indexed PDF text into word-aware, approximately fixed-size
-    Chunk objects.
+    """Convert page-indexed PDF text into legacy fixed-size chunks.
 
-    The input pages maps 1-based page numbers to the extracted text for each
-    page. Chunks are built by accumulating words until adding another word
-    would exceed target_chars; chunk boundaries therefore avoid splitting
-    words, but individual chunks may span page boundaries.
-
-    Each returned Chunk records:
-    - the supplied doc_id
-    - a deterministic chunk_index based on chunk order
-    - the generated chunker_version, including target_chars
-    - the chunk text and its SHA256 hash
-    - the first and last PDF page represented in the chunk
-
-    The chunker version is generated internally as:
-
-        word-aware-fixed-char-{target_chars}-v1
-
-    This function only creates Chunk objects. It does not insert them into the
-    database.
+    This function is retained for tests, comparison, and possible migration
+    work. It no longer uses kurrent's canonical chunker_version(); its chunks
+    are explicitly marked with the legacy word-aware version string.
     """
 
     chunks: list[Chunk] = []
@@ -94,7 +114,7 @@ def make_word_aware_fixed_size_chunks(
         chunks.append(
             Chunk(
                 doc_id=doc_id,
-                chunker_version=chunker_version(target_chars),
+                chunker_version=legacy_chunker_version(target_chars),
                 chunk_index=len(chunks),
                 text=text,
                 text_sha256=sha256_text(text),
@@ -126,13 +146,64 @@ def make_word_aware_fixed_size_chunks(
     return chunks
 
 
-def extract_pdf_pages(path: str) -> dict[int, str]:
-    """
-    Given a path of a PDF file, return a dict whose ints are page numbers
-    (1-based) and whose values are strings of text. Pages that are blank will
-    still exist in the dict, with empty string as their value.
-    """
+def make_section_aware_fixed_size_chunks(
+    sections: Sequence[SectionSpan],
+    doc_id: str,
+    target_chars: int = 2000,
+) -> list[Chunk]:
+    """Create chunks by splitting each SectionSpan independently."""
+
+    chunks: list[Chunk] = []
+
+    def emit_chunk(
+        text: str,
+        section: SectionSpan,
+    ) -> None:
+        text = text.strip()
+
+        if not text:
+            return
+
+        chunks.append(
+            Chunk(
+                doc_id=doc_id,
+                chunker_version=chunker_version(target_chars),
+                chunk_index=len(chunks),
+                text=text,
+                text_sha256=sha256_text(text),
+                page_start=section.page_start,
+                page_end=section.page_end,
+                section_index=section.section_index,
+                section_number=section.section_number,
+                section_title=section.section_title,
+            )
+        )
+
+    for section in sections:
+        current_parts: list[str] = []
+
+        def current_text() -> str:
+            return " ".join(current_parts).strip()
+
+        for word in section.text.split():
+            candidate_len = len(current_text()) + 1 + len(word)
+
+            if current_parts and candidate_len > target_chars:
+                emit_chunk(current_text(), section)
+                current_parts = []
+
+            current_parts.append(word)
+
+        emit_chunk(current_text(), section)
+
+    return chunks
+
+
+def extract_pdf_pages(path: str | Path) -> dict[int, str]:
+    """Return a dict mapping 1-based page numbers to extracted page text."""
+
     pages = {}
+
     with pymupdf.open(path) as pdf:
         # Use 1-based page numbers because that's what humans use.
         for page_num, page in enumerate(pdf, start=1):
@@ -145,17 +216,17 @@ def extract_pdf_pages(path: str) -> dict[int, str]:
     return pages
 
 
-def extract_pages(path: str) -> dict[int, str]:
-    """
-    (For now, we only ingest PDF files.)
-    """
+def extract_pages(path: str | Path) -> dict[int, str]:
+    """Extract page text from a supported file type."""
+
     if is_pdf(path):
         return extract_pdf_pages(path)
+
     raise ValueError(f"File {path} is not a valid PDF!")
 
 
 def sha256_text(text: str) -> str:
-  return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 if __name__ == "__main__":
@@ -178,7 +249,6 @@ if __name__ == "__main__":
 
             for i, chunk in enumerate(chunks):
                 print(f"Chunk {chunk.chunk_index}:")
-                #chunk.text = chunk.text[:30] + "..." + chunk.text[-30:]
                 pprint(chunk)
 
                 if i < len(chunks) - 1:

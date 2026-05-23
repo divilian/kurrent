@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index INTEGER NOT NULL,
     text TEXT NOT NULL,
     text_sha256 TEXT NOT NULL,
+    section_index INTEGER,
+    section_number TEXT,
+    section_title TEXT,
     page_start INTEGER,
     page_end INTEGER,
 

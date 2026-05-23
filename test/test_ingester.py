@@ -162,7 +162,7 @@ def test_ingest_pdf_creates_chunks(store, tmp_path):
 
     chunk = chunks[0]
     assert chunk.doc_id == doc_id
-    assert chunk.chunker_version == "word-aware-fixed-char-2000-v1"
+    assert chunk.chunker_version == "section-aware-fixed-char-2000-v1"
     assert chunk.chunk_index == 0
     assert "This is page one." in chunk.text
     assert chunk.text_sha256 is not None

@@ -95,6 +95,23 @@ def cleanup_playground_state(db_path: Path, chroma_path: Path) -> None:
         print("Deleted playground state.")
 
 
+def format_chunk_section(chunk) -> str | None:
+    """Return a compact section label for a chunk, if available."""
+
+    pieces = []
+
+    if chunk.section_number is not None:
+        pieces.append(str(chunk.section_number))
+
+    if chunk.section_title is not None:
+        pieces.append(chunk.section_title)
+
+    if not pieces:
+        return None
+
+    return " ".join(pieces)
+
+
 def print_document_hit_list(hits: list[ChunkHit]) -> None:
     """Print a numbered list of document search hits."""
 
@@ -150,6 +167,12 @@ def print_document_hit_detail(
     print()
     print("Best matching chunk")
     print(f"chunk_id: {chunk.chunk_id}")
+
+    section = format_chunk_section(chunk)
+
+    if section is not None:
+        print(f"section:  {section}")
+
     print(f"pages:    {chunk.page_start}–{chunk.page_end}")
     print()
 

@@ -218,6 +218,9 @@ class StateStore:
             text_sha256=row["text_sha256"],
             page_start=row["page_start"],
             page_end=row["page_end"],
+            section_index=row["section_index"],
+            section_number=row["section_number"],
+            section_title=row["section_title"],
         )
 
     def insert_chunks(self, chunks: list[Chunk]) -> None:
@@ -231,10 +234,13 @@ class StateStore:
                     text,
                     text_sha256,
                     page_start,
-                    page_end
+                    page_end,
+                    section_index,
+                    section_number,
+                    section_title
                 )
                 VALUES
-                (?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -245,6 +251,9 @@ class StateStore:
                         chunk.text_sha256,
                         chunk.page_start,
                         chunk.page_end,
+                        chunk.section_index,
+                        chunk.section_number,
+                        chunk.section_title,
                     )
                     for chunk in chunks
                 ],
@@ -390,6 +399,9 @@ class StateStore:
                 chunks.text,
                 chunks.page_start,
                 chunks.page_end,
+                chunks.section_index,
+                chunks.section_number,
+                chunks.section_title,
                 documents.pdf_path,
                 documents.title
             FROM chunks
@@ -423,6 +435,9 @@ class StateStore:
                 title=row["title"],
                 page_start=row["page_start"],
                 page_end=row["page_end"],
+                section_index=row["section_index"],
+                section_number=row["section_number"],
+                section_title=row["section_title"],
             )
             for row in rows
         ]

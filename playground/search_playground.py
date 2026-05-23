@@ -25,6 +25,7 @@ import sys
 
 from kurrent.ingester import ingest_pdfs_recursively
 from kurrent.schema import ChunkHit, Document
+from kurrent.sectioner import is_reference_section_chunk
 from kurrent.state_store import StateStore
 
 
@@ -113,6 +114,7 @@ def print_help() -> None:
     print()
     print("Metadata search checks title, authors, year, DOI, and PDF path.")
     print("Content search checks stored chunk text using SQLite LIKE.")
+    print("Reference-section chunk hits are visibly marked.")
     print()
 
 
@@ -129,7 +131,6 @@ def print_document_list(documents: list[Document]) -> None:
         authors = document.authors or "unknown author"
 
         print(f"{i}. {title} ({year}) — {authors}")
-        #print(f"   {document.pdf_path}")
 
 
 def print_document_detail(document: Document, index: int) -> None:
@@ -196,12 +197,7 @@ def matched_context_window(
     search_text: str | None,
     width: int = 2000,
 ) -> str:
-    """Return a display window centered around the first search match.
-
-    If the search text is missing or not found, return the beginning of the
-    text. Ellipses are added when the returned window omits earlier or later
-    text.
-    """
+    """Return a display window centered around the first search match."""
 
     text = collapse_whitespace(text)
 
@@ -225,7 +221,6 @@ def matched_context_window(
     start = max(0, match_center - width // 2)
     end = min(len(text), start + width)
 
-    # If we hit the right edge, use the full requested width if possible.
     start = max(0, end - width)
 
     window = text[start:end].strip()
@@ -248,6 +243,32 @@ def wait_for_enter() -> None:
         print()
 
 
+def section_label(hit: ChunkHit) -> str | None:
+    """Return a compact section label for a chunk hit, if available."""
+
+    pieces = []
+
+    if hit.section_number is not None:
+        pieces.append(str(hit.section_number))
+
+    if hit.section_title is not None:
+        pieces.append(hit.section_title)
+
+    if not pieces:
+        return None
+
+    return " ".join(pieces)
+
+
+def reference_marker(hit: ChunkHit) -> str:
+    """Return a visible marker for reference-section hits."""
+
+    if is_reference_section_chunk(hit):
+        return " [REFERENCE SECTION]"
+
+    return ""
+
+
 def print_chunk_hit_list(
     hits: list[ChunkHit],
     search_text: str | None = None,
@@ -266,6 +287,8 @@ def print_chunk_hit_list(
         if hit.page_start is not None or hit.page_end is not None:
             pages = f", pp. {hit.page_start}–{hit.page_end}"
 
+        section = section_label(hit)
+
         preview = matched_context_window(
             hit.text,
             search_text,
@@ -273,7 +296,11 @@ def print_chunk_hit_list(
         )
         preview = bold_matches(preview, search_text)
 
-        print(f"{i}. {title}{pages}")
+        print(f"{i}. {title}{reference_marker(hit)}{pages}")
+
+        if section is not None:
+            print(f"   section: {section}")
+
         print(f"   {source_name}")
         print(f"   {preview}")
 
@@ -291,7 +318,7 @@ def print_chunk_hit_detail(
     """Print one chunk text hit in detail."""
 
     print()
-    print(f"Chunk hit {index}")
+    print(f"Chunk hit {index}{reference_marker(hit)}")
     print("-" * 11)
     print(f"chunk_id: {hit.chunk_id}")
 
@@ -303,6 +330,11 @@ def print_chunk_hit_detail(
 
     if hit.page_start is not None or hit.page_end is not None:
         print(f"pages:    {hit.page_start}–{hit.page_end}")
+
+    section = section_label(hit)
+
+    if section is not None:
+        print(f"section:  {section}")
 
     text = matched_context_window(
         hit.text,
@@ -434,7 +466,10 @@ def search_loop(store: StateStore, limit: int = 10) -> None:
             print_current_results()
             continue
 
-        print("Please enter m <text>, metadata <text>, c <text>, content <text>, help, or done.")
+        print(
+            "Please enter m <text>, metadata <text>, c <text>, "
+            "content <text>, help, or done."
+        )
 
 
 if __name__ == "__main__":
@@ -466,4 +501,5 @@ if __name__ == "__main__":
 
         search_loop(store, limit=10)
     finally:
+        store.close()
         cleanup_playground_database(db_path)

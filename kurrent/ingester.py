@@ -3,6 +3,7 @@
 # - verifies that files are PDFs
 # - computes PDF content hash
 # - registers (or looks up) the document in the kurrent state store
+# - chunks the document
 # - optionally discovers PDFs in a filesystem hierarchy
 
 from pathlib import Path
@@ -32,20 +33,18 @@ def ingest_pdf(
     embedder: Embedder | None = None,
     doi_lookup: bool = False,
     crossref_mailto: str | None = None,
+    reviewed_headings: Sequence[str] | None = None,
 ) -> str:
+    """Ingest a PDF into kurrent and return its kurrent ID.
+
+    reviewed_headings=None means the ingest pipeline should detect headings
+    automatically.
+
+    reviewed_headings=list means the caller has supplied a reviewed/accepted
+    heading list. An empty list is meaningful: it explicitly says to use no
+    section headings.
     """
-    Ingests the PDF into kurrent, and returns the doc_id for it. This could be
-    an already-existing doc_id if that PDF had been previously ingested (even
-    under a different file path).
 
-    If this is indeed a new PDF, chunk it and insert the chunks into kurrent.
-
-    If a Chroma embedder is provided, also compute and store each chunk's
-    embeddings in the vector store.
-
-    Assumptions for the moment:
-    - externally managed ("external" storage mode only)
-    """
     path = normalize_path(path)
 
     if not is_pdf(path):
@@ -63,7 +62,13 @@ def ingest_pdf(
         sha256,
         metadata=metadata,
     )
-    chunk_document(doc.doc_id, store)   # idempotent
+
+    chunk_document(
+        doc.doc_id,
+        store,
+        reviewed_headings=reviewed_headings,
+    )
+
     if embedder is not None:
         # This is possibly slow if this document has been previously ingested.
         # We're redoing the embedding work. Possible performance improvement.
@@ -101,10 +106,12 @@ def ingest_pdfs_recursively(
 ) -> dict[Path, str]:
     """Recursively ingest all PDF files under root_dir.
 
-    Returns a mapping specifying which files became ingested as which doc_ids.
+    Returns a mapping specifying which files became ingested as which kurrent
+    IDs.
 
     If embedder is provided, each document is also indexed in Chroma.
-    This function is intentionally fail-fast: any exception stops the batch.
+    This function is intentionally fail-soft: exceptions are reported and the
+    batch continues.
     """
 
     doc_ids: dict[Path, str] = {}
@@ -125,12 +132,10 @@ def ingest_pdfs_recursively(
             doc_id = ingest_pdf(
                 pdf_path,
                 store,
+                embedder=embedder,
                 doi_lookup=doi_lookup,
                 crossref_mailto=crossref_mailto,
             )
-
-            if embedder is not None:
-                embedder.index_chunks(doc_id, store)
 
             doc_ids[pdf_path] = doc_id
             print(f"Ingested {pdf_path.name} as {doc_id}")
@@ -146,6 +151,7 @@ def ingest_pdfs_recursively(
 def print_batch_ingest_summary(results: dict[Path, str]) -> None:
     for path, doc_id in results.items():
         print(f"Created {doc_id} for {path.name}")
+
 
 if __name__ == "__main__":
 

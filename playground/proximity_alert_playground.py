@@ -164,13 +164,36 @@ def page_range(
     return f"pp.{page_start}-{page_end}"
 
 
+def format_chunk_section(chunk: Chunk | None) -> str | None:
+    """Return a compact section label for a chunk, if available."""
+
+    if chunk is None:
+        return None
+
+    pieces = []
+
+    if chunk.section_number is not None:
+        pieces.append(str(chunk.section_number))
+
+    if chunk.section_title is not None:
+        pieces.append(chunk.section_title)
+
+    if not pieces:
+        return None
+
+    return " ".join(pieces)
+
+
 def document_name(document: Document) -> str:
     """Return the display name for a document."""
 
     return document.pdf_path.name
 
 
-def alert_source_label(alert: ProximityAlert) -> str:
+def alert_source_label(
+    alert: ProximityAlert,
+    source_chunk: Chunk | None = None,
+) -> str:
     """Return a compact source label for an alert."""
 
     source_name = (
@@ -179,10 +202,18 @@ def alert_source_label(alert: ProximityAlert) -> str:
         else "(unknown PDF)"
     )
     pages = page_range(alert.source_page_start, alert.source_page_end)
-    return f"{source_name} ({pages})"
+    section = format_chunk_section(source_chunk)
+
+    if section is None:
+        return f"{source_name} ({pages})"
+
+    return f"{source_name}, section {section} ({pages})"
 
 
-def alert_target_label(alert: ProximityAlert) -> str:
+def alert_target_label(
+    alert: ProximityAlert,
+    target_chunk: Chunk | None = None,
+) -> str:
     """Return a compact target label for an alert."""
 
     target_name = (
@@ -191,7 +222,12 @@ def alert_target_label(alert: ProximityAlert) -> str:
         else "(unknown PDF)"
     )
     pages = page_range(alert.target_page_start, alert.target_page_end)
-    return f"{target_name} ({pages})"
+    section = format_chunk_section(target_chunk)
+
+    if section is None:
+        return f"{target_name} ({pages})"
+
+    return f"{target_name}, section {section} ({pages})"
 
 
 def print_document_list(documents: Sequence[Document]) -> None:
@@ -220,13 +256,24 @@ def print_chunk_list(
         marker = "PA" if alerts else "--"
         pages = page_range(chunk.page_start, chunk.page_end)
 
-        print(
-            f"{i}. [{marker}] chunk {chunk.chunk_index} "
-            f"({pages})  alerts={len(alerts)}"
-        )
+        section = format_chunk_section(chunk)
+
+        if section is None:
+            print(
+                f"{i}. [{marker}] chunk {chunk.chunk_index} "
+                f"({pages})  alerts={len(alerts)}"
+            )
+        else:
+            print(
+                f"{i}. [{marker}] chunk {chunk.chunk_index} "
+                f"section={section} ({pages})  alerts={len(alerts)}"
+            )
 
 
-def print_alert_list(alerts: Sequence[ProximityAlert]) -> None:
+def print_alert_list(
+    alerts: Sequence[ProximityAlert],
+    store: StateStore,
+) -> None:
     """Print a numbered list of PAs triggered by one source chunk."""
 
     if not alerts:
@@ -234,19 +281,28 @@ def print_alert_list(alerts: Sequence[ProximityAlert]) -> None:
         return
 
     for i, alert in enumerate(alerts, start=1):
+        target_chunk = store.get_chunk(alert.target_chunk_id)
+
         print(f"{i}. distance={alert.distance:.4f}")
-        print(f"   target: {alert_target_label(alert)}")
+        print(f"   target: {alert_target_label(alert, target_chunk)}")
 
 
-def print_alert_detail(alert: ProximityAlert, index: int) -> None:
+def print_alert_detail(
+    alert: ProximityAlert,
+    index: int,
+    store: StateStore,
+) -> None:
     """Print source and target chunk details for a selected PA."""
+
+    source_chunk = store.get_chunk(alert.source_chunk_id)
+    target_chunk = store.get_chunk(alert.target_chunk_id)
 
     print()
     print(f"Proximity alert {index}")
     print(f"distance: {alert.distance:.4f}")
     print()
 
-    print(boxed(f"source: {alert_source_label(alert)}"))
+    print(boxed(f"source: {alert_source_label(alert, source_chunk)}"))
     print(
         head_tail_wrap(
             " ".join(alert.source_text.split()),
@@ -255,7 +311,7 @@ def print_alert_detail(alert: ProximityAlert, index: int) -> None:
     )
 
     print()
-    print(boxed(f"target: {alert_target_label(alert)}"))
+    print(boxed(f"target: {alert_target_label(alert, target_chunk)}"))
     print(
         head_tail_wrap(
             " ".join(alert.target_text.split()),
@@ -335,13 +391,23 @@ def choose_document(documents: Sequence[Document]) -> Document | None:
 def browse_alerts_for_chunk(
     chunk: Chunk,
     alerts: Sequence[ProximityAlert],
+    store: StateStore,
 ) -> None:
     """Let the user inspect PAs triggered by one source chunk."""
 
     while True:
         print()
-        print(f"Chunk {chunk.chunk_index} triggered {len(alerts)} PA(s).")
-        print_alert_list(alerts)
+        section = format_chunk_section(chunk)
+
+        if section is None:
+            print(f"Chunk {chunk.chunk_index} triggered {len(alerts)} PA(s).")
+        else:
+            print(
+                f"Chunk {chunk.chunk_index} "
+                f"(section {section}) triggered {len(alerts)} PA(s)."
+            )
+
+        print_alert_list(alerts, store)
         print()
         print("Enter an alert number for details, or done.")
 
@@ -367,7 +433,7 @@ def browse_alerts_for_chunk(
             print(f"Please enter a number from 1 to {len(alerts)}.")
             continue
 
-        print_alert_detail(alerts[index - 1], index)
+        print_alert_detail(alerts[index - 1], index, store)
 
 
 def browse_chunks_for_document(
@@ -421,7 +487,7 @@ def browse_chunks_for_document(
             print("That chunk did not trigger any proximity alerts.")
             continue
 
-        browse_alerts_for_chunk(chunk, chunk_alerts)
+        browse_alerts_for_chunk(chunk, chunk_alerts, store)
 
 
 def proximity_alert_loop(

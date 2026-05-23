@@ -15,13 +15,21 @@ The basic workflow is:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import shorten
 from typing import Sequence
+from uuid import uuid4
 
 from kurrent.chunker import chunker_version
 from kurrent.embedder import Embedder
-from kurrent.schema import Chunk, ProximityAlert, ProximityAlertRecord
+from kurrent.schema import (
+    Chunk,
+    ProximityAlert,
+    ProximityAlertRecord,
+    parse_chunk_id,
+)
+from kurrent.sectioner import is_reference_section_chunk
 from kurrent.state_store import StateStore
 
 
@@ -70,6 +78,7 @@ class ProximityAlerter:
         doc_id: str,
         n_results_per_chunk: int = 10,
         max_distance: float | None = None,
+        include_reference_sections: bool = False,
     ) -> list[ProximityAlert]:
         """Find candidate proximity alerts for one document.
 
@@ -78,6 +87,10 @@ class ProximityAlerter:
 
         Results are returned in vector-distance order within each source chunk,
         and source chunks are processed in chunk_index order.
+
+        By default, chunks from reference/bibliography sections are excluded
+        as both source and target chunks because they often create noisy false
+        positives.
 
         This method intentionally does not persist alerts yet.
         """
@@ -97,6 +110,12 @@ class ProximityAlerter:
         alerts: list[ProximityAlert] = []
 
         for source_chunk in source_chunks:
+            if (
+                not include_reference_sections
+                and is_reference_section_chunk(source_chunk)
+            ):
+                continue
+
             alerts.extend(
                 self.find_alerts_for_chunk(
                     source_chunk=source_chunk,
@@ -104,6 +123,7 @@ class ProximityAlerter:
                     n_results=n_results_per_chunk,
                     max_distance=max_distance,
                     exclude_doc_ids=[doc_id],
+                    include_reference_sections=include_reference_sections,
                 )
             )
 
@@ -116,12 +136,20 @@ class ProximityAlerter:
         n_results: int = 10,
         max_distance: float | None = None,
         exclude_doc_ids: Sequence[str] | None = None,
+        include_reference_sections: bool = False,
     ) -> list[ProximityAlert]:
         """Find candidate proximity alerts for one source chunk.
 
         This uses the source chunk's existing indexed embedding as the vector
         query, rather than re-embedding the chunk text.
         """
+
+        if (
+            not include_reference_sections
+            and is_reference_section_chunk(source_chunk)
+        ):
+            return []
+
         vector_matches = self.embedder.query_similar_chunks_by_chunk_id(
             source_chunk.chunk_id,
             n_results=n_results,
@@ -142,6 +170,12 @@ class ProximityAlerter:
                     "Vector index returned a chunk_id not found in "
                     f"kurrent state: {match.chunk_id!r}"
                 )
+
+            if (
+                not include_reference_sections
+                and is_reference_section_chunk(target_chunk)
+            ):
+                continue
 
             target_document = self.state_store.get_document(
                 target_chunk.doc_id,
