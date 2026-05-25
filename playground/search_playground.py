@@ -31,7 +31,7 @@ from kurrent.state_store import StateStore
 
 DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_DIR = Path("/tmp/kurrent-search-playground")
-QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
+QUIT_COMMANDS = {"q", "done", "quit", "exit"}
 
 
 def existing_sqlite_paths(db_path: Path) -> list[Path]:
@@ -378,7 +378,7 @@ def search_loop(store: StateStore, limit: int = 10) -> None:
         print()
 
         try:
-            user_input = input("kurrent> ").strip()
+            user_input = input("search> ").strip()
         except EOFError:
             print()
             return
@@ -491,6 +491,7 @@ if __name__ == "__main__":
         print(f"Database path:        {db_path}")
         print()
 
+        print(f"Ingesting PDFs from {root_dir}...")
         doc_ids = ingest_pdfs_recursively(
             root_dir=root_dir,
             store=store,

@@ -35,7 +35,7 @@ from kurrent.state_store import StateStore
 
 DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_DIR = Path("/tmp/kurrent-section-chunking-playground")
-QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
+QUIT_COMMANDS = {"q", "done", "quit", "exit"}
 
 
 def existing_playground_paths(db_path: Path) -> list[Path]:
@@ -294,7 +294,7 @@ def section_chunking_loop(pdf_paths: Sequence[Path], store: StateStore) -> None:
     print("Section chunking playground")
     print("Choose a PDF number to inspect detected headings and stored chunks.")
     print("Type list, ls, or pdfs to redisplay the numbered PDF list.")
-    print("Type :q, :quit, done, quit, or exit to leave.")
+    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
     print()
     print_pdf_list(pdf_paths)
 
@@ -302,7 +302,7 @@ def section_chunking_loop(pdf_paths: Sequence[Path], store: StateStore) -> None:
         print()
 
         try:
-            user_input = input("kurrent> ").strip()
+            user_input = input("section-chunking> ").strip()
         except EOFError:
             print()
             return

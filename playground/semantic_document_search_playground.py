@@ -21,9 +21,9 @@ from kurrent.schema import ChunkHit
 from kurrent.searcher import Searcher
 from kurrent.state_store import StateStore
 
-
-DEFAULT_ROOT_DIR = Path("/home/stephen/teaching/420")
+DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_DIR = Path("/tmp/kurrent-semantic-document-search-playground")
+QUIT_COMMANDS = {"q", "done", "quit", "exit"}
 
 
 def existing_playground_paths(db_path: Path, chroma_path: Path) -> list[Path]:
@@ -195,7 +195,7 @@ def semantic_document_search_loop(
     print()
     print("Semantic document search playground")
     print("Type a search expression and press Enter.")
-    print("Type :q, :quit, quit, or exit to leave.")
+    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
     print()
 
     hits = []
@@ -213,15 +213,15 @@ def semantic_document_search_loop(
     while True:
         if hits:
             print()
-            print("You can enter a document number, or your next search.")
+            print("You can enter a doc number, or your next search, or q.")
 
         try:
-            user_input = input("kurrent> ").strip()
+            user_input = input("sem-doc-search> ").strip()
         except EOFError:
             print()
             break
 
-        if user_input in {":q", ":quit", "done", "quit", "exit"}:
+        if user_input in QUIT_COMMANDS:
             break
 
         if not user_input:

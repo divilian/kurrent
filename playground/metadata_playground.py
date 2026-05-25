@@ -35,9 +35,9 @@ from kurrent.schema import Document, ExtractedMetadata
 from kurrent.state_store import StateStore
 
 
-DEFAULT_ROOT_DIR = Path("/home/stephen/teaching/420")
+DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_DIR = Path("/tmp/kurrent-metadata-playground")
-QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
+QUIT_COMMANDS = {"q", "done", "quit", "exit"}
 METADATA_MODES = {
     "local":"local",
     "l":"local",
@@ -428,7 +428,7 @@ def metadata_loop(
     print("Metadata playground")
     print("Choose a PDF number to ingest using the current metadata mode.")
     print("Type local or crossref to switch modes.")
-    print("Type :q, :quit, done, quit, or exit to leave.")
+    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
 
     if crossref_mailto is None:
         print()
@@ -446,7 +446,7 @@ def metadata_loop(
         print()
 
         try:
-            user_input = input(f"{metadata_mode}> ").strip()
+            user_input = input(f"metadata ({metadata_mode})> ").strip()
         except EOFError:
             print()
             return

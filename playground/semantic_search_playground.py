@@ -24,8 +24,9 @@ from kurrent.searcher import Searcher
 from kurrent.state_store import StateStore
 
 
-DEFAULT_ROOT_DIR = Path("/home/stephen/teaching/420")
+DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_DIR = Path("/tmp/kurrent-semantic-search-playground")
+QUIT_COMMANDS = {"q", "done", "quit", "exit"}
 
 
 def existing_playground_paths(db_path: Path, chroma_path: Path) -> list[Path]:
@@ -96,6 +97,25 @@ def cleanup_playground_state(db_path: Path, chroma_path: Path) -> None:
         print()
         print("Deleted playground state.")
 
+
+def print_help() -> None:
+    """Print semantic search playground help."""
+
+    print()
+    print("Semantic search playground")
+    print("Type a search expression and press Enter.")
+    print("Type a hit number to inspect that chunk.")
+    print("Type help to show this message again.")
+    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
+    print()
+
+def reference_marker(hit: DocumentHit) -> str:
+    """Return a display marker for chunks that appear to be references."""
+
+    if is_reference_section_chunk(hit.text):
+        return " [reference section]"
+
+    return ""
 
 def print_hit_list(hits) -> None:
     """Print only the numbered list of source PDF base names."""
@@ -178,15 +198,15 @@ def semantic_search_loop(
     while True:
         if hits:
             print()
-            print("You can enter a chunk number, or your next search.")
+            print("You can enter a chunk number, or your next search, or q.")
 
         try:
-            user_input = input("kurrent> ").strip()
+            user_input = input("sem-search> ").strip()
         except EOFError:
             print()
             break
 
-        if user_input in {":q", ":quit", "done", "quit", "exit"}:
+        if user_input in QUIT_COMMANDS:
             break
 
         if not user_input:
@@ -240,6 +260,7 @@ if __name__ == "__main__":
         print(f"Chroma path:          {chroma_path}")
         print()
 
+        print(f"Ingesting and embedding PDFs from {root_dir}...")
         doc_ids = ingest_pdfs_recursively(
             root_dir=root_dir,
             store=store,

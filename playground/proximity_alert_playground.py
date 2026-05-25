@@ -25,9 +25,9 @@ from kurrent.schema import Chunk, Document, ProximityAlert
 from kurrent.state_store import StateStore
 
 
-DEFAULT_ROOT_DIR = Path("/home/stephen/teaching/420")
+DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_DIR = Path("/tmp/kurrent-proximity-alert-playground")
-QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
+QUIT_COMMANDS = {"q", "done", "quit", "exit"}
 
 
 def existing_playground_paths(db_path: Path, chroma_path: Path) -> list[Path]:
@@ -364,7 +364,7 @@ def choose_document(documents: Sequence[Document]) -> Document | None:
         print()
 
         try:
-            user_input = input("kurrent> ").strip()
+            user_input = input("PA (choose doc)> ").strip()
         except EOFError:
             print()
             return None
@@ -412,7 +412,7 @@ def browse_alerts_for_chunk(
         print("Enter an alert number for details, or done.")
 
         try:
-            user_input = input("kurrent> ").strip()
+            user_input = input("PA> ").strip()
         except EOFError:
             print()
             return
@@ -459,7 +459,7 @@ def browse_chunks_for_document(
         print("Enter a chunk number to browse its PAs, or done.")
 
         try:
-            user_input = input("kurrent> ").strip()
+            user_input = input("PA (choose chunk)> ").strip()
         except EOFError:
             print()
             return
@@ -502,7 +502,7 @@ def proximity_alert_loop(
     print()
     print("Proximity alert playground")
     print("Choose a document to generate and browse proximity alerts.")
-    print("Type :q, :quit, done, quit, or exit to leave.")
+    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
 
     while True:
         document = choose_document(documents)
