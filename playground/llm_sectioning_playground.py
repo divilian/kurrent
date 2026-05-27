@@ -25,6 +25,8 @@ import json
 from pathlib import Path
 import textwrap
 
+from tqdm import tqdm
+
 from kurrent.chunker import make_section_aware_fixed_size_chunks
 from kurrent.file_utils import is_pdf
 from kurrent.llm_sectioner import (
@@ -42,7 +44,7 @@ from kurrent.sectioner import (
 
 
 DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
-QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
+QUIT_COMMANDS = {"q", "done", "quit", "exit"}
 
 
 def discover_pdfs(path: str | Path) -> list[Path]:
@@ -276,12 +278,41 @@ def inspect_pdf(
     print()
     print("Asking Ollama to select real section headings...")
 
-    decisions = select_section_headings_with_ollama(
-        candidates=list(candidates),
-        model=model,
-        ollama_url=ollama_url,
-        temperature=0.0,
-    )
+    progress_bar = None
+
+    def start_llm_progress(total: int) -> None:
+        nonlocal progress_bar
+
+        if progress_bar is not None:
+            progress_bar.close()
+            progress_bar = None
+
+        if total <= 0:
+            print("No heading candidates will be sent to Ollama.")
+            return
+
+        progress_bar = tqdm(
+            total=total,
+            desc="Ollama section candidates",
+            unit="candidate",
+        )
+
+    def update_llm_progress(completed: int) -> None:
+        if progress_bar is not None:
+            progress_bar.update(completed)
+
+    try:
+        decisions = select_section_headings_with_ollama(
+            candidates=list(candidates),
+            model=model,
+            ollama_url=ollama_url,
+            temperature=0.0,
+            progress_total_callback=start_llm_progress,
+            progress_callback=update_llm_progress,
+        )
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
     print_decisions(decisions)
     input("\nPress Enter to see sections. ")
@@ -310,7 +341,7 @@ def llm_sectioning_loop(
     print("LLM sectioning playground")
     print("Choose a PDF number to inspect.")
     print("Type list, ls, or pdfs to redisplay the numbered PDF list.")
-    print("Type :q, :quit, done, quit, or exit to leave.")
+    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
     print()
     print_pdf_list(pdf_paths)
 
