@@ -23,115 +23,26 @@ from pathlib import Path
 import argparse
 import textwrap
 
-from tqdm import tqdm
-
 from kurrent.chunker import chunker_version
-from kurrent.file_utils import is_pdf
 from kurrent.ingester import ingest_pdf
 from kurrent.sectioner import (
     detect_heading_candidates,
     is_reference_section_chunk,
 )
 from kurrent.state_store import StateStore
+from playground.common import (
+    DEFAULT_ROOT_DIR,
+    QUIT_COMMANDS,
+    TqdmProgress,
+    cleanup_playground_state,
+    discover_pdfs,
+    playground_dir,
+    prepare_fresh_playground_state,
+    print_pdf_list,
+)
 
 
-DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
-PLAYGROUND_DIR = Path("/tmp/kurrent-section-chunking-playground")
-QUIT_COMMANDS = {"q", "done", "quit", "exit"}
-
-
-def existing_playground_paths(db_path: Path) -> list[Path]:
-    """Return existing playground database paths."""
-
-    candidates = [
-        db_path,
-        db_path.with_name(f"{db_path.name}-wal"),
-        db_path.with_name(f"{db_path.name}-shm"),
-    ]
-
-    return [path for path in candidates if path.exists()]
-
-
-def prepare_fresh_playground_state(db_path: Path) -> None:
-    """Delete existing playground state after confirmation."""
-
-    existing_paths = existing_playground_paths(db_path)
-
-    if not existing_paths:
-        return
-
-    print()
-    print("Existing playground state found.")
-    print("This playground is intended to start with fresh state each run.")
-    print()
-    print("Files to delete:")
-
-    for path in existing_paths:
-        print(f"  {path}")
-
-    print()
-
-    try:
-        response = input("Delete existing playground state? [Y/n] ")
-    except EOFError:
-        raise SystemExit(
-            "Existing playground state was not deleted; aborting."
-        )
-
-    response = response.strip().lower()
-
-    if response not in {"", "y", "yes"}:
-        raise SystemExit("Cancelled; existing playground state left in place.")
-
-    for path in existing_paths:
-        path.unlink()
-
-    print("Deleted existing playground state.")
-
-
-def cleanup_playground_state(db_path: Path) -> None:
-    """Delete playground state on normal program exit."""
-
-    existing_paths = existing_playground_paths(db_path)
-
-    for path in existing_paths:
-        path.unlink()
-
-    if existing_paths:
-        print()
-        print("Deleted playground state.")
-
-
-def discover_pdfs(path: str | Path) -> list[Path]:
-    """Return one PDF path or all PDFs recursively under a directory."""
-
-    path = Path(path).expanduser().resolve()
-
-    if path.is_file():
-        if not is_pdf(path):
-            raise ValueError(f"Not a PDF file: {path}")
-
-        return [path]
-
-    if not path.is_dir():
-        raise FileNotFoundError(f"No such file or directory: {path}")
-
-    return sorted(
-        candidate
-        for candidate in path.rglob("*")
-        if candidate.is_file() and candidate.suffix.lower() == ".pdf"
-    )
-
-
-def print_pdf_list(pdf_paths: Sequence[Path]) -> None:
-    """Print a numbered list of PDF basenames."""
-
-    if not pdf_paths:
-        print("No PDFs found.")
-        return
-
-    for i, pdf_path in enumerate(pdf_paths, start=1):
-        print(f"{i}. {pdf_path.name}")
+PLAYGROUND_DIR = playground_dir("section-chunking")
 
 
 def print_heading_candidates(headings: Sequence[str]) -> None:
@@ -349,28 +260,10 @@ def section_chunking_loop(
         print()
         print("Ingesting PDF and creating section-aware chunks...")
 
-        progress_bar = None
-
-        def start_llm_progress(total: int) -> None:
-            nonlocal progress_bar
-
-            if progress_bar is not None:
-                progress_bar.close()
-                progress_bar = None
-
-            if total <= 0:
-                print("No heading candidates will be sent to Ollama.")
-                return
-
-            progress_bar = tqdm(
-                total=total,
-                desc="Ollama section candidates",
-                unit="candidate",
-            )
-
-        def update_llm_progress(completed: int) -> None:
-            if progress_bar is not None:
-                progress_bar.update(completed)
+        progress = TqdmProgress(
+            desc="Ollama section candidates",
+            unit="candidate",
+        )
 
         try:
             doc_id = ingest_pdf(
@@ -379,19 +272,18 @@ def section_chunking_loop(
                 reviewed_headings=reviewed_headings,
                 use_llm_sectioning=use_llm_sectioning,
                 llm_progress_total_callback=(
-                    start_llm_progress
+                    progress.start
                     if use_llm_sectioning
                     else None
                 ),
                 llm_progress_callback=(
-                    update_llm_progress
+                    progress.update
                     if use_llm_sectioning
                     else None
                 ),
             )
         finally:
-            if progress_bar is not None:
-                progress_bar.close()
+            progress.close()
 
         chunks = store.get_chunks_for_document(
             doc_id=doc_id,

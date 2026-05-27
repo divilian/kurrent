@@ -25,10 +25,7 @@ import json
 from pathlib import Path
 import textwrap
 
-from tqdm import tqdm
-
 from kurrent.chunker import make_section_aware_fixed_size_chunks
-from kurrent.file_utils import is_pdf
 from kurrent.llm_sectioner import (
     candidate_to_prompt_dict,
     filtered_candidates,
@@ -41,42 +38,14 @@ from kurrent.sectioner import (
     is_reference_section_chunk,
     make_section_spans_from_llm_decisions,
 )
+from playground.common import (
+    DEFAULT_ROOT_DIR,
+    QUIT_COMMANDS,
+    TqdmProgress,
+    discover_pdfs,
+    print_pdf_list,
+)
 
-
-DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
-QUIT_COMMANDS = {"q", "done", "quit", "exit"}
-
-
-def discover_pdfs(path: str | Path) -> list[Path]:
-    """Return one PDF path or all PDFs recursively under a directory."""
-
-    path = Path(path).expanduser().resolve()
-
-    if path.is_file():
-        if not is_pdf(path):
-            raise ValueError(f"Not a PDF file: {path}")
-
-        return [path]
-
-    if not path.is_dir():
-        raise FileNotFoundError(f"No such file or directory: {path}")
-
-    return sorted(
-        candidate
-        for candidate in path.rglob("*")
-        if candidate.is_file() and candidate.suffix.lower() == ".pdf"
-    )
-
-
-def print_pdf_list(pdf_paths: Sequence[Path]) -> None:
-    """Print a numbered list of PDF basenames."""
-
-    if not pdf_paths:
-        print("No PDFs found.")
-        return
-
-    for i, pdf_path in enumerate(pdf_paths, start=1):
-        print(f"{i}. {pdf_path.name}")
 
 
 def candidate_payloads(
@@ -278,28 +247,10 @@ def inspect_pdf(
     print()
     print("Asking Ollama to select real section headings...")
 
-    progress_bar = None
-
-    def start_llm_progress(total: int) -> None:
-        nonlocal progress_bar
-
-        if progress_bar is not None:
-            progress_bar.close()
-            progress_bar = None
-
-        if total <= 0:
-            print("No heading candidates will be sent to Ollama.")
-            return
-
-        progress_bar = tqdm(
-            total=total,
-            desc="Ollama section candidates",
-            unit="candidate",
-        )
-
-    def update_llm_progress(completed: int) -> None:
-        if progress_bar is not None:
-            progress_bar.update(completed)
+    progress = TqdmProgress(
+        desc="Ollama section candidates",
+        unit="candidate",
+    )
 
     try:
         decisions = select_section_headings_with_ollama(
@@ -307,12 +258,11 @@ def inspect_pdf(
             model=model,
             ollama_url=ollama_url,
             temperature=0.0,
-            progress_total_callback=start_llm_progress,
-            progress_callback=update_llm_progress,
+            progress_total_callback=progress.start,
+            progress_callback=progress.update,
         )
     finally:
-        if progress_bar is not None:
-            progress_bar.close()
+        progress.close()
 
     print_decisions(decisions)
     input("\nPress Enter to see sections. ")
@@ -341,7 +291,7 @@ def llm_sectioning_loop(
     print("LLM sectioning playground")
     print("Choose a PDF number to inspect.")
     print("Type list, ls, or pdfs to redisplay the numbered PDF list.")
-    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
+    print("Type :q, :quit, done, quit, or exit to leave.")
     print()
     print_pdf_list(pdf_paths)
 

@@ -12,7 +12,6 @@ Or from IPython with:
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 import sys
 from textwrap import shorten
 
@@ -22,80 +21,17 @@ from kurrent.schema import DocumentHit
 from kurrent.sectioner import is_reference_section_chunk
 from kurrent.searcher import Searcher
 from kurrent.state_store import StateStore
+from playground.common import (
+    DEFAULT_ROOT_DIR,
+    QUIT_COMMANDS,
+    cleanup_playground_state,
+    playground_dir,
+    prepare_fresh_playground_state,
+)
 
 
-DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
-PLAYGROUND_DIR = Path("/tmp/kurrent-semantic-search-playground")
-QUIT_COMMANDS = {"q", "done", "quit", "exit"}
-
-
-def existing_playground_paths(db_path: Path, chroma_path: Path) -> list[Path]:
-    """Return existing playground database and Chroma paths."""
-
-    candidates = [
-        db_path,
-        db_path.with_name(f"{db_path.name}-wal"),
-        db_path.with_name(f"{db_path.name}-shm"),
-        chroma_path,
-    ]
-
-    return [path for path in candidates if path.exists()]
-
-
-def prepare_fresh_playground_state(db_path: Path, chroma_path: Path) -> None:
-    """Delete existing playground state after confirmation."""
-
-    existing_paths = existing_playground_paths(db_path, chroma_path)
-
-    if not existing_paths:
-        return
-
-    print()
-    print("Existing playground state found.")
-    print("This playground is intended to start with fresh state each run.")
-    print()
-    print("Files/directories to delete:")
-
-    for path in existing_paths:
-        print(f"  {path}")
-
-    print()
-
-    try:
-        response = input("Delete existing playground state? [Y/n] ")
-    except EOFError:
-        raise SystemExit(
-            "Existing playground state was not deleted; aborting."
-        )
-
-    response = response.strip().lower()
-
-    if response not in {"", "y", "yes"}:
-        raise SystemExit("Cancelled; existing playground state left in place.")
-
-    for path in existing_paths:
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-
-    print("Deleted existing playground state.")
-
-
-def cleanup_playground_state(db_path: Path, chroma_path: Path) -> None:
-    """Delete playground state on normal program exit."""
-
-    existing_paths = existing_playground_paths(db_path, chroma_path)
-
-    for path in existing_paths:
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-
-    if existing_paths:
-        print()
-        print("Deleted playground state.")
+PLAYGROUND_DIR = playground_dir("semantic-search")
+USE_LLM_SECTIONING = False
 
 
 def print_help() -> None:
@@ -261,10 +197,12 @@ if __name__ == "__main__":
         print()
 
         print(f"Ingesting and embedding PDFs from {root_dir}...")
+        print("Sectioning mode:      rules-based (LLM disabled)")
         doc_ids = ingest_pdfs_recursively(
             root_dir=root_dir,
             store=store,
             embedder=embedder,
+            use_llm_sectioning=USE_LLM_SECTIONING,
         )
 
         searcher = Searcher(

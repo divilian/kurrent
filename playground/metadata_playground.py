@@ -14,7 +14,7 @@ Optionally set a Crossref polite-pool email address:
 
 This playground stores its temporary kurrent state under:
 
-    /tmp/kurrent-metadata-playground/kurrent.db
+    /tmp/kurrent-playgrounds/metadata/kurrent.db
 
 That means it does not write to your real kurrent state, but the playground
 database may persist across runs until /tmp is cleaned or you delete it.
@@ -28,54 +28,28 @@ import re
 from pathlib import Path
 import sys
 
-from kurrent.file_utils import is_pdf
 from kurrent.ingester import ingest_pdf
 from kurrent.metadata_extractor import extract_metadata
 from kurrent.schema import Document, ExtractedMetadata
 from kurrent.state_store import StateStore
+from playground.common import (
+    DEFAULT_ROOT_DIR,
+    QUIT_COMMANDS,
+    cleanup_playground_state,
+    discover_pdfs,
+    playground_dir,
+    prepare_fresh_playground_state,
+    print_pdf_list,
+)
 
 
-DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
-PLAYGROUND_DIR = Path("/tmp/kurrent-metadata-playground")
-QUIT_COMMANDS = {"q", "done", "quit", "exit"}
+PLAYGROUND_DIR = playground_dir("metadata")
 METADATA_MODES = {
     "local":"local",
     "l":"local",
     "crossref":"crossref",
     "c":"crossref"
 }
-
-
-def discover_pdfs(path: str | Path) -> list[Path]:
-    """Return one PDF path or all PDFs recursively under a directory."""
-
-    path = Path(path).expanduser().resolve()
-
-    if path.is_file():
-        if not is_pdf(path):
-            raise ValueError(f"Not a PDF file: {path}")
-
-        return [path]
-
-    if not path.is_dir():
-        raise FileNotFoundError(f"No such file or directory: {path}")
-
-    return sorted(
-        candidate
-        for candidate in path.rglob("*")
-        if candidate.is_file() and candidate.suffix.lower() == ".pdf"
-    )
-
-
-def print_pdf_list(pdf_paths: Sequence[Path]) -> None:
-    """Print a numbered list of PDF basenames."""
-
-    if not pdf_paths:
-        print("No PDFs found.")
-        return
-
-    for i, pdf_path in enumerate(pdf_paths, start=1):
-        print(f"{i}. {pdf_path.name}")
 
 
 def normalize_filename_part(value: str) -> str:
@@ -267,68 +241,6 @@ def warn_crossref_fallback(reason: str) -> None:
     print("         Falling back to local PDF metadata.")
 
 
-def existing_sqlite_paths(db_path: Path) -> list[Path]:
-    """Return existing SQLite database and sidecar paths."""
-
-    candidates = [
-        db_path,
-        db_path.with_name(f"{db_path.name}-wal"),
-        db_path.with_name(f"{db_path.name}-shm"),
-    ]
-
-    return [path for path in candidates if path.exists()]
-
-
-def prepare_fresh_playground_database(db_path: Path) -> None:
-    """Delete an existing playground database after confirmation."""
-
-    existing_paths = existing_sqlite_paths(db_path)
-
-    if not existing_paths:
-        return
-
-    print()
-    print("Existing playground database found.")
-    print("This playground is intended to start with fresh state each run.")
-    print()
-    print("Files to delete:")
-
-    for path in existing_paths:
-        print(f"  {path}")
-
-    print()
-
-    try:
-        response = input("Delete existing playground database? [Y/n] ")
-    except EOFError:
-        raise SystemExit(
-            "Existing playground database was not deleted; aborting."
-        )
-
-    response = response.strip().lower()
-
-    if response not in {"", "y", "yes"}:
-        raise SystemExit("Cancelled; existing playground database left in place.")
-
-    for path in existing_paths:
-        path.unlink()
-
-    print("Deleted existing playground database.")
-
-
-def cleanup_playground_database(db_path: Path) -> None:
-    """Delete playground database files on normal program exit."""
-
-    existing_paths = existing_sqlite_paths(db_path)
-
-    for path in existing_paths:
-        path.unlink()
-
-    if existing_paths:
-        print()
-        print("Deleted playground database.")
-
-
 def extract_metadata_for_mode(
     pdf_path: Path,
     metadata_mode: str,
@@ -510,7 +422,7 @@ if __name__ == "__main__":
     PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)
 
     db_path = PLAYGROUND_DIR / "kurrent.db"
-    prepare_fresh_playground_database(db_path)
+    prepare_fresh_playground_state(db_path, label="playground database")
 
     store = StateStore(db_path)
 
@@ -527,4 +439,4 @@ if __name__ == "__main__":
             crossref_mailto=crossref_mailto,
         )
     finally:
-        cleanup_playground_database(db_path)
+        cleanup_playground_state(db_path, label="playground database")
