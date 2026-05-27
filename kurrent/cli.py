@@ -18,13 +18,54 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 import sys
+import textwrap
 import time
 
+from tqdm import tqdm
 
 
 QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
+
+
+class CliUsageError(Exception):
+    """Raised for friendly CLI usage errors."""
+
+
+def print_wrapped(
+    text: str,
+    indent: str = "",
+    subsequent_indent: str | None = None,
+    width: int | None = None,
+    file=None,
+) -> None:
+    """Print user-facing CLI prose wrapped to the terminal width."""
+
+    if width is None:
+        width = shutil.get_terminal_size(fallback=(79, 20)).columns
+
+    if subsequent_indent is None:
+        subsequent_indent = indent
+
+    print(
+        textwrap.fill(
+            text,
+            width=width,
+            initial_indent=indent,
+            subsequent_indent=subsequent_indent,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ),
+        file=file,
+    )
+
+
+def print_usage_error(message: str) -> None:
+    """Print a friendly CLI usage error without a Python traceback."""
+
+    print_wrapped(message, file=sys.stderr)
 
 
 @dataclass(slots=True)
@@ -143,8 +184,24 @@ def parse_number_list(text: str, maximum: int) -> set[int]:
     return selected
 
 
-def review_section_headings(pdf_path: Path) -> list[str]:
-    """Let the user remove bogus section-heading candidates."""
+def review_section_headings(
+    pdf_path: Path,
+    use_llm_sectioning: bool,
+) -> list[str] | None:
+    """Let the user remove bogus rules-based section-heading candidates.
+
+    When LLM-assisted sectioning is enabled, return None so the chunker can
+    run the HeadingCandidate + Ollama pipeline and preserve candidate anchors.
+    """
+
+    if use_llm_sectioning:
+        print()
+        print("Section heading review")
+        print("----------------------")
+        print(
+            "Using LLM-assisted section recognition during chunking. "
+        )
+        return None
 
     from kurrent.sectioner import detect_heading_candidates
 
@@ -190,8 +247,18 @@ def review_section_headings(pdf_path: Path) -> list[str]:
         return accepted
 
 
-def accept_section_headings_without_review(pdf_path: Path) -> list[str]:
-    """Print and return headings that -y/--yes accepts without review."""
+def accept_section_headings_without_review(
+    pdf_path: Path,
+    use_llm_sectioning: bool,
+) -> list[str] | None:
+    """Return headings accepted by -y/--yes, or None for LLM sectioning."""
+
+    if use_llm_sectioning:
+        print()
+        print(
+            "Using LLM-assisted section recognition during chunking. "
+        )
+        return None
 
     from kurrent.sectioner import detect_heading_candidates
 
@@ -220,6 +287,39 @@ def metadata_update_kwargs(metadata) -> dict:
     }
 
 
+def already_ingested_outcome_if_complete(
+    pdf_path: Path,
+    store,
+) -> IngestOutcome | None:
+    """Return an existing ingest outcome if current chunks already exist.
+
+    A document row alone is not enough to skip work, because a previous ingest
+    may have failed after document registration but before chunk insertion.
+    """
+
+    from kurrent.chunker import chunker_version
+    from kurrent.file_utils import sha256_file
+
+    pdf_sha256 = sha256_file(pdf_path)
+    existing = store.get_document_by_sha256(pdf_sha256)
+
+    if existing is None:
+        return None
+
+    existing_chunks = store.get_chunks_for_document(
+        doc_id=existing.doc_id,
+        chunker_version=chunker_version(),
+    )
+
+    if not existing_chunks:
+        return None
+
+    return IngestOutcome(
+        doc_id=existing.doc_id,
+        already_existed=True,
+    )
+
+
 def ingest_pdf_with_metadata(
     pdf_path: Path,
     store,
@@ -227,12 +327,18 @@ def ingest_pdf_with_metadata(
     metadata,
     metadata_was_reviewed: bool,
     reviewed_headings: list[str] | None,
+    use_llm_sectioning: bool,
+    llm_progress_total_callback=None,
+    llm_progress_callback=None,
 ) -> IngestOutcome:
     """Ingest one PDF using already-extracted metadata.
 
     This avoids doing Crossref lookup twice during interactive ingestion.
     reviewed_headings=None means the chunker should detect headings itself;
     a list means the CLI has supplied reviewed/accepted headings.
+
+    use_llm_sectioning controls the automatic path when reviewed_headings is
+    None.
     """
 
     from kurrent.chunker import chunk_document
@@ -269,6 +375,9 @@ def ingest_pdf_with_metadata(
         doc_id,
         store,
         reviewed_headings=reviewed_headings,
+        use_llm_sectioning=use_llm_sectioning,
+        llm_progress_total_callback=llm_progress_total_callback,
+        llm_progress_callback=llm_progress_callback,
     )
     embedder.index_chunks(doc_id, store)
 
@@ -285,10 +394,21 @@ def ingest_one_pdf(
     doi_lookup: bool,
     crossref_mailto: str | None,
     assume_yes: bool,
+    use_llm_sectioning: bool,
 ) -> IngestOutcome:
     """Ingest one PDF through the CLI workflow."""
 
+    from kurrent.file_utils import normalize_path
     from kurrent.metadata_extractor import extract_metadata
+
+    pdf_path = normalize_path(pdf_path)
+
+    existing_outcome = already_ingested_outcome_if_complete(pdf_path, store)
+
+    if existing_outcome is not None:
+        print()
+        print(f"({pdf_path.name} already ingested.)", flush=True)
+        return existing_outcome
 
     print()
     print(f"PDF: {pdf_path}", flush=True)
@@ -303,27 +423,70 @@ def ingest_one_pdf(
 
     if assume_yes:
         print_metadata(metadata)
-        reviewed_headings = accept_section_headings_without_review(pdf_path)
+        reviewed_headings = accept_section_headings_without_review(
+            pdf_path,
+            use_llm_sectioning=use_llm_sectioning,
+        )
     else:
         metadata = review_metadata(metadata)
         metadata_was_reviewed = True
-        reviewed_headings = review_section_headings(pdf_path)
+        reviewed_headings = review_section_headings(
+            pdf_path,
+            use_llm_sectioning=use_llm_sectioning,
+        )
 
-    outcome = ingest_pdf_with_metadata(
-        pdf_path=pdf_path,
-        store=store,
-        embedder=embedder,
-        metadata=metadata,
-        metadata_was_reviewed=metadata_was_reviewed,
-        reviewed_headings=reviewed_headings,
-    )
+    progress_bar = None
+
+    def start_llm_progress(total: int) -> None:
+        nonlocal progress_bar
+
+        if progress_bar is not None:
+            progress_bar.close()
+            progress_bar = None
+
+        if total <= 0:
+            print("No heading candidates will be sent to Ollama.", flush=True)
+            return
+
+        progress_bar = tqdm(
+            total=total,
+            desc="Ollama section candidates",
+            unit="candidate",
+        )
+
+    def update_llm_progress(completed: int) -> None:
+        if progress_bar is not None:
+            progress_bar.update(completed)
+
+    try:
+        outcome = ingest_pdf_with_metadata(
+            pdf_path=pdf_path,
+            store=store,
+            embedder=embedder,
+            metadata=metadata,
+            metadata_was_reviewed=metadata_was_reviewed,
+            reviewed_headings=reviewed_headings,
+            use_llm_sectioning=use_llm_sectioning,
+            llm_progress_total_callback=(
+                start_llm_progress
+                if use_llm_sectioning and reviewed_headings is None
+                else None
+            ),
+            llm_progress_callback=(
+                update_llm_progress
+                if use_llm_sectioning and reviewed_headings is None
+                else None
+            ),
+        )
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
     print()
 
     if outcome.already_existed:
         print(
-            "Already in kurrent state; using existing kurrent ID: "
-            f"{outcome.doc_id}",
+            f"({pdf_path.name} already ingested.)",
             flush=True,
         )
     else:
@@ -340,8 +503,23 @@ def ingest_targets(path: Path, recursive: bool) -> list[Path]:
     path = normalize_path(path)
 
     if recursive:
+        if path.is_file():
+            raise CliUsageError(
+                "Recursive ingest requires a directory. "
+                f"Got a file instead: {path}"
+            )
+
+        if not path.exists():
+            raise CliUsageError(
+                "Recursive ingest requires a directory. "
+                f"No such path exists: {path}"
+            )
+
         if not path.is_dir():
-            raise NotADirectoryError(f"Recursive ingest requires a directory: {path}")
+            raise CliUsageError(
+                "Recursive ingest requires a directory. "
+                f"Got a non-directory path instead: {path}"
+            )
 
         return sorted(
             candidate
@@ -350,13 +528,19 @@ def ingest_targets(path: Path, recursive: bool) -> list[Path]:
         )
 
     if path.is_dir():
-        raise IsADirectoryError(
+        raise CliUsageError(
             "Directory ingest requires -r/--recursive. "
-            f"Got directory: {path}"
+            f"Got a directory: {path}"
         )
 
+    if not path.exists():
+        raise CliUsageError(f"No such PDF file: {path}")
+
     if not is_pdf(path):
-        raise ValueError(f"Not a PDF file: {path}")
+        raise CliUsageError(
+            "Ingest requires a PDF file. "
+            f"Got a non-PDF path: {path}"
+        )
 
     return [path]
 
@@ -382,7 +566,12 @@ def run_ingest(args: argparse.Namespace) -> int:
 
     print("Finding PDFs...", flush=True)
 
-    pdf_paths = ingest_targets(args.path, recursive=args.recursive)
+    try:
+        pdf_paths = ingest_targets(args.path, recursive=args.recursive)
+    except CliUsageError as exc:
+        print()
+        print_usage_error(str(exc))
+        return 2
 
     if not pdf_paths:
         print(f"No PDFs found under: {args.path}")
@@ -412,6 +601,15 @@ def run_ingest(args: argparse.Namespace) -> int:
         )
 
     print(f"Metadata mode:           {args.metadata_mode}", flush=True)
+    print(
+        "Sectioning mode:         "
+        + (
+            "rules-based"
+            if args.rules_based_sections
+            else "LLM-assisted"
+        ),
+        flush=True,
+    )
 
     if doi_lookup and crossref_mailto is None:
         print()
@@ -438,6 +636,7 @@ def run_ingest(args: argparse.Namespace) -> int:
     try:
         for i, pdf_path in enumerate(pdf_paths, start=1):
             print()
+            print("-" * 79)
             print(f"[{i}/{len(pdf_paths)}] {pdf_path}", flush=True)
 
             try:
@@ -448,6 +647,7 @@ def run_ingest(args: argparse.Namespace) -> int:
                     doi_lookup=doi_lookup,
                     crossref_mailto=crossref_mailto,
                     assume_yes=args.assume_yes,
+                    use_llm_sectioning=not args.rules_based_sections,
                 )
                 results.append(
                     IngestResult(
@@ -462,7 +662,7 @@ def run_ingest(args: argparse.Namespace) -> int:
                 return 130
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
-                print(f"Could not ingest {pdf_path}: {message}")
+                print_wrapped(f"Could not ingest {pdf_path}: {message}")
                 results.append(
                     IngestResult(
                         pdf_path=pdf_path,
@@ -501,7 +701,7 @@ def run_ingest(args: argparse.Namespace) -> int:
         print()
         print("Failures:")
         for result in failed:
-            print(f"  {result.pdf_path}: {result.error}")
+            print_wrapped(f"{result.pdf_path}: {result.error}", indent="  ", subsequent_indent="    ")
 
     return 1 if failed else 0
 
@@ -552,6 +752,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="accept extracted metadata and section headings without prompts.",
     )
+    ingest_parser.add_argument(
+        "--rules-based-sections",
+        "--no-llm-sections",
+        action="store_true",
+        help=(
+            "use the older rules-based section heading detector instead of "
+            "LLM-assisted section recognition"
+        ),
+    )
 
     metadata_group = ingest_parser.add_mutually_exclusive_group()
     metadata_group.add_argument(
@@ -585,7 +794,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    return args.func(args)
+    try:
+        return args.func(args)
+    except CliUsageError as exc:
+        print_usage_error(str(exc))
+        return 2
 
 
 if __name__ == "__main__":

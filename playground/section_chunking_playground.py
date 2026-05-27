@@ -20,8 +20,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-import sys
+import argparse
 import textwrap
+
+from tqdm import tqdm
 
 from kurrent.chunker import chunker_version
 from kurrent.file_utils import is_pdf
@@ -287,12 +289,16 @@ def print_chunks_by_section(chunks) -> None:
         )
 
 
-def section_chunking_loop(pdf_paths: Sequence[Path], store: StateStore) -> None:
-    """Prompt for PDFs, review headings, ingest, and show sectioned chunks."""
+def section_chunking_loop(
+    pdf_paths: Sequence[Path],
+    store: StateStore,
+    use_llm_sectioning: bool = True,
+) -> None:
+    """Prompt for PDFs, ingest, and show sectioned chunks."""
 
     print()
     print("Section chunking playground")
-    print("Choose a PDF number to inspect detected headings and stored chunks.")
+    print("Choose a PDF number to inspect stored section-aware chunks.")
     print("Type list, ls, or pdfs to redisplay the numbered PDF list.")
     print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
     print()
@@ -332,16 +338,60 @@ def section_chunking_loop(pdf_paths: Sequence[Path], store: StateStore) -> None:
 
         print()
         print(f"PDF: {pdf_path}")
-        headings = detect_heading_candidates(pdf_path)
-        reviewed_headings = review_heading_candidates(headings)
+
+        if use_llm_sectioning:
+            print("Using LLM-assisted section recognition.")
+            reviewed_headings = None
+        else:
+            headings = detect_heading_candidates(pdf_path)
+            reviewed_headings = review_heading_candidates(headings)
 
         print()
         print("Ingesting PDF and creating section-aware chunks...")
-        doc_id = ingest_pdf(
-            pdf_path,
-            store,
-            reviewed_headings=reviewed_headings,
-        )
+
+        progress_bar = None
+
+        def start_llm_progress(total: int) -> None:
+            nonlocal progress_bar
+
+            if progress_bar is not None:
+                progress_bar.close()
+                progress_bar = None
+
+            if total <= 0:
+                print("No heading candidates will be sent to Ollama.")
+                return
+
+            progress_bar = tqdm(
+                total=total,
+                desc="Ollama section candidates",
+                unit="candidate",
+            )
+
+        def update_llm_progress(completed: int) -> None:
+            if progress_bar is not None:
+                progress_bar.update(completed)
+
+        try:
+            doc_id = ingest_pdf(
+                pdf_path,
+                store,
+                reviewed_headings=reviewed_headings,
+                use_llm_sectioning=use_llm_sectioning,
+                llm_progress_total_callback=(
+                    start_llm_progress
+                    if use_llm_sectioning
+                    else None
+                ),
+                llm_progress_callback=(
+                    update_llm_progress
+                    if use_llm_sectioning
+                    else None
+                ),
+            )
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
         chunks = store.get_chunks_for_document(
             doc_id=doc_id,
@@ -351,12 +401,36 @@ def section_chunking_loop(pdf_paths: Sequence[Path], store: StateStore) -> None:
         print_chunks_by_section(chunks)
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the playground argument parser."""
+
+    parser = argparse.ArgumentParser(
+        description="Inspect section-aware chunks in temporary kurrent state.",
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=DEFAULT_ROOT_DIR,
+        help="PDF file or directory of PDFs.",
+    )
+    parser.add_argument(
+        "--rules-based-sections",
+        "--no-llm-sections",
+        action="store_true",
+        help=(
+            "use the older rules-based section heading detector instead of "
+            "LLM-assisted section recognition"
+        ),
+    )
+
+    return parser
+
+
 if __name__ == "__main__":
 
-    if len(sys.argv) > 1:
-        root_or_pdf = Path(sys.argv[1])
-    else:
-        root_or_pdf = DEFAULT_ROOT_DIR
+    args = build_parser().parse_args()
+    root_or_pdf = args.path
 
     PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -368,11 +442,23 @@ if __name__ == "__main__":
     try:
         pdf_paths = discover_pdfs(root_or_pdf)
 
-        print(f"PDF source:     {root_or_pdf}")
-        print(f"Database path:  {db_path}")
-        print(f"PDFs found:     {len(pdf_paths)}")
+        print(f"PDF source:      {root_or_pdf}")
+        print(f"Database path:   {db_path}")
+        print(f"PDFs found:      {len(pdf_paths)}")
+        print(
+            "Sectioning mode: "
+            + (
+                "rules-based"
+                if args.rules_based_sections
+                else "LLM-assisted"
+            )
+        )
 
-        section_chunking_loop(pdf_paths, store)
+        section_chunking_loop(
+            pdf_paths,
+            store,
+            use_llm_sectioning=not args.rules_based_sections,
+        )
     finally:
         store.close()
         cleanup_playground_state(db_path)

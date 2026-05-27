@@ -24,10 +24,12 @@
 - [x] Write `ingester.py` functions
 - [ ] Filter out unnecessary code from `llm_backend.py` and focus it
 - [x] Migrate from pypdf to PyMuPdf/fitz
-- [ ] Be sure to enable SQLite foreign keys from Python
+- [x] Be sure to enable SQLite foreign keys from Python
 
 ## Later
 
+- [ ] **KILLER** feature: boldface the parts of the chunks that semantically
+  match
 - [ ] PDF annotation/highlighting
 - [ ] automatic source polling
 - [ ] Zotero write-back/import

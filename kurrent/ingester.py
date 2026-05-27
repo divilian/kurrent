@@ -8,6 +8,7 @@
 
 from pathlib import Path
 import time
+from collections.abc import Callable
 from typing import Sequence
 
 from kurrent.embedder import Embedder
@@ -34,6 +35,9 @@ def ingest_pdf(
     doi_lookup: bool = False,
     crossref_mailto: str | None = None,
     reviewed_headings: Sequence[str] | None = None,
+    use_llm_sectioning: bool = True,
+    llm_progress_total_callback: Callable[[int], None] | None = None,
+    llm_progress_callback: Callable[[int], None] | None = None,
 ) -> str:
     """Ingest a PDF into kurrent and return its kurrent ID.
 
@@ -43,6 +47,12 @@ def ingest_pdf(
     reviewed_headings=list means the caller has supplied a reviewed/accepted
     heading list. An empty list is meaningful: it explicitly says to use no
     section headings.
+
+    use_llm_sectioning controls automatic sectioning only when
+    reviewed_headings is None.
+
+    llm_progress_total_callback and llm_progress_callback are optional hooks
+    used by interactive playgrounds to display Ollama progress.
     """
 
     path = normalize_path(path)
@@ -67,6 +77,9 @@ def ingest_pdf(
         doc.doc_id,
         store,
         reviewed_headings=reviewed_headings,
+        use_llm_sectioning=use_llm_sectioning,
+        llm_progress_total_callback=llm_progress_total_callback,
+        llm_progress_callback=llm_progress_callback,
     )
 
     if embedder is not None:

@@ -13,7 +13,7 @@ from kurrent.chunker import (
     make_word_aware_fixed_size_chunks,
     sha256_text,
 )
-from kurrent.schema import Document, SectionSpan
+from kurrent.schema import Document, SectionLine, SectionSpan
 from kurrent.state_store import StateStore
 from test.factories import make_document
 
@@ -50,7 +50,7 @@ def test_sha256_text_is_deterministic():
 def test_chunker_version_is_section_aware_by_default():
     """Verify that kurrent's canonical chunker is now section-aware."""
 
-    assert chunker_version() == "section-aware-fixed-char-2000-v1"
+    assert chunker_version() == "section-aware-fixed-char-2000-v2"
 
 
 def test_extract_pdf_pages_returns_one_based_page_text(tmp_path):
@@ -191,13 +191,47 @@ def test_make_section_aware_chunks_preserves_section_metadata():
 
     chunk = chunks[0]
 
-    assert chunk.chunker_version == "section-aware-fixed-char-2000-v1"
+    assert chunk.chunker_version == "section-aware-fixed-char-2000-v2"
     assert chunk.section_index == 2
     assert chunk.section_number == "3.1"
     assert chunk.section_title == "LLM Setup"
     assert chunk.page_start == 3
     assert chunk.page_end == 4
 
+
+
+def test_make_section_aware_chunks_uses_line_page_provenance():
+    """Verify chunk page ranges reflect the lines inside each chunk."""
+
+    section = SectionSpan(
+        doc_id="doc-1",
+        section_index=0,
+        section_number=None,
+        section_title=None,
+        page_start=1,
+        page_end=3,
+        text="alpha beta gamma delta epsilon zeta",
+        lines=[
+            SectionLine(page=1, text="alpha beta"),
+            SectionLine(page=2, text="gamma delta"),
+            SectionLine(page=3, text="epsilon zeta"),
+        ],
+    )
+
+    chunks = make_section_aware_fixed_size_chunks(
+        sections=[section],
+        doc_id="doc-1",
+        target_chars=18,
+    )
+
+    assert [chunk.text for chunk in chunks] == [
+        "alpha beta gamma",
+        "delta epsilon zeta",
+    ]
+    assert [(chunk.page_start, chunk.page_end) for chunk in chunks] == [
+        (1, 2),
+        (2, 3),
+    ]
 
 def test_make_section_aware_chunks_does_not_cross_section_boundaries():
     """Verify that section-aware chunks split each section independently."""

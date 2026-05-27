@@ -95,8 +95,24 @@ def test_ingest_targets_accepts_single_pdf(tmp_path):
 def test_ingest_targets_rejects_directory_without_recursive(tmp_path):
     """Verify that directory ingest requires -r/--recursive."""
 
-    with pytest.raises(IsADirectoryError):
+    with pytest.raises(cli.CliUsageError) as excinfo:
         cli.ingest_targets(tmp_path, recursive=False)
+
+    assert "Directory ingest requires -r/--recursive" in str(excinfo.value)
+    assert str(tmp_path) in str(excinfo.value)
+
+
+def test_recursive_ingest_rejects_file(tmp_path):
+    """Verify that recursive ingest requires a directory, not a file."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    with pytest.raises(cli.CliUsageError) as excinfo:
+        cli.ingest_targets(pdf_path, recursive=True)
+
+    assert "Recursive ingest requires a directory" in str(excinfo.value)
+    assert "Got a file instead" in str(excinfo.value)
 
 
 def test_ingest_targets_recursively_finds_pdfs(tmp_path):

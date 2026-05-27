@@ -100,6 +100,19 @@ class Chunk:
 
 
 @dataclass(slots=True)
+class SectionLine:
+    """One normalized extracted-text line with its source page number.
+
+    SectionSpan.text is convenient for display and hashing, but chunking needs
+    this line/page provenance in order to assign accurate page ranges to each
+    chunk within a multi-page section.
+    """
+
+    page: int
+    text: str
+
+
+@dataclass(slots=True)
 class SectionSpan:
     """A detected section of a document before it is chunked.
 
@@ -116,6 +129,7 @@ class SectionSpan:
     page_start: int | None
     page_end: int | None
     text: str
+    lines: list[SectionLine] | None = None
 
 
 @dataclass(slots=True)
