@@ -116,6 +116,7 @@ def ingest_pdfs_recursively(
     verbose: bool | None = True,
     doi_lookup: bool = False,
     crossref_mailto: str | None = None,
+    use_llm_sectioning: bool = True,
 ) -> dict[Path, str]:
     """Recursively ingest all PDF files under root_dir.
 
@@ -125,6 +126,10 @@ def ingest_pdfs_recursively(
     If embedder is provided, each document is also indexed in Chroma.
     This function is intentionally fail-soft: exceptions are reported and the
     batch continues.
+
+    use_llm_sectioning controls the automatic sectioning path used for each
+    PDF. Search-oriented playgrounds can pass False to avoid slow Ollama calls
+    when LLM-quality sections are not the point of the playground.
     """
 
     doc_ids: dict[Path, str] = {}
@@ -148,6 +153,7 @@ def ingest_pdfs_recursively(
                 embedder=embedder,
                 doi_lookup=doi_lookup,
                 crossref_mailto=crossref_mailto,
+                use_llm_sectioning=use_llm_sectioning,
             )
 
             doc_ids[pdf_path] = doc_id

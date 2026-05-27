@@ -32,6 +32,7 @@ from kurrent.state_store import StateStore
 DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_DIR = Path("/tmp/kurrent-search-playground")
 QUIT_COMMANDS = {"q", "done", "quit", "exit"}
+USE_LLM_SECTIONING = False
 
 
 def existing_sqlite_paths(db_path: Path) -> list[Path]:
@@ -492,9 +493,11 @@ if __name__ == "__main__":
         print()
 
         print(f"Ingesting PDFs from {root_dir}...")
+        print("Sectioning mode:      rules-based (LLM disabled)")
         doc_ids = ingest_pdfs_recursively(
             root_dir=root_dir,
             store=store,
+            use_llm_sectioning=USE_LLM_SECTIONING,
         )
 
         print()

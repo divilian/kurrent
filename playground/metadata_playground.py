@@ -389,6 +389,7 @@ def ingest_and_print_document(
             store,
             doi_lookup=doi_lookup,
             crossref_mailto=crossref_mailto,
+            use_llm_sectioning=False,
         )
     except Exception as exc:
         if metadata_mode != "crossref":
@@ -410,6 +411,7 @@ def ingest_and_print_document(
             store,
             doi_lookup=False,
             crossref_mailto=crossref_mailto,
+            use_llm_sectioning=False,
         )
 
     print_metadata_result(metadata, metadata_source=actual_mode)
