@@ -9,11 +9,11 @@ import shutil
 from tqdm import tqdm
 
 from kurrent.file_utils import is_pdf
+from kurrent.terminal import QUIT_COMMANDS
 
 
 DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_BASE_DIR = Path("/tmp/kurrent-playgrounds")
-QUIT_COMMANDS = {"q", "quit", "done", "exit"}
 
 
 class TqdmProgress:

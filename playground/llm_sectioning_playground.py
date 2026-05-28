@@ -291,7 +291,7 @@ def llm_sectioning_loop(
     print("LLM sectioning playground")
     print("Choose a PDF number to inspect.")
     print("Type list, ls, or pdfs to redisplay the numbered PDF list.")
-    print("Type :q, :quit, done, quit, or exit to leave.")
+    print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
     print()
     print_pdf_list(pdf_paths)
 

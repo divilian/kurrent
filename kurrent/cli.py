@@ -22,7 +22,10 @@ The default search mode is semantic chunk search.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
 import math
 import re
@@ -30,12 +33,19 @@ import shutil
 import sys
 import textwrap
 import time
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from tqdm import tqdm
 
+from kurrent.terminal import QUIT_COMMANDS, is_quit_command
 
-QUIT_COMMANDS = {":q", ":quit", "done", "quit", "exit"}
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_MODEL = os.environ.get(
+    "KURRENT_OLLAMA_MODEL",
+    "llama3.1:8b-instruct-q4_K_M",
+)
 
 
 class CliUsageError(Exception):
@@ -92,6 +102,15 @@ class IngestOutcome:
 
     doc_id: str
     already_existed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkExplanation:
+    """Ollama explanation of how a chunk relates to a semantic query."""
+
+    relevant: bool | None
+    explanation: str
+    error: str | None = None
 
 
 def print_metadata(metadata) -> None:
@@ -498,7 +517,7 @@ def ingest_one_pdf(
             flush=True,
         )
     else:
-        print(f"Created new kurrent ID: {outcome.doc_id}", flush=True)
+        print("Created new document.", flush=True)
 
     return outcome
 
@@ -601,7 +620,7 @@ def terminal_width() -> int:
 def visible_len(text: str) -> int:
     """Return display width after ignoring ANSI color codes."""
 
-    return len(ANSI_ESCAPE_RE.sub("", str(text)))
+    return len(ANSI_ESCAPE_RE.sub("", text))
 
 
 def wrapped_lines(
@@ -964,6 +983,225 @@ def semantically_highlighted_text(text: str, query: str, embedder) -> str:
     return apply_semantic_highlights(collapsed, tiers)
 
 
+def ollama_chat_json(
+    messages: list[dict[str, str]],
+    model: str,
+    ollama_url: str,
+    timeout_seconds: float,
+) -> dict:
+    """Call Ollama's chat API and return parsed JSON content."""
+
+    api_url = f"{ollama_url.rstrip('/')}/api/chat"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0},
+    }
+    request = Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with urlopen(request, timeout=timeout_seconds) as response:
+        response_data = json.loads(response.read().decode("utf-8"))
+
+    content = response_data.get("message", {}).get("content", "")
+
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Ollama returned an empty explanation.")
+
+    return json.loads(content)
+
+
+def build_chunk_explanation_prompt(query: str, hit) -> list[dict[str, str]]:
+    """Build a compact Ollama prompt for explaining one semantic hit."""
+
+    source = source_name_for_hit(hit) or "unknown source"
+    section = section_label(hit) or "unknown section"
+    pages = pages_label(hit) or "unknown pages"
+    chunk_text = collapse_whitespace(hit.text)
+
+    system_message = (
+        "You explain why a semantically retrieved academic text chunk may or "
+        "may not relate to a user's search query. Return only JSON. Write "
+        "compact notes, not prose introductions."
+    )
+    user_message = f"""
+User query:
+{query}
+
+Chunk context:
+source: {source}
+section: {section}
+pages: {pages}
+
+Chunk text:
+{chunk_text}
+
+Task:
+Explain how this chunk relates to the user query in a compact note, ideally
+5-25 words. Do not begin with phrases such as "The chunk discusses", "This
+chunk discusses", "The passage discusses", or "Discusses". Prefer direct
+wording like "Links homophily to polarization through repeated like-with-like
+interaction." If the chunk is not actually relevant, only weakly relevant,
+just a table of contents entry, bibliography entry, header/footer, or otherwise
+not substantive, set relevant to false and say why. Otherwise set relevant to
+true.
+
+Return exactly this JSON shape:
+{{
+  "relevant": true,
+  "explanation": "..."
+}}
+""".strip()
+
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message},
+    ]
+
+
+
+def clean_ollama_explanation(text: str) -> str:
+    """Remove repetitive Ollama lead-ins from a relevance explanation."""
+
+    text = collapse_whitespace(text)
+    text = re.sub(
+        r"^(?:the|this)\s+(?:chunk|passage|excerpt|text)\s+"
+        r"(?:discusses|describes|explains|shows|argues|mentions|covers|"
+        r"focuses on|relates to|is about)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^(?:discusses|describes|explains|shows|argues|mentions|covers|"
+        r"focuses on|relates to)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.strip()
+
+    if not text:
+        return text
+
+    return text[0].upper() + text[1:]
+
+def explain_chunk_with_ollama(
+    query: str,
+    hit,
+    model: str,
+    ollama_url: str,
+    timeout_seconds: float,
+) -> ChunkExplanation:
+    """Ask Ollama how a semantic chunk hit relates to the query."""
+
+    try:
+        data = ollama_chat_json(
+            build_chunk_explanation_prompt(query, hit),
+            model=model,
+            ollama_url=ollama_url,
+            timeout_seconds=timeout_seconds,
+        )
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        return ChunkExplanation(
+            relevant=None,
+            explanation="Ollama explanation unavailable.",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    relevant = data.get("relevant")
+    explanation = data.get("explanation")
+
+    if not isinstance(relevant, bool):
+        relevant = None
+
+    if not isinstance(explanation, str) or not explanation.strip():
+        return ChunkExplanation(
+            relevant=relevant,
+            explanation="Ollama returned no usable explanation.",
+            error="Missing explanation field.",
+        )
+
+    return ChunkExplanation(
+        relevant=relevant,
+        explanation=clean_ollama_explanation(explanation),
+    )
+
+
+class SemanticExplanationBuffer:
+    """Background producer for Ollama chunk explanations."""
+
+    def __init__(
+        self,
+        query: str,
+        hits,
+        model: str,
+        ollama_url: str,
+        timeout_seconds: float = 45.0,
+        max_workers: int = 2,
+    ) -> None:
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.futures: dict[str, Future] = {}
+
+        for hit in hits:
+            self.futures[hit.chunk_id] = self.executor.submit(
+                explain_chunk_with_ollama,
+                query,
+                hit,
+                model,
+                ollama_url,
+                timeout_seconds,
+            )
+
+    def get(self, hit, wait_seconds: float = 0.0) -> ChunkExplanation | None:
+        """Return this hit's explanation, waiting briefly if requested."""
+
+        future = self.futures.get(hit.chunk_id)
+
+        if future is None:
+            return None
+
+        try:
+            return future.result(timeout=wait_seconds)
+        except FutureTimeoutError:
+            return None
+
+    def close(self) -> None:
+        """Cancel pending work and let the CLI exit promptly."""
+
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def print_chunk_explanation(
+    explanation: ChunkExplanation | None,
+    waiting_message: str = "still thinking...",
+) -> None:
+    """Print a semantic relevance explanation, if available."""
+
+    if explanation is None:
+        print_field("why", waiting_message)
+        return
+
+    prefix = ""
+
+    if explanation.relevant is False:
+        prefix = "probably not relevant: "
+
+    if not explanation.explanation.endswith("."):
+        explanation.explanation += "."
+
+    print_field("why", prefix + explanation.explanation)
+
+    if explanation.error is not None:
+        print_field("why error", explanation.error)
+
+
 def print_field(label: str, value: object | None) -> None:
     """Print a wrapped label/value line for search results."""
 
@@ -1047,130 +1285,250 @@ def distance_label(hit) -> str | None:
     return f"{hit.distance:.4f}"
 
 
-def document_for_hit(hit, store):
+def highlighted_metadata_value(
+    value: object | None,
+    search_text: str | None,
+) -> object | None:
+    """Return a metadata value with exact query matches bolded for display."""
+
+    if value is None:
+        return None
+
+    return bold_matches(str(value), search_text)
+
+
+def document_for_hit(hit, state_store):
     """Return the parent document for a chunk hit, if available."""
 
+    if state_store is None:
+        return None
+
     try:
-        return store.get_document(hit.doc_id)
+        return state_store.get_document(hit.doc_id)
     except Exception:
         return None
 
 
-def print_document_summary(hit, index: int, total: int) -> None:
-    """Print a document-level search result summary."""
+def print_document_summary(
+    hit,
+    index: int,
+    total: int,
+    search_text: str | None = None,
+) -> None:
+    """Print one document-level result summary."""
+
+    title = highlighted_metadata_value(
+        hit.title or "(untitled)",
+        search_text,
+    )
+    authors = highlighted_metadata_value(
+        hit.authors or "unknown author",
+        search_text,
+    )
+    year = highlighted_metadata_value(
+        hit.year if hit.year is not None else "n.d.",
+        search_text,
+    )
 
     print()
-    print(f"Document {index} of {total}")
     print(separator_line())
-    print_field("Title", hit.title or "(untitled)")
-    print_field("Authors", hit.authors or "unknown author")
-    print_field("Year", hit.year if hit.year is not None else "n.d.")
+    print_wrapped(f"Document {index}/{total}: {title}")
+    print_field("authors", authors)
+    print_field("year", year)
+
+    if hit.score is not None:
+        print_field("score", f"{hit.score:.4f}")
 
 
-def print_document_detail(hit, index: int, total: int) -> None:
-    """Print document-level search result details without internal IDs."""
+def print_document_detail(
+    hit,
+    index: int,
+    total: int,
+    search_text: str | None = None,
+) -> None:
+    """Print one document-level result in detail."""
 
     print()
-    print(f"Document {index} of {total}: details")
+    print_wrapped(f"Details for document {index}/{total}")
     print(separator_line())
-    print_field("Title", hit.title or "(untitled)")
-    print_field("Authors", hit.authors or "unknown author")
-    print_field("Year", hit.year if hit.year is not None else "n.d.")
-    if hit.path is not None:
-        print_field("Source", hit.path.name)
+    print_field(
+        "title",
+        highlighted_metadata_value(hit.title or "(untitled)", search_text),
+    )
+    print_field(
+        "authors",
+        highlighted_metadata_value(hit.authors or "unknown author", search_text),
+    )
+    print_field(
+        "year",
+        highlighted_metadata_value(
+            hit.year if hit.year is not None else "n.d.",
+            search_text,
+        ),
+    )
 
+    if hit.score is not None:
+        print_field("score", f"{hit.score:.4f}")
+
+
+def chunk_excerpt(
+    hit,
+    search_text: str | None,
+    semantic_query: str | None,
+    embedder,
+    max_chars: int,
+) -> str:
+    """Return an appropriately highlighted chunk excerpt."""
+
+    if semantic_query is not None and embedder is not None:
+        return semantically_highlighted_excerpt(
+            hit.text,
+            semantic_query,
+            embedder,
+            max_chars=max_chars,
+        )
+
+    return context_window(hit.text, search_text, width=max_chars)
+
+
+def full_chunk_text(
+    hit,
+    search_text: str | None,
+    semantic_query: str | None,
+    embedder,
+) -> str:
+    """Return full chunk text with the appropriate highlighting."""
+
+    if semantic_query is not None and embedder is not None:
+        return semantically_highlighted_text(hit.text, semantic_query, embedder)
+
+    return collapse_whitespace(hit.text)
+
+
+
+def search_position_label(kind: str, index: int, total: int | None) -> str:
+    """Return a result-position label, omitting total when it is uncertain."""
+
+    if total is None:
+        return f"{kind} {index}"
+
+    return f"{kind} {index}/{total}"
 
 def print_chunk_summary(
     hit,
     index: int,
-    total: int,
-    store,
+    total: int | None,
     search_text: str | None = None,
     semantic_query: str | None = None,
     embedder=None,
     show_distance: bool = False,
+    state_store=None,
+    explanation_buffer: SemanticExplanationBuffer | None = None,
+    explanation: ChunkExplanation | None = None,
 ) -> None:
-    """Print a chunk-level search result summary without internal IDs."""
+    """Print one chunk-level result summary."""
 
-    document = document_for_hit(hit, store)
+    document = document_for_hit(hit, state_store)
+    title = (
+        document.title
+        if document is not None and document.title is not None
+        else hit.title or source_name_for_hit(hit) or "(unknown document)"
+    )
 
     print()
-    print(f"Chunk {index} of {total}{reference_marker(hit)}")
     print(separator_line())
-    print_field("Title", (document.title if document else hit.title) or "(untitled)")
-    print_field("Authors", document.authors if document else None)
-    print_field("Year", document.year if document else None)
-    print_field("Section", section_label(hit))
+    print_wrapped(
+        f"{search_position_label('Chunk', index, total)}{reference_marker(hit)}"
+    )
+    print_field("title", title)
+
+    if document is not None:
+        print_field("authors", document.authors or "unknown author")
+        print_field("year", document.year if document.year is not None else "n.d.")
+
+    section = section_label(hit)
+    if section is not None:
+        print_field("section", section)
 
     if show_distance:
-        print_field("Distance", distance_label(hit))
+        print_field("distance", distance_label(hit))
 
+    if explanation_buffer is not None:
+        print_chunk_explanation(explanation)
+
+    preview = chunk_excerpt(
+        hit,
+        search_text=search_text,
+        semantic_query=semantic_query,
+        embedder=embedder,
+        max_chars=420,
+    )
     print()
-
-    if semantic_query is not None and embedder is not None:
-        text = semantically_highlighted_excerpt(
-            hit.text,
-            semantic_query,
-            embedder,
-            max_chars=520,
-        )
-    else:
-        text = context_window(hit.text, search_text, width=520)
-
-    print_body(text, search_text=search_text)
+    print_body(preview, search_text=search_text)
 
 
 def print_chunk_detail(
     hit,
     index: int,
-    total: int,
+    total: int | None,
     search_text: str | None = None,
     semantic_query: str | None = None,
     embedder=None,
+    show_distance: bool = False,
+    explanation_buffer: SemanticExplanationBuffer | None = None,
 ) -> None:
-    """Print chunk-level search result details without internal IDs."""
+    """Print one chunk-level result in detail."""
 
     print()
-    print(f"Chunk {index} of {total}: details{reference_marker(hit)}")
+    print_wrapped(
+        f"Details for {search_position_label('chunk', index, total)}"
+        f"{reference_marker(hit)}"
+    )
     print(separator_line())
-    print_field("Section", section_label(hit))
-    print_field("Pages", pages_label(hit))
-    print_field("Source", source_name_for_hit(hit))
+
+    section = section_label(hit)
+    if section is not None:
+        print_field("section", section)
+
+    pages = pages_label(hit)
+    if pages is not None:
+        print_field("pages", pages)
+
+    source_name = source_name_for_hit(hit)
+    if source_name is not None:
+        print_field("source", source_name)
+
+    if explanation_buffer is not None:
+        explanation = explanation_buffer.get(hit, wait_seconds=10.0)
+        print_chunk_explanation(
+            explanation,
+            waiting_message="still thinking...",
+        )
+
+    detail_text = full_chunk_text(
+        hit,
+        search_text=search_text,
+        semantic_query=semantic_query,
+        embedder=embedder,
+    )
     print()
-
-    if semantic_query is not None and embedder is not None:
-        text = semantically_highlighted_text(hit.text, semantic_query, embedder)
-        print_body(text)
-    else:
-        text = collapse_whitespace(hit.text)
-        print_body(text, search_text=search_text)
+    print_body(detail_text, search_text=search_text)
 
 
-def prompt_result_action(has_next: bool) -> str:
-    """Prompt for result navigation and return enter/d/q."""
+def prompt_result_action() -> str:
+    """Prompt for the next interactive search-result action."""
 
-    if has_next:
-        prompt = "[Enter] next, d details, q quit > "
-    else:
-        prompt = "[Enter] finish, d details, q quit > "
-
-    while True:
-        try:
-            response = input(prompt).strip().lower()
-        except EOFError:
-            print()
-            return "q"
-
-        if response == "":
-            return "enter"
-
-        if response in {"d", "q"} | QUIT_COMMANDS:
-            return "q" if response in QUIT_COMMANDS else response
-
-        print("Please press Enter, type d for details, or type q to quit.")
+    try:
+        return input("[Enter] next, d details, q quit > ").strip().lower()
+    except EOFError:
+        print()
+        return "q"
 
 
-def page_document_hits(hits) -> None:
+def present_document_hits(
+    hits,
+    search_text: str | None = None,
+) -> None:
     """Present document hits one at a time."""
 
     if not hits:
@@ -1180,27 +1538,42 @@ def page_document_hits(hits) -> None:
     total = len(hits)
 
     for i, hit in enumerate(hits, start=1):
-        print_document_summary(hit, i, total)
-        action = prompt_result_action(has_next=i < total)
+        print_document_summary(
+            hit,
+            i,
+            total,
+            search_text=search_text,
+        )
 
-        if action == "q":
-            return
+        while True:
+            choice = prompt_result_action()
 
-        if action == "d":
-            print_document_detail(hit, i, total)
-            action = prompt_result_action(has_next=i < total)
+            if choice == "":
+                break
 
-            if action == "q":
+            if choice == "d":
+                print_document_detail(
+                    hit,
+                    i,
+                    total,
+                    search_text=search_text,
+                )
+                continue
+
+            if choice == "q" or choice in QUIT_COMMANDS:
                 return
 
+            print("Please press Enter, or type d or q.")
 
-def page_chunk_hits(
+
+def present_chunk_hits(
     hits,
-    store,
     search_text: str | None = None,
     semantic_query: str | None = None,
     embedder=None,
     show_distance: bool = False,
+    state_store=None,
+    explanation_buffer: SemanticExplanationBuffer | None = None,
 ) -> None:
     """Present chunk hits one at a time."""
 
@@ -1208,38 +1581,72 @@ def page_chunk_hits(
         print("No matching chunks.")
         return
 
-    total = len(hits)
+    raw_total = len(hits)
+    total_for_display = None if explanation_buffer is not None else raw_total
+    displayed = 0
+    skipped = 0
 
-    for i, hit in enumerate(hits, start=1):
+    for hit in hits:
+        explanation = None
+
+        if explanation_buffer is not None:
+            explanation = explanation_buffer.get(hit, wait_seconds=8.0)
+
+            if explanation is not None and explanation.relevant is False:
+                skipped += 1
+                continue
+
+        displayed += 1
         print_chunk_summary(
             hit,
-            i,
-            total,
-            store=store,
+            displayed,
+            total_for_display,
             search_text=search_text,
             semantic_query=semantic_query,
             embedder=embedder,
             show_distance=show_distance,
+            state_store=state_store,
+            explanation_buffer=explanation_buffer,
+            explanation=explanation,
         )
-        action = prompt_result_action(has_next=i < total)
 
-        if action == "q":
-            return
+        while True:
+            choice = prompt_result_action()
 
-        if action == "d":
-            print_chunk_detail(
-                hit,
-                i,
-                total,
-                search_text=search_text,
-                semantic_query=semantic_query,
-                embedder=embedder,
-            )
-            action = prompt_result_action(has_next=i < total)
+            if choice == "":
+                break
 
-            if action == "q":
+            if choice == "d":
+                if explanation_buffer is not None:
+                    refreshed = explanation_buffer.get(hit, wait_seconds=20.0)
+
+                    if refreshed is not None and refreshed.relevant is False:
+                        print_wrapped(
+                            "This result was later judged not relevant, "
+                            "so it is being skipped."
+                        )
+                        skipped += 1
+                        break
+
+                print_chunk_detail(
+                    hit,
+                    displayed,
+                    total_for_display,
+                    search_text=search_text,
+                    semantic_query=semantic_query,
+                    embedder=embedder,
+                    show_distance=show_distance,
+                    explanation_buffer=explanation_buffer,
+                )
+                continue
+
+            if choice == "q" or choice in QUIT_COMMANDS:
                 return
 
+            print("Please press Enter, or type d or q.")
+
+    if displayed == 0 and skipped:
+        print("No chunks survived the Ollama relevance review.")
 
 def run_search(args: argparse.Namespace) -> int:
     """Run the kurrent search command."""
@@ -1285,15 +1692,37 @@ def run_search(args: argparse.Namespace) -> int:
                 include_reference_sections=args.include_reference_sections,
             )
 
-            print_wrapped(f"Semantic search: {query!r}")
-            print_wrapped(f"Hits: {len(hits)}")
-            page_chunk_hits(
-                hits,
-                store=store,
-                semantic_query=query,
-                embedder=embedder,
-                show_distance=True,
-            )
+            explanation_buffer = None
+
+            if not args.no_explain:
+                explanation_buffer = SemanticExplanationBuffer(
+                    query=query,
+                    hits=hits,
+                    model=args.ollama_model,
+                    ollama_url=args.ollama_url,
+                    timeout_seconds=args.ollama_timeout,
+                    max_workers=args.ollama_workers,
+                )
+
+            try:
+                print_wrapped(f"Semantic search: {query!r}")
+                print_wrapped(f"Hits: {len(hits)}")
+                if explanation_buffer is not None:
+                    print_wrapped(
+                        "Note: Explanations being generated in the background."
+                    )
+                present_chunk_hits(
+                    hits,
+                    semantic_query=query,
+                    embedder=embedder,
+                    show_distance=True,
+                    state_store=store,
+                    explanation_buffer=explanation_buffer,
+                )
+            finally:
+                if explanation_buffer is not None:
+                    explanation_buffer.close()
+
             return 0
 
         searcher = Searcher(state_store=store)
@@ -1302,20 +1731,19 @@ def run_search(args: argparse.Namespace) -> int:
             hits = searcher.metadata_search(query, limit=args.limit)
             print_wrapped(f"Metadata search: {query!r}")
             print_wrapped(f"Documents: {len(hits)}")
-            page_document_hits(hits)
+            present_document_hits(hits, search_text=query)
             return 0
 
         if args.search_mode == "text":
             hits = searcher.full_text_search(query, limit=args.limit)
             print_wrapped(f"Full-text search: {query!r}")
             print_wrapped(f"Chunks: {len(hits)}")
-            page_chunk_hits(hits, store=store, search_text=query)
+            present_chunk_hits(hits, search_text=query)
             return 0
 
         raise CliUsageError(f"Unknown search mode: {args.search_mode}")
     finally:
         store.close()
-
 
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""
@@ -1604,6 +2032,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-reference-sections",
         action="store_true",
         help="include reference/bibliography chunks in semantic results.",
+    )
+    search_parser.add_argument(
+        "--no-explain",
+        action="store_true",
+        help="disable background Ollama explanations for semantic search hits.",
+    )
+    search_parser.add_argument(
+        "--ollama-model",
+        default=DEFAULT_OLLAMA_MODEL,
+        help=(
+            "Ollama model used for semantic-hit explanations "
+            f"(default: {DEFAULT_OLLAMA_MODEL})."
+        ),
+    )
+    search_parser.add_argument(
+        "--ollama-url",
+        default=DEFAULT_OLLAMA_URL,
+        help=f"Ollama base URL for explanations (default: {DEFAULT_OLLAMA_URL}).",
+    )
+    search_parser.add_argument(
+        "--ollama-timeout",
+        type=float,
+        default=45.0,
+        help="seconds before one Ollama explanation request times out.",
+    )
+    search_parser.add_argument(
+        "--ollama-workers",
+        type=int,
+        default=2,
+        help="number of background Ollama explanation workers (default: 2).",
     )
     search_parser.add_argument(
         "query",
