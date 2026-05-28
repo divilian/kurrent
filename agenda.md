@@ -19,7 +19,7 @@
 - [ ] basic RAG chat over a selected corpus
 - [x] boldface the parts of the chunks that semantically match
 
-## Bugs
+this is now pushed to github repo, along with a couple message wording changes and a parameter tweak. use the github repo version as a basis for future work in this chat.
 
 ## Bugs
 

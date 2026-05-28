@@ -22,62 +22,44 @@ The default search mode is semantic chunk search.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-import json
-import os
 from pathlib import Path
-import math
-import re
-import shutil
 import sys
-import textwrap
 import time
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 from tqdm import tqdm
 
+from kurrent.cli_display import (
+    collapse_whitespace,
+    context_window,
+    distance_label,
+    highlighted_metadata_value,
+    pages_label,
+    print_body,
+    print_field,
+    print_wrapped,
+    reference_marker,
+    section_label,
+    separator_line,
+    source_name_for_hit,
+)
+from kurrent.semantic_explainer import (
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_URL,
+    ChunkExplanation,
+    SemanticExplanationBuffer,
+)
+from kurrent.semantic_highlighter import (
+    semantically_highlighted_excerpt,
+    semantically_highlighted_text,
+)
 from kurrent.terminal import QUIT_COMMANDS, is_quit_command
 
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
-DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_MODEL = os.environ.get(
-    "KURRENT_OLLAMA_MODEL",
-    "llama3.1:8b-instruct-q4_K_M",
-)
 
 
 class CliUsageError(Exception):
     """Raised for friendly CLI usage errors."""
-
-
-def print_wrapped(
-    text: str,
-    indent: str = "",
-    subsequent_indent: str | None = None,
-    width: int | None = None,
-    file=None,
-) -> None:
-    """Print user-facing CLI prose wrapped to the terminal width."""
-
-    if width is None:
-        width = shutil.get_terminal_size(fallback=(79, 20)).columns
-
-    if subsequent_indent is None:
-        subsequent_indent = indent
-
-    print(
-        textwrap.fill(
-            text,
-            width=width,
-            initial_indent=indent,
-            subsequent_indent=subsequent_indent,
-            break_long_words=False,
-            break_on_hyphens=False,
-        ),
-        file=file,
-    )
 
 
 def print_usage_error(message: str) -> None:
@@ -103,14 +85,6 @@ class IngestOutcome:
     doc_id: str
     already_existed: bool
 
-
-@dataclass(frozen=True, slots=True)
-class ChunkExplanation:
-    """Ollama explanation of how a chunk relates to a semantic query."""
-
-    relevant: bool | None
-    explanation: str
-    error: str | None = None
 
 
 def print_metadata(metadata) -> None:
@@ -245,7 +219,7 @@ def review_section_headings(
     while True:
         raw = input("remove headings> ").strip()
 
-        if raw.lower() in QUIT_COMMANDS:
+        if is_quit_command(raw):
             raise KeyboardInterrupt("Ingest cancelled by user.")
 
         if not raw:
@@ -572,612 +546,6 @@ def ingest_targets(path: Path, recursive: bool) -> list[Path]:
     return [path]
 
 
-ANSI_BOLD = "\033[1m"
-ANSI_BOLD_YELLOW = "\033[1;33m"
-ANSI_BOLD_RED = "\033[1;31m"
-ANSI_RESET = "\033[0m"
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-SEMANTIC_HIGHLIGHT_STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
-    "can", "could", "did", "do", "does", "for", "from", "had", "has",
-    "have", "having", "he", "her", "here", "hers", "him", "his", "how",
-    "i", "if", "in", "into", "is", "it", "its", "may", "might", "more",
-    "most", "no", "not", "of", "on", "or", "our", "out", "over", "she",
-    "should", "so", "such", "than", "that", "the", "their", "them", "then",
-    "there", "these", "they", "this", "those", "through", "to", "under",
-    "up", "was", "we", "were", "what", "when", "where", "which", "who",
-    "will", "with", "would", "you", "your",
-}
-
-SEMANTIC_HIGHLIGHT_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9'-]{2,}\b")
-
-
-def ansi_enabled() -> bool:
-    """Return whether ANSI formatting should be used for terminal output."""
-
-    if sys.stdout is None:
-        return False
-
-    if not sys.stdout.isatty():
-        return False
-
-    if "NO_COLOR" in __import__("os").environ:
-        return False
-
-    if __import__("os").environ.get("TERM") == "dumb":
-        return False
-
-    return True
-
-
-def terminal_width() -> int:
-    """Return the current terminal width, with a conservative fallback."""
-
-    return shutil.get_terminal_size(fallback=(79, 20)).columns
-
-
-def visible_len(text: str) -> int:
-    """Return display width after ignoring ANSI color codes."""
-
-    return len(ANSI_ESCAPE_RE.sub("", text))
-
-
-def wrapped_lines(
-    text: str,
-    indent: str = "",
-    subsequent_indent: str | None = None,
-    width: int | None = None,
-) -> list[str]:
-    """Return terminal-width-wrapped lines, counting ANSI escapes as zero."""
-
-    if width is None:
-        width = terminal_width()
-
-    if subsequent_indent is None:
-        subsequent_indent = indent
-
-    output: list[str] = []
-
-    for raw_line in str(text).splitlines() or [""]:
-        words = raw_line.split()
-
-        if not words:
-            output.append(indent.rstrip())
-            continue
-
-        prefix = indent
-        available = max(1, width - visible_len(prefix))
-        current = ""
-        current_len = 0
-
-        for word in words:
-            word_len = visible_len(word)
-
-            if not current:
-                current = word
-                current_len = word_len
-                continue
-
-            if current_len + 1 + word_len <= available:
-                current += " " + word
-                current_len += 1 + word_len
-                continue
-
-            output.append(prefix + current)
-            prefix = subsequent_indent
-            available = max(1, width - visible_len(prefix))
-            current = word
-            current_len = word_len
-
-        if current:
-            output.append(prefix + current)
-
-    return output
-
-
-def print_wrapped(
-    text: str,
-    indent: str = "",
-    subsequent_indent: str | None = None,
-    width: int | None = None,
-    file=None,
-) -> None:
-    """Print user-facing CLI prose wrapped to the terminal width."""
-
-    for line in wrapped_lines(
-        text,
-        indent=indent,
-        subsequent_indent=subsequent_indent,
-        width=width,
-    ):
-        print(line, file=file)
-
-
-def separator_line() -> str:
-    """Return a separator line that fits the current terminal width."""
-
-    return "-" * min(terminal_width(), 79)
-
-
-def collapse_whitespace(text: str) -> str:
-    """Normalize text to a single display-friendly line."""
-
-    return " ".join(text.split())
-
-
-def bold_matches(text: str, search_text: str | None) -> str:
-    """Return text with literal case-insensitive matches bolded."""
-
-    if not ansi_enabled():
-        return text
-
-    if search_text is None:
-        return text
-
-    search_text = search_text.strip()
-
-    if not search_text:
-        return text
-
-    pattern = re.compile(re.escape(search_text), flags=re.IGNORECASE)
-
-    return pattern.sub(
-        lambda match: f"{ANSI_BOLD}{match.group(0)}{ANSI_RESET}",
-        text,
-    )
-
-
-def context_window(
-    text: str,
-    search_text: str | None,
-    width: int = 240,
-) -> str:
-    """Return a display window centered around the first literal match."""
-
-    text = collapse_whitespace(text)
-
-    if len(text) <= width:
-        return text
-
-    if search_text is None:
-        return text[:width].rstrip() + " [...]"
-
-    search_text = search_text.strip()
-
-    if not search_text:
-        return text[:width].rstrip() + " [...]"
-
-    match = re.search(re.escape(search_text), text, flags=re.IGNORECASE)
-
-    if match is None:
-        return text[:width].rstrip() + " [...]"
-
-    match_center = (match.start() + match.end()) // 2
-    start = max(0, match_center - width // 2)
-    end = min(len(text), start + width)
-    start = max(0, end - width)
-
-    window = text[start:end].strip()
-
-    if start > 0:
-        window = "[...] " + window
-
-    if end < len(text):
-        window = window + " [...]"
-
-    return window
-
-
-def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
-    """Return cosine similarity for two embedding vectors."""
-
-    numerator = sum(a * b for a, b in zip(vec_a, vec_b))
-    norm_a = math.sqrt(sum(a * a for a in vec_a))
-    norm_b = math.sqrt(sum(b * b for b in vec_b))
-
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-
-    return numerator / (norm_a * norm_b)
-
-
-def semantic_windows(text: str, words_per_window: int = 70) -> list[str]:
-    """Return overlapping word windows for choosing a semantic excerpt."""
-
-    words = collapse_whitespace(text).split()
-
-    if not words:
-        return []
-
-    if len(words) <= words_per_window:
-        return [" ".join(words)]
-
-    stride = max(1, words_per_window // 2)
-    windows = []
-
-    for start in range(0, len(words), stride):
-        window_words = words[start:start + words_per_window]
-
-        if len(window_words) < 12 and windows:
-            break
-
-        windows.append(" ".join(window_words))
-
-        if start + words_per_window >= len(words):
-            break
-
-    return windows
-
-
-def best_semantic_excerpt(
-    text: str,
-    query: str,
-    embedder,
-    max_chars: int,
-) -> str:
-    """Return the chunk excerpt whose local window best matches the query."""
-
-    collapsed = collapse_whitespace(text)
-
-    if len(collapsed) <= max_chars:
-        return collapsed
-
-    windows = semantic_windows(collapsed)
-
-    if not windows:
-        return context_window(collapsed, None, width=max_chars)
-
-    embeddings = embedder.generate_embeddings([query] + windows)
-    query_embedding = embeddings[0]
-    window_embeddings = embeddings[1:]
-
-    best_index = max(
-        range(len(windows)),
-        key=lambda i: cosine_similarity(query_embedding, window_embeddings[i]),
-    )
-    best_window = windows[best_index]
-    best_start = collapsed.find(best_window)
-
-    if best_start < 0:
-        return context_window(collapsed, None, width=max_chars)
-
-    best_center = best_start + len(best_window) // 2
-    start = max(0, best_center - max_chars // 2)
-    end = min(len(collapsed), start + max_chars)
-    start = max(0, end - max_chars)
-
-    excerpt = collapsed[start:end].strip()
-
-    if start > 0:
-        excerpt = "[...] " + excerpt
-
-    if end < len(collapsed):
-        excerpt = excerpt + " [...]"
-
-    return excerpt
-
-
-def semantic_candidate_words(text: str) -> list[str]:
-    """Return unique content words eligible for semantic highlighting."""
-
-    words: list[str] = []
-    seen: set[str] = set()
-
-    for match in SEMANTIC_HIGHLIGHT_TOKEN_RE.finditer(text):
-        word = match.group(0)
-        key = word.lower().strip("'-")
-
-        if len(key) < 4:
-            continue
-
-        if key in SEMANTIC_HIGHLIGHT_STOPWORDS:
-            continue
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        words.append(word)
-
-    return words
-
-
-def semantic_highlight_tiers(
-    text: str,
-    query: str,
-    embedder,
-) -> dict[str, str]:
-    """Assign candidate words to bold/yellow/red semantic-highlight tiers."""
-
-    candidates = semantic_candidate_words(text)
-
-    if not candidates:
-        return {}
-
-    embeddings = embedder.generate_embeddings([query] + candidates)
-    query_embedding = embeddings[0]
-    candidate_embeddings = embeddings[1:]
-
-    scored = []
-
-    for word, embedding in zip(candidates, candidate_embeddings):
-        score = cosine_similarity(query_embedding, embedding)
-        scored.append((word.lower().strip("'-"), score))
-
-    scored.sort(key=lambda item: item[1], reverse=True)
-
-    if not scored or scored[0][1] < 0.12:
-        return {}
-
-    highlight_count = min(18, max(5, math.ceil(len(scored) * 0.18)))
-    highlighted = scored[:highlight_count]
-
-    red_count = max(1, math.ceil(len(highlighted) * 0.15))
-    yellow_count = max(1, math.ceil(len(highlighted) * 0.30))
-
-    tiers: dict[str, str] = {}
-
-    for i, (word, score) in enumerate(highlighted):
-        if score < 0.12:
-            continue
-
-        if i < red_count:
-            tiers[word] = "red"
-        elif i < red_count + yellow_count:
-            tiers[word] = "yellow"
-        else:
-            tiers[word] = "bold"
-
-    return tiers
-
-
-def apply_semantic_highlights(text: str, tiers: dict[str, str]) -> str:
-    """Apply semantic-highlight tiers to matching words in display text."""
-
-    if not ansi_enabled() or not tiers:
-        return text
-
-    def replace(match: re.Match) -> str:
-        word = match.group(0)
-        key = word.lower().strip("'-")
-        tier = tiers.get(key)
-
-        if tier == "red":
-            return f"{ANSI_BOLD_RED}{word}{ANSI_RESET}"
-
-        if tier == "yellow":
-            return f"{ANSI_BOLD_YELLOW}{word}{ANSI_RESET}"
-
-        if tier == "bold":
-            return f"{ANSI_BOLD}{word}{ANSI_RESET}"
-
-        return word
-
-    return SEMANTIC_HIGHLIGHT_TOKEN_RE.sub(replace, text)
-
-
-def semantically_highlighted_excerpt(
-    text: str,
-    query: str,
-    embedder,
-    max_chars: int,
-) -> str:
-    """Return a semantic excerpt with three-tier semantic word highlighting."""
-
-    excerpt = best_semantic_excerpt(
-        text,
-        query,
-        embedder,
-        max_chars=max_chars,
-    )
-    tiers = semantic_highlight_tiers(excerpt, query, embedder)
-    return apply_semantic_highlights(excerpt, tiers)
-
-
-def semantically_highlighted_text(text: str, query: str, embedder) -> str:
-    """Return full text with semantic word highlighting applied."""
-
-    collapsed = collapse_whitespace(text)
-    tiers = semantic_highlight_tiers(collapsed, query, embedder)
-    return apply_semantic_highlights(collapsed, tiers)
-
-
-def ollama_chat_json(
-    messages: list[dict[str, str]],
-    model: str,
-    ollama_url: str,
-    timeout_seconds: float,
-) -> dict:
-    """Call Ollama's chat API and return parsed JSON content."""
-
-    api_url = f"{ollama_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0},
-    }
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    with urlopen(request, timeout=timeout_seconds) as response:
-        response_data = json.loads(response.read().decode("utf-8"))
-
-    content = response_data.get("message", {}).get("content", "")
-
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("Ollama returned an empty explanation.")
-
-    return json.loads(content)
-
-
-def build_chunk_explanation_prompt(query: str, hit) -> list[dict[str, str]]:
-    """Build a compact Ollama prompt for explaining one semantic hit."""
-
-    source = source_name_for_hit(hit) or "unknown source"
-    section = section_label(hit) or "unknown section"
-    pages = pages_label(hit) or "unknown pages"
-    chunk_text = collapse_whitespace(hit.text)
-
-    system_message = (
-        "You explain why a semantically retrieved academic text chunk may or "
-        "may not relate to a user's search query. Return only JSON. Write "
-        "compact notes, not prose introductions."
-    )
-    user_message = f"""
-User query:
-{query}
-
-Chunk context:
-source: {source}
-section: {section}
-pages: {pages}
-
-Chunk text:
-{chunk_text}
-
-Task:
-Explain how this chunk relates to the user query in a compact note, ideally
-5-25 words. Do not begin with phrases such as "The chunk discusses", "This
-chunk discusses", "The passage discusses", or "Discusses". Prefer direct
-wording like "Links homophily to polarization through repeated like-with-like
-interaction." If the chunk is not actually relevant, only weakly relevant,
-just a table of contents entry, bibliography entry, header/footer, or otherwise
-not substantive, set relevant to false and say why. Otherwise set relevant to
-true.
-
-Return exactly this JSON shape:
-{{
-  "relevant": true,
-  "explanation": "..."
-}}
-""".strip()
-
-    return [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": user_message},
-    ]
-
-
-
-def clean_ollama_explanation(text: str) -> str:
-    """Remove repetitive Ollama lead-ins from a relevance explanation."""
-
-    text = collapse_whitespace(text)
-    text = re.sub(
-        r"^(?:the|this)\s+(?:chunk|passage|excerpt|text)\s+"
-        r"(?:discusses|describes|explains|shows|argues|mentions|covers|"
-        r"focuses on|relates to|is about)\s+",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"^(?:discusses|describes|explains|shows|argues|mentions|covers|"
-        r"focuses on|relates to)\s+",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = text.strip()
-
-    if not text:
-        return text
-
-    return text[0].upper() + text[1:]
-
-def explain_chunk_with_ollama(
-    query: str,
-    hit,
-    model: str,
-    ollama_url: str,
-    timeout_seconds: float,
-) -> ChunkExplanation:
-    """Ask Ollama how a semantic chunk hit relates to the query."""
-
-    try:
-        data = ollama_chat_json(
-            build_chunk_explanation_prompt(query, hit),
-            model=model,
-            ollama_url=ollama_url,
-            timeout_seconds=timeout_seconds,
-        )
-    except (OSError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-        return ChunkExplanation(
-            relevant=None,
-            explanation="Ollama explanation unavailable.",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
-    relevant = data.get("relevant")
-    explanation = data.get("explanation")
-
-    if not isinstance(relevant, bool):
-        relevant = None
-
-    if not isinstance(explanation, str) or not explanation.strip():
-        return ChunkExplanation(
-            relevant=relevant,
-            explanation="Ollama returned no usable explanation.",
-            error="Missing explanation field.",
-        )
-
-    return ChunkExplanation(
-        relevant=relevant,
-        explanation=clean_ollama_explanation(explanation),
-    )
-
-
-class SemanticExplanationBuffer:
-    """Background producer for Ollama chunk explanations."""
-
-    def __init__(
-        self,
-        query: str,
-        hits,
-        model: str,
-        ollama_url: str,
-        timeout_seconds: float = 45.0,
-        max_workers: int = 2,
-    ) -> None:
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.futures: dict[str, Future] = {}
-
-        for hit in hits:
-            self.futures[hit.chunk_id] = self.executor.submit(
-                explain_chunk_with_ollama,
-                query,
-                hit,
-                model,
-                ollama_url,
-                timeout_seconds,
-            )
-
-    def get(self, hit, wait_seconds: float = 0.0) -> ChunkExplanation | None:
-        """Return this hit's explanation, waiting briefly if requested."""
-
-        future = self.futures.get(hit.chunk_id)
-
-        if future is None:
-            return None
-
-        try:
-            return future.result(timeout=wait_seconds)
-        except FutureTimeoutError:
-            return None
-
-    def close(self) -> None:
-        """Cancel pending work and let the CLI exit promptly."""
-
-        self.executor.shutdown(wait=False, cancel_futures=True)
-
-
 def print_chunk_explanation(
     explanation: ChunkExplanation | None,
     waiting_message: str = "still thinking...",
@@ -1193,108 +561,10 @@ def print_chunk_explanation(
     if explanation.relevant is False:
         prefix = "probably not relevant: "
 
-    if not explanation.explanation.endswith("."):
-        explanation.explanation += "."
-
     print_field("why", prefix + explanation.explanation)
 
     if explanation.error is not None:
         print_field("why error", explanation.error)
-
-
-def print_field(label: str, value: object | None) -> None:
-    """Print a wrapped label/value line for search results."""
-
-    if value is None:
-        return
-
-    label_text = f"{label}:"
-    indent = "  "
-    subsequent = " " * (len(indent) + len(label_text) + 1)
-    print_wrapped(
-        f"{label_text} {value}",
-        indent=indent,
-        subsequent_indent=subsequent,
-    )
-
-
-def print_body(text: str, search_text: str | None = None) -> None:
-    """Print wrapped body text for a result preview or detail view."""
-
-    if search_text is not None:
-        text = bold_matches(text, search_text)
-
-    print_wrapped(text, indent="  ", subsequent_indent="  ")
-
-
-def section_label(hit) -> str | None:
-    """Return a compact section label for a chunk hit, if available."""
-
-    pieces = []
-
-    if hit.section_number is not None:
-        pieces.append(str(hit.section_number))
-
-    if hit.section_title is not None:
-        pieces.append(hit.section_title)
-
-    if not pieces:
-        return None
-
-    return " ".join(pieces)
-
-
-def reference_marker(hit) -> str:
-    """Return a visible marker for reference-section hits."""
-
-    from kurrent.sectioner import is_reference_section_chunk
-
-    if is_reference_section_chunk(hit):
-        return " [REFERENCE SECTION]"
-
-    return ""
-
-
-def source_name_for_hit(hit) -> str | None:
-    """Return a display-friendly source filename without exposing full paths."""
-
-    if hit.path is None:
-        return None
-
-    return hit.path.name
-
-
-def pages_label(hit) -> str | None:
-    """Return a compact page-range label, if page data is available."""
-
-    if hit.page_start is None and hit.page_end is None:
-        return None
-
-    if hit.page_start == hit.page_end:
-        return f"p. {hit.page_start}"
-
-    return f"pp. {hit.page_start}–{hit.page_end}"
-
-
-def distance_label(hit) -> str | None:
-    """Return a formatted semantic distance, if present."""
-
-    if hit.distance is None:
-        return None
-
-    return f"{hit.distance:.4f}"
-
-
-def highlighted_metadata_value(
-    value: object | None,
-    search_text: str | None,
-) -> object | None:
-    """Return a metadata value with exact query matches bolded for display."""
-
-    if value is None:
-        return None
-
-    return bold_matches(str(value), search_text)
 
 
 def document_for_hit(hit, state_store):
@@ -1499,7 +769,7 @@ def print_chunk_detail(
         print_field("source", source_name)
 
     if explanation_buffer is not None:
-        explanation = explanation_buffer.get(hit, wait_seconds=10.0)
+        explanation = explanation_buffer.get(hit, wait_seconds=20.0)
         print_chunk_explanation(
             explanation,
             waiting_message="still thinking...",
@@ -1560,7 +830,7 @@ def present_document_hits(
                 )
                 continue
 
-            if choice == "q" or choice in QUIT_COMMANDS:
+            if is_quit_command(choice):
                 return
 
             print("Please press Enter, or type d or q.")
@@ -1640,7 +910,7 @@ def present_chunk_hits(
                 )
                 continue
 
-            if choice == "q" or choice in QUIT_COMMANDS:
+            if is_quit_command(choice):
                 return
 
             print("Please press Enter, or type d or q.")
@@ -1709,7 +979,8 @@ def run_search(args: argparse.Namespace) -> int:
                 print_wrapped(f"Hits: {len(hits)}")
                 if explanation_buffer is not None:
                     print_wrapped(
-                        "Note: Explanations being generated in the background."
+                        "Explanations are being generated in the background. "
+                        "Chunks judged not relevant will be skipped."
                     )
                 present_chunk_hits(
                     hits,
