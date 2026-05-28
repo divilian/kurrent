@@ -10,14 +10,15 @@ Terminology:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Sequence
 
-from kurrent.embedder import Embedder
 from kurrent.schema import ChunkHit, DocumentHit
 from kurrent.state_store import StateStore
 from kurrent.sectioner import is_reference_section_chunk
+
+if TYPE_CHECKING:
+    from kurrent.embedder import Embedder
 
 
 class Searcher:
@@ -26,7 +27,7 @@ class Searcher:
     def __init__(
         self,
         state_store: StateStore,
-        embedder: Embedder,
+        embedder: Embedder | None = None,
     ) -> None:
         self.state_store = state_store
         self.embedder = embedder
@@ -45,6 +46,9 @@ class Searcher:
         because they often create high-vocabulary false positives. Pass
         include_reference_sections=True to include them.
         """
+        if self.embedder is None:
+            raise ValueError("Semantic search requires an Embedder.")
+
         vector_matches = self.embedder.query_chunks(
             search_text,
             n_results=n_results,
@@ -162,23 +166,46 @@ class Searcher:
 
     def metadata_search(
         self,
-        title: str | None = None,
-        author: str | None = None,
-        year: int | None = None,
-        path_contains: str | None = None,
+        search_text: str,
         limit: int = 50,
     ) -> list[DocumentHit]:
-        """Find documents using hard-edged metadata constraints."""
-        ...
+        """Find documents whose metadata contains the search text.
+
+        Metadata search checks title, authors, year, DOI, and PDF path. It is
+        intentionally a hard-edged SQLite search rather than a semantic search.
+        """
+        documents = self.state_store.search_documents_by_metadata(
+            search_text,
+            limit=limit,
+        )
+
+        return [
+            DocumentHit(
+                doc_id=document.doc_id,
+                path=document.pdf_path,
+                title=document.title,
+                authors=document.authors,
+                year=document.year,
+                score=None,
+                best_chunk_id=None,
+            )
+            for document in documents
+        ]
 
     def full_text_search(
         self,
         search_text: str,
-        *,
         limit: int = 50,
-    ) -> list[SemanticChunkHit]:
-        """Find chunks/documents using lexical or exact-ish text matching."""
-        ...
+    ) -> list[ChunkHit]:
+        """Find chunks whose stored text contains the search text.
+
+        This is lexical/substring search over chunk text, backed by SQLite LIKE
+        in StateStore. It does not use embeddings.
+        """
+        return self.state_store.search_chunks_by_fulltext(
+            search_text,
+            limit=limit,
+        )
 
 
 
@@ -207,7 +234,6 @@ def make_smoke_searcher() -> dict:
         shutil.rmtree(smoke_dir)
 
     smoke_dir.mkdir(parents=True, exist_ok=True)
-
     store = StateStore(db_path)
 
     doc_id = ingest_pdf(pdf_path, store)
@@ -240,6 +266,7 @@ def make_smoke_searcher() -> dict:
         "pdf_path": pdf_path,
     }
 
+
 def print_smoke_summary(ns: dict) -> None:
     """Print a readable summary of the smoke-test objects."""
 
@@ -261,6 +288,7 @@ def print_smoke_summary(ns: dict) -> None:
     print(f"Hits returned:   {len(hits)}")
     print()
 
+
 if __name__ == "__main__":
 
     # Smoke test / IPython playground.
@@ -275,7 +303,6 @@ if __name__ == "__main__":
     #     hits
     #     searcher.semantic_chunk_search("grading policy")
 
-    from pathlib import Path
     from pprint import pprint
 
     from kurrent.embedder import Embedder
