@@ -21,6 +21,8 @@
 
 ## Bugs
 
+## Bugs
+
 ## Leftover stuff
 
 - [x] Write `corpus_store.py` functions
