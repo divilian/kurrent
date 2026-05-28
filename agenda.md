@@ -13,10 +13,13 @@
 - [ ] document summaries via Ollama
 - [x] proximity alert detection
 - [ ] user confirmation/rejection of alerts
-- [ ] basic search - metadata (wire in to cli.py)
-- [ ] basic search - full text (simple LIKE-based) (wire in to cli.py)
-- [ ] semantic search (wire in to cli.py)
+- [x] basic search - metadata (wire in to cli.py)
+- [x] basic search - full text (simple LIKE-based) (wire in to cli.py)
+- [x] semantic search (wire in to cli.py)
 - [ ] basic RAG chat over a selected corpus
+- [x] boldface the parts of the chunks that semantically match
+
+## Bugs
 
 ## Leftover stuff
 
@@ -28,8 +31,6 @@
 
 ## Later
 
-- [ ] **KILLER** feature: boldface the parts of the chunks that semantically
-  match
 - [ ] PDF annotation/highlighting
 - [ ] automatic source polling
 - [ ] Zotero write-back/import
