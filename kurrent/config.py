@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 KURRENT_DB_FILENAME = "kurrent.db"
 KURRENT_CHROMA_DIRNAME = "chroma"
+KURRENT_PDFS_DIRNAME = "pdfs"
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 
 
@@ -21,6 +22,7 @@ class KurrentStatePaths:
     state_dir: Path
     sqlite_path: Path
     chroma_path: Path
+    pdfs_path: Path
 
 
 def get_crossref_mailto() -> str | None:
@@ -53,7 +55,7 @@ def get_default_kurrent_state_dir() -> Path:
 def get_kurrent_state_paths(
     state_dir: str | Path | None = None,
 ) -> KurrentStatePaths:
-    """Return SQLite and Chroma paths for a kurrent state directory."""
+    """Return SQLite, Chroma, and managed-PDF paths for a state directory."""
 
     if state_dir is None:
         resolved_state_dir = get_default_kurrent_state_dir()
@@ -64,4 +66,5 @@ def get_kurrent_state_paths(
         state_dir=resolved_state_dir,
         sqlite_path=resolved_state_dir / KURRENT_DB_FILENAME,
         chroma_path=resolved_state_dir / KURRENT_CHROMA_DIRNAME,
+        pdfs_path=resolved_state_dir / KURRENT_PDFS_DIRNAME,
     )

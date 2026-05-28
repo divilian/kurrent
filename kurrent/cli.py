@@ -3,6 +3,7 @@
 Currently supported:
 
     kurrent ingest file.pdf
+    kurrent ingest --in-place file.pdf
     kurrent ingest --local-metadata file.pdf
     kurrent ingest -r directoryOfPdfs
     kurrent ingest -y -r directoryOfPdfs
@@ -13,6 +14,9 @@ Currently supported:
 
 The default metadata mode is Crossref-enhanced metadata lookup. Use
 --local-metadata to avoid network lookups.
+
+The default ingest storage mode copies PDFs into the kurrent state directory's
+pdfs/ directory. Use --in-place to leave source PDFs where they are.
 
 The -y/--yes flag skips interactive metadata and heading review.
 
@@ -84,6 +88,15 @@ class IngestOutcome:
 
     doc_id: str
     already_existed: bool
+
+
+@dataclass(slots=True)
+class ExistingDocumentStatus:
+    """State for a PDF whose content hash already exists in kurrent."""
+
+    pdf_sha256: str
+    document: object
+    has_current_chunks: bool
 
 
 
@@ -288,15 +301,11 @@ def metadata_update_kwargs(metadata) -> dict:
     }
 
 
-def already_ingested_outcome_if_complete(
+def existing_document_status(
     pdf_path: Path,
     store,
-) -> IngestOutcome | None:
-    """Return an existing ingest outcome if current chunks already exist.
-
-    A document row alone is not enough to skip work, because a previous ingest
-    may have failed after document registration but before chunk insertion.
-    """
+) -> ExistingDocumentStatus | None:
+    """Return existing-document status for this PDF content, if any."""
 
     from kurrent.chunker import chunker_version
     from kurrent.file_utils import sha256_file
@@ -312,12 +321,46 @@ def already_ingested_outcome_if_complete(
         chunker_version=chunker_version(),
     )
 
-    if not existing_chunks:
-        return None
+    return ExistingDocumentStatus(
+        pdf_sha256=pdf_sha256,
+        document=existing,
+        has_current_chunks=bool(existing_chunks),
+    )
 
-    return IngestOutcome(
-        doc_id=existing.doc_id,
-        already_existed=True,
+
+def print_already_ingested_message(
+    source_pdf_path: Path,
+    existing_document,
+) -> None:
+    """Explain that a PDF was skipped because its content already exists."""
+
+    print()
+    print(f"Already ingested: {source_pdf_path}", flush=True)
+
+    title = existing_document.title or "(untitled)"
+    print_wrapped(
+        "This file has the same contents as an existing kurrent document:",
+    )
+    print_field("title", title)
+    print_field("stored PDF", existing_document.pdf_path)
+    print_wrapped("Skipping metadata, chunking, and embedding.")
+
+
+def print_existing_document_needs_current_chunks_message(
+    source_pdf_path: Path,
+    existing_document,
+) -> None:
+    """Explain that an existing document needs current-version chunks."""
+
+    print()
+    print(f"Existing document: {source_pdf_path}", flush=True)
+    print_wrapped(
+        "Found existing document record for this PDF, but it has not been "
+        "chunked with the current chunker version.",
+    )
+    print_field("stored PDF", existing_document.pdf_path)
+    print_wrapped(
+        "Completing ingest using the existing document record.",
     )
 
 
@@ -329,6 +372,8 @@ def ingest_pdf_with_metadata(
     metadata_was_reviewed: bool,
     reviewed_headings: list[str] | None,
     use_llm_sectioning: bool,
+    storage_mode: str,
+    managed_pdf_dir: Path | None,
     llm_progress_total_callback=None,
     llm_progress_callback=None,
 ) -> IngestOutcome:
@@ -339,7 +384,8 @@ def ingest_pdf_with_metadata(
     a list means the CLI has supplied reviewed/accepted headings.
 
     use_llm_sectioning controls the automatic path when reviewed_headings is
-    None.
+    None. storage_mode controls whether a new PDF is copied into kurrent's
+    managed PDF directory or left in place.
     """
 
     from kurrent.chunker import chunk_document
@@ -356,9 +402,24 @@ def ingest_pdf_with_metadata(
     already_existed = existing is not None
 
     if existing is None:
+        stored_pdf_path = pdf_path
+
+        if storage_mode == "managed":
+            if managed_pdf_dir is None:
+                raise ValueError("Managed ingest requires a managed PDF directory.")
+
+            from kurrent.pdf_store import copy_pdf_to_managed_store
+
+            stored_pdf_path = copy_pdf_to_managed_store(
+                source_path=pdf_path,
+                pdfs_dir=managed_pdf_dir,
+                pdf_sha256=pdf_sha256,
+            )
+
         document = Document.for_pdf(
-            pdf_path=pdf_path,
+            pdf_path=stored_pdf_path,
             pdf_sha256=pdf_sha256,
+            storage_mode=storage_mode,
             metadata=metadata,
         )
         store.insert_document(document)
@@ -396,6 +457,8 @@ def ingest_one_pdf(
     crossref_mailto: str | None,
     assume_yes: bool,
     use_llm_sectioning: bool,
+    storage_mode: str,
+    managed_pdf_dir: Path | None,
 ) -> IngestOutcome:
     """Ingest one PDF through the CLI workflow."""
 
@@ -404,12 +467,23 @@ def ingest_one_pdf(
 
     pdf_path = normalize_path(pdf_path)
 
-    existing_outcome = already_ingested_outcome_if_complete(pdf_path, store)
+    existing_status = existing_document_status(pdf_path, store)
 
-    if existing_outcome is not None:
-        print()
-        print(f"({pdf_path.name} already ingested.)", flush=True)
-        return existing_outcome
+    if existing_status is not None and existing_status.has_current_chunks:
+        print_already_ingested_message(
+            source_pdf_path=pdf_path,
+            existing_document=existing_status.document,
+        )
+        return IngestOutcome(
+            doc_id=existing_status.document.doc_id,
+            already_existed=True,
+        )
+
+    if existing_status is not None:
+        print_existing_document_needs_current_chunks_message(
+            source_pdf_path=pdf_path,
+            existing_document=existing_status.document,
+        )
 
     print()
     print(f"PDF: {pdf_path}", flush=True)
@@ -468,6 +542,8 @@ def ingest_one_pdf(
             metadata_was_reviewed=metadata_was_reviewed,
             reviewed_headings=reviewed_headings,
             use_llm_sectioning=use_llm_sectioning,
+            storage_mode=storage_mode,
+            managed_pdf_dir=managed_pdf_dir,
             llm_progress_total_callback=(
                 start_llm_progress
                 if use_llm_sectioning and reviewed_headings is None
@@ -486,10 +562,7 @@ def ingest_one_pdf(
     print()
 
     if outcome.already_existed:
-        print(
-            f"({pdf_path.name} already ingested.)",
-            flush=True,
-        )
+        print("Updated existing document with current chunks.", flush=True)
     else:
         print("Created new document.", flush=True)
 
@@ -1024,6 +1097,7 @@ def run_ingest(args: argparse.Namespace) -> int:
     from kurrent.config import get_crossref_mailto, get_kurrent_state_paths
 
     state_paths = get_kurrent_state_paths(args.state_dir)
+    storage_mode = "external" if args.in_place else "managed"
 
     if state_paths.state_dir.exists():
         print(f"kurrent state directory: {state_paths.state_dir}", flush=True)
@@ -1071,6 +1145,20 @@ def run_ingest(args: argparse.Namespace) -> int:
             flush=True,
         )
 
+    if storage_mode == "managed":
+        if state_paths.pdfs_path.exists():
+            print(f"Managed PDF directory:  {state_paths.pdfs_path}", flush=True)
+        else:
+            print(
+                "Managed PDF directory does not exist; it will be created: "
+                f"{state_paths.pdfs_path}",
+                flush=True,
+            )
+
+    print(
+        "PDF storage mode:        "
+        + ("managed" if storage_mode == "managed" else "in-place"),
+    )
     print(f"Metadata mode:           {args.metadata_mode}", flush=True)
     print(
         "Sectioning mode:         "
@@ -1079,7 +1167,6 @@ def run_ingest(args: argparse.Namespace) -> int:
             if args.rules_based_sections
             else "LLM-assisted"
         ),
-        flush=True,
     )
 
     if doi_lookup and crossref_mailto is None:
@@ -1119,6 +1206,12 @@ def run_ingest(args: argparse.Namespace) -> int:
                     crossref_mailto=crossref_mailto,
                     assume_yes=args.assume_yes,
                     use_llm_sectioning=not args.rules_based_sections,
+                    storage_mode=storage_mode,
+                    managed_pdf_dir=(
+                        state_paths.pdfs_path
+                        if storage_mode == "managed"
+                        else None
+                    ),
                 )
                 results.append(
                     IngestResult(
@@ -1226,6 +1319,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="assume_yes",
         action="store_true",
         help="accept extracted metadata and section headings without prompts.",
+    )
+    ingest_parser.add_argument(
+        "--in-place",
+        "--external",
+        action="store_true",
+        dest="in_place",
+        help=(
+            "leave PDFs in their original locations instead of copying them "
+            "into kurrent's managed pdfs directory."
+        ),
     )
     ingest_parser.add_argument(
         "--rules-based-sections",
