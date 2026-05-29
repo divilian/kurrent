@@ -101,7 +101,8 @@ class Chunk:
 
 @dataclass(slots=True)
 class SectionLine:
-    """One normalized extracted-text line with its source page number.
+    """One visual line of text on the formatted page, with its source page
+    number.
 
     SectionSpan.text is convenient for display and hashing, but chunking needs
     this line/page provenance in order to assign accurate page ranges to each
