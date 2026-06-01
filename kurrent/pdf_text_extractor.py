@@ -11,7 +11,7 @@ notices.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
 
@@ -20,6 +20,15 @@ import pymupdf
 from kurrent.file_utils import normalize_path, silence_mupdf_messages
 from kurrent.schema import SectionLine
 
+# Public-facing definitions.
+__all__ = [
+    "PageExtraction",
+    "TextLine",
+    "WordBox",
+    "extract_pdf_lines",
+    "extract_pdf_pages",
+    "extract_page_from_words",
+]
 
 @dataclass(frozen=True, slots=True)
 class WordBox:
@@ -119,6 +128,9 @@ BOILERPLATE_LINE_PATTERNS = [
     r"^Fu et al\. Page \d+$",
     r"^[*†‡].*@",
     r"^\d{4}-\d{4}/\d{4}/",
+    r"^Copyright is held by the author/owner\(s\)\.$",
+    r"^GECCO[’']\d{2},\s+.*",
+    r"^ACM\s+\d+(?:-\d+)+/\d+/\d+\.$",
     r"^Copyright © \d{4}, Association for the Advancement of Artificial$",
     r"^Intelligence \(www\.aaai\.org\)\. All rights reserved\.$",
     r"^©\s*\d{4}\b",
@@ -131,6 +143,27 @@ BOILERPLATE_LINE_RE = re.compile(
 )
 
 
+
+
+
+LIGATURE_REPLACEMENTS = {
+    "ﬀ": "ff",
+    "ﬁ": "fi",
+    "ﬂ": "fl",
+    "ﬃ": "ffi",
+    "ﬄ": "ffl",
+    "ﬅ": "st",
+    "ﬆ": "st",
+}
+
+
+def replace_ligatures(text: str) -> str:
+    """Replace common typographic ligatures with plain-letter sequences."""
+
+    for ligature, replacement in LIGATURE_REPLACEMENTS.items():
+        text = text.replace(ligature, replacement)
+
+    return text
 
 def repair_pdf_control_glyphs(text: str) -> str:
     """Repair common PDF control-glyph punctuation from custom encodings.
@@ -152,6 +185,7 @@ def normalize_extracted_text(text: str) -> str:
     """Normalize one extracted text fragment for display/chunking."""
 
     text = repair_pdf_control_glyphs(text)
+    text = replace_ligatures(text)
     text = text.replace("\u00a0", " ")
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\(\s+", "(", text)
@@ -268,6 +302,28 @@ def median(values: Sequence[float], fallback: float) -> float:
         return sorted_values[middle]
 
     return (sorted_values[middle - 1] + sorted_values[middle]) / 2
+
+
+def percentile(values: Sequence[float], q: float, fallback: float) -> float:
+    """Return an interpolated percentile for values, or fallback if empty."""
+
+    if not values:
+        return fallback
+
+    sorted_values = sorted(values)
+
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+
+    position = (len(sorted_values) - 1) * q
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(sorted_values) - 1)
+    fraction = position - lower_index
+
+    return (
+        sorted_values[lower_index] * (1 - fraction)
+        + sorted_values[upper_index] * fraction
+    )
 
 
 def is_likely_margin_artifact(
@@ -412,6 +468,114 @@ def group_words_into_visual_rows(
 
     return group_words_by_y_position(words, y_tolerance=y_tolerance)
 
+def line_box_groups_from_words(words: Sequence[WordBox]) -> list[list[WordBox]]:
+    """Return source-line groups suitable for page-level layout detection."""
+
+    if not words:
+        return []
+
+    if all_words_have_source_line_ids(words):
+        return group_words_by_source_lines(words)
+
+    return group_words_by_y_position(words)
+
+
+def find_column_gutter_from_line_boxes(
+    words: Sequence[WordBox],
+    page_width: float,
+    page_height: float,
+) -> float | None:
+    """Detect a column boundary from reconstructed source-line boxes.
+
+    Row-gap detection is brittle on first pages and figure-heavy pages: author
+    blocks, captions, or figures can produce large whitespace gaps that are not
+    the true inter-column gutter. Source-line geometry is usually more stable:
+    ordinary two-column scholarly pages contain many lines whose left edges
+    cluster near the left margin and many lines whose left edges cluster near
+    the right column.
+    """
+
+    line_groups = line_box_groups_from_words(words)
+    candidates: list[tuple[float, float, float, float, str]] = []
+
+    for group in line_groups:
+        if not group:
+            continue
+
+        x0 = min(word.x0 for word in group)
+        y0 = min(word.y0 for word in group)
+        x1 = max(word.x1 for word in group)
+        y1 = max(word.y1 for word in group)
+        width = x1 - x0
+        text = text_from_words(group)
+
+        if not text:
+            continue
+
+        # Ignore extreme margins and very wide title/front-matter lines. Those
+        # can start at the left margin while spanning both columns, which would
+        # blur the left-column right edge.
+        if y1 < page_height * 0.08 or y0 > page_height * 0.94:
+            continue
+
+        if width > page_width * 0.62:
+            continue
+
+        candidates.append((x0, y0, x1, y1, text))
+
+    if len(candidates) < 12:
+        return None
+
+    left_lines = [
+        item
+        for item in candidates
+        if item[0] < page_width * 0.32
+    ]
+    right_lines = [
+        item
+        for item in candidates
+        if item[0] > page_width * 0.45
+    ]
+
+    if len(left_lines) < 4 or len(right_lines) < 4:
+        return None
+
+    # Use reasonably long left-column lines to estimate the true right edge of
+    # the left column. Short headings or one-word final lines should not pull
+    # the edge far left.
+    long_left_edges = [
+        x1
+        for x0, _y0, x1, _y1, _text in left_lines
+        if x1 - x0 >= page_width * 0.25
+    ]
+
+    if len(long_left_edges) < 3:
+        long_left_edges = [x1 for _x0, _y0, x1, _y1, _text in left_lines]
+
+    left_column_right_edge = percentile(
+        long_left_edges,
+        0.75,
+        fallback=page_width * 0.48,
+    )
+    right_column_left_edge = percentile(
+        [x0 for x0, _y0, _x1, _y1, _text in right_lines],
+        0.25,
+        fallback=page_width * 0.52,
+    )
+
+    gap = right_column_left_edge - left_column_right_edge
+
+    if gap < page_width * 0.015:
+        return None
+
+    gutter_x = (left_column_right_edge + right_column_left_edge) / 2
+
+    if not page_width * 0.35 <= gutter_x <= page_width * 0.65:
+        return None
+
+    return gutter_x
+
+
 def find_likely_column_gutter(
     words: Sequence[WordBox],
     page_width: float,
@@ -419,13 +583,22 @@ def find_likely_column_gutter(
 ) -> float | None:
     """Return likely x-position of a two-column gutter, if one is detected.
 
-    The heuristic searches for repeated row-level whitespace gaps near the
-    middle of the page. Looking row-by-row keeps occasional full-width headings,
-    abstracts, or equations from erasing the gutter signal for the whole page.
+    Prefer source-line geometry over row-gap detection. Row-gap detection is
+    still useful as a fallback for PDFs without reliable source-line IDs, but it
+    can be fooled by author blocks and figure/caption layouts.
     """
 
     if len(words) < 30:
         return None
+
+    line_box_gutter = find_column_gutter_from_line_boxes(
+        words=words,
+        page_width=page_width,
+        page_height=page_height,
+    )
+
+    if line_box_gutter is not None:
+        return line_box_gutter
 
     top_cutoff = page_height * 0.12
     bottom_cutoff = page_height * 0.92
@@ -472,10 +645,6 @@ def find_likely_column_gutter(
     if not candidate_centers:
         return None
 
-    # A page may begin with a full-width title/abstract before switching to two
-    # columns, so requiring support from 25% of all rows misses normal papers.
-    # A lower threshold still rejects one-off gaps while detecting pages whose
-    # lower half is two-column body text.
     min_support = max(4, int(len(rows) * 0.10))
 
     if len(candidate_centers) < min_support:
@@ -617,8 +786,52 @@ def merge_adjacent_same_row_lines(lines: Sequence[TextLine]) -> list[TextLine]:
     flush_pending()
     return sorted(merged, key=lambda line: (line.y0, line.x0))
 
+
+
+def visual_row_sort_key(line: TextLine) -> tuple[float, float]:
+    """Return a stable top-to-bottom, left-to-right key for near-equal rows."""
+
+    return (round(line.y0 / 2.0) * 2.0, line.x0)
+
+
+def front_matter_body_anchor_y(lines: Sequence[TextLine]) -> float | None:
+    """Return the y-position where article body/front-matter text begins.
+
+    First pages often have a full-width title followed by author blocks laid out
+    in two columns. If we order all left-column lines before all right-column
+    lines, the right-hand author block can be emitted in the middle of the left
+    column's body text. A strong first body/front-matter marker such as
+    ``ABSTRACT`` or ``1. INTRODUCTION`` lets us keep the title/author area in
+    ordinary top-to-bottom order before switching to column-first body order.
+    """
+
+    anchors: list[float] = []
+
+    for line in lines:
+        text = normalize_extracted_text(line.text).lower()
+        text = text.strip(" .:")
+
+        if text == "abstract" or text.startswith("abstract "):
+            anchors.append(line.y_center)
+            continue
+
+        if re.match(r"^(?:\d+(?:\.\d+)*|[ivxlcdm]+)\.?\s+introduction\b", text):
+            anchors.append(line.y_center)
+
+    if not anchors:
+        return None
+
+    return min(anchors)
+
 def order_lines_for_reading(lines: Sequence[TextLine], gutter_x: float | None) -> list[TextLine]:
-    """Return text lines in human reading order for one page."""
+    """Return text lines in human reading order for one page.
+
+    For two-column scholarly pages, prefer column-first ordering for the body.
+    On first pages, however, title/author front matter can occupy both columns
+    above ``ABSTRACT`` or ``1. INTRODUCTION``. That top region is kept in normal
+    top-to-bottom order so right-side author blocks do not appear midway through
+    the left-column body.
+    """
 
     if gutter_x is None:
         return sorted(lines, key=lambda line: (line.y0, line.x0))
@@ -627,40 +840,165 @@ def order_lines_for_reading(lines: Sequence[TextLine], gutter_x: float | None) -
         [line for line in lines if line.column == "full"],
         key=lambda line: (line.y0, line.x0),
     )
-    column_lines = [line for line in lines if line.column != "full"]
+    left_lines = sorted(
+        [line for line in lines if line.column == "left"],
+        key=lambda line: (line.y0, line.x0),
+    )
+    right_lines = sorted(
+        [line for line in lines if line.column == "right"],
+        key=lambda line: (line.y0, line.x0),
+    )
+    other_lines = sorted(
+        [line for line in lines if line.column not in {"full", "left", "right"}],
+        key=lambda line: (line.y0, line.x0),
+    )
 
-    ordered: list[TextLine] = []
-    band_start = float("-inf")
+    if not full_lines and not left_lines and not right_lines:
+        return other_lines
 
-    def emit_column_band(y_min: float, y_max: float) -> None:
-        band = [
-            line
-            for line in column_lines
-            if y_min <= line.y_center < y_max
-        ]
-        left = sorted(
-            [line for line in band if line.column == "left"],
-            key=lambda line: (line.y0, line.x0),
+    first_column_y = min(
+        [line.y_center for line in left_lines + right_lines],
+        default=float("inf"),
+    )
+    top_full_lines = [
+        line
+        for line in full_lines
+        if line.y_center < first_column_y
+    ]
+    remaining_full_lines = [
+        line
+        for line in full_lines
+        if line.y_center >= first_column_y
+    ]
+
+    body_anchor_y = front_matter_body_anchor_y(lines)
+
+    if body_anchor_y is not None:
+        front_left_lines = [line for line in left_lines if line.y_center < body_anchor_y]
+        front_right_lines = [line for line in right_lines if line.y_center < body_anchor_y]
+        front_other_lines = [line for line in other_lines if line.y_center < body_anchor_y]
+        front_column_lines = sorted(
+            front_left_lines + front_right_lines + front_other_lines,
+            key=visual_row_sort_key,
         )
-        right = sorted(
-            [line for line in band if line.column == "right"],
-            key=lambda line: (line.y0, line.x0),
-        )
-        other = sorted(
-            [line for line in band if line.column not in {"left", "right"}],
-            key=lambda line: (line.y0, line.x0),
-        )
-        ordered.extend(left)
-        ordered.extend(right)
-        ordered.extend(other)
 
-    for full_line in full_lines:
-        emit_column_band(band_start, full_line.y_center)
-        ordered.append(full_line)
-        band_start = full_line.y_center
+        body_left_lines = [line for line in left_lines if line.y_center >= body_anchor_y]
+        body_right_lines = [line for line in right_lines if line.y_center >= body_anchor_y]
+        body_other_lines = [line for line in other_lines if line.y_center >= body_anchor_y]
 
-    emit_column_band(band_start, float("inf"))
-    return ordered
+        return (
+            top_full_lines
+            + front_column_lines
+            + body_left_lines
+            + body_right_lines
+            + remaining_full_lines
+            + body_other_lines
+        )
+
+    if not full_lines:
+        return left_lines + right_lines + other_lines
+
+    # Full-width lines after body text begins are uncommon in the main text
+    # stream and are often captions/equations. Keep them, but place them after
+    # the column text rather than allowing them to reset horizontal bands.
+    return top_full_lines + left_lines + right_lines + remaining_full_lines + other_lines
+
+
+DEHYPHENATE_PRESERVE_PREFIXES = {
+    "cross",
+    "half",
+    "high",
+    "long",
+    "low",
+    "multi",
+    "quasi",
+    "self",
+    "short",
+    "well",
+}
+
+
+def split_first_word(text: str) -> tuple[str | None, str]:
+    """Return the first word and remaining text from a line."""
+
+    match = re.match(r"^(?P<word>[A-Za-z][A-Za-z'’]*)(?P<rest>\b.*)$", text)
+
+    if match is None:
+        return None, text
+
+    first_word = match.group("word")
+    rest = match.group("rest").lstrip()
+
+    return first_word, rest
+
+
+def join_hyphenated_line_pair(
+    previous_text: str,
+    next_text: str,
+) -> tuple[str, str] | None:
+    """Join a line-ending hyphenated word with the next line's first word.
+
+    This handles visual line breaks such as ``artifi-`` / ``cial`` without
+    removing ordinary hyphens elsewhere in the text. The rule is intentionally
+    conservative: only alphabetic fragments are joined, and the continuation
+    must begin with a lowercase word fragment.
+    """
+
+    match = re.search(r"(?P<prefix>[A-Za-z]{2,})-$", previous_text)
+
+    if match is None:
+        return None
+
+    first_word, rest = split_first_word(next_text)
+
+    if first_word is None or not first_word[0].islower():
+        return None
+
+    prefix = match.group("prefix")
+    prefix_lower = prefix.lower()
+
+    if prefix_lower in DEHYPHENATE_PRESERVE_PREFIXES:
+        joined_word = f"{prefix}-{first_word}"
+    else:
+        joined_word = f"{prefix}{first_word}"
+
+    previous_without_fragment = previous_text[: match.start("prefix")]
+    new_previous = f"{previous_without_fragment}{joined_word}".rstrip()
+
+    return new_previous, rest
+
+
+def dehyphenate_line_breaks(lines: Sequence[TextLine]) -> list[TextLine]:
+    """Repair words split across adjacent extracted visual lines."""
+
+    repaired: list[TextLine] = []
+
+    for line in lines:
+        if not repaired:
+            repaired.append(line)
+            continue
+
+        previous = repaired[-1]
+
+        if previous.page != line.page or previous.column != line.column:
+            repaired.append(line)
+            continue
+
+        joined = join_hyphenated_line_pair(previous.text, line.text)
+
+        if joined is None:
+            repaired.append(line)
+            continue
+
+        previous_text, remaining_text = joined
+        repaired[-1] = replace(previous, text=normalize_extracted_text(previous_text))
+
+        remaining_text = normalize_extracted_text(remaining_text)
+
+        if remaining_text:
+            repaired.append(replace(line, text=remaining_text))
+
+    return repaired
 
 
 
@@ -788,6 +1126,7 @@ def extract_page_from_words(
         else:
             body_lines.append(line)
 
+    body_lines = dehyphenate_line_breaks(body_lines)
     layout = "two-column" if gutter_x is not None else "single-column"
 
     return PageExtraction(

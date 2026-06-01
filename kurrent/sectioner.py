@@ -11,9 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-import pymupdf
-
-from kurrent.file_utils import silence_mupdf_messages
+from kurrent.pdf_text_extractor import extract_pdf_lines as extract_layout_pdf_lines
 from kurrent.schema import SectionLine, SectionSpan
 
 
@@ -823,7 +821,6 @@ def extract_embedded_heading_texts(line: str) -> list[str]:
         title_pattern = re.escape(title).replace("\\ ", r"\s+")
         patterns = [
             rf"(?<![A-Za-z])(?P<title>{title_pattern})[.:]?\s*$",
-            rf"(?<![A-Za-z])(?P<title>{title_pattern})(?=[.:])",
         ]
 
         for pattern in patterns:
@@ -860,23 +857,17 @@ def detect_heading_candidates(
 ) -> list[str]:
     """Return plausible section-heading candidates from early PDF text."""
 
-    silence_mupdf_messages()
-
     pdf_path = Path(pdf_path)
     candidates: list[str] = []
 
-    with pymupdf.open(pdf_path) as pdf:
-        pages_examined = min(len(pdf), max_pages)
+    for section_line in extract_layout_pdf_lines(pdf_path):
+        if section_line.page > max_pages:
+            continue
 
-        for page_index in range(pages_examined):
-            page = pdf.load_page(page_index)
-            text = page.get_text("text", sort=True) or ""
+        line = normalize_line(section_line.text)
 
-            for raw_line in text.splitlines():
-                line = normalize_line(raw_line)
-
-                if looks_like_heading(line):
-                    candidates.append(line)
+        if looks_like_heading(line):
+            candidates.append(line)
 
     candidates = dedupe_preserving_order(candidates)
 
@@ -922,19 +913,14 @@ def parse_section_heading(
 def extract_pdf_lines_with_pages(pdf_path: str | Path) -> list[tuple[int, str]]:
     """Extract normalized nonempty text lines paired with 1-based page nums."""
 
-    silence_mupdf_messages()
-
+    pdf_path = Path(pdf_path)
     lines: list[tuple[int, str]] = []
 
-    with pymupdf.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf, start=1):
-            text = page.get_text("text", sort=True) or ""
+    for section_line in extract_layout_pdf_lines(pdf_path):
+        line = normalize_line(section_line.text)
 
-            for raw_line in text.splitlines():
-                line = normalize_line(raw_line)
-
-                if line:
-                    lines.append((page_num, line))
+        if line:
+            lines.append((section_line.page, line))
 
     return lines
 

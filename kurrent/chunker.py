@@ -5,9 +5,11 @@ from pathlib import Path
 import hashlib
 from collections.abc import Callable, Sequence
 
-import pymupdf
 
 from kurrent.file_utils import is_pdf
+from kurrent.pdf_text_extractor import (
+    extract_pdf_pages as extract_layout_pdf_pages,
+)
 from kurrent.state_store import StateStore
 from kurrent.schema import Chunk, SectionSpan
 from kurrent.sectioner import (
@@ -308,18 +310,12 @@ def make_section_aware_fixed_size_chunks(
     return chunks
 
 def extract_pdf_pages(path: str | Path) -> dict[int, str]:
-    """Return a dict mapping 1-based page numbers to extracted page text."""
+    """Return a dict mapping 1-based page numbers to layout-aware page text."""
 
-    pages = {}
+    pages: dict[int, str] = {}
 
-    with pymupdf.open(path) as pdf:
-        # Use 1-based page numbers because that's what humans use.
-        for page_num, page in enumerate(pdf, start=1):
-            # Preserve empty pages.
-            # (Note to later self: to get coordinates for auto-annotation, we
-            # can instead use page.get_text("blocks") (or "words") here, which
-            # return positional information.)
-            pages[page_num] = page.get_text("text", sort=True) or ""
+    for page in extract_layout_pdf_pages(path):
+        pages[page.page] = " ".join(line.text for line in page.lines).strip()
 
     return pages
 

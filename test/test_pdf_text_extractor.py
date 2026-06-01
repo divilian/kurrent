@@ -105,33 +105,42 @@ def test_two_column_lines_are_ordered_left_column_then_right_column():
     ]
 
 
-def test_full_width_heading_breaks_column_bands():
-    """Verify full-width lines are kept between two-column reading bands."""
+def test_two_column_ordering_is_column_first_not_band_first():
+    """Verify right-column text does not interrupt a left-column section."""
 
     words = []
 
-    for row in range(20):
+    for row, text in enumerate([
+        "1 INTRODUCTION",
+        "The Prisoners Dilemma game",
+        "studies cooperation",
+    ]):
         y = 100 + row * 14
+        x = 60
+        for word_text in text.split():
+            words.append(word(word_text, x, y, x + len(word_text) * 6, y + 10))
+            x += len(word_text) * 6 + 5
+
+    for row, text in enumerate([
+        "neighborhood is NS",
+        "game playing neighborhood",
+        "strategy update neighborhood",
+    ]):
+        y = 100 + row * 14
+        x = 330
+        for word_text in text.split():
+            words.append(word(word_text, x, y, x + len(word_text) * 6, y + 10))
+            x += len(word_text) * 6 + 5
+
+    # Add enough lower body rows for robust two-column detection.
+    for row in range(12):
+        y = 170 + row * 14
         words.extend(
             [
-                word(f"A{row}L", 60, y, 95, y + 10),
-                word(f"A{row}R", 340, y, 375, y + 10),
-            ]
-        )
-
-    words.extend(
-        [
-            word("Full", 180, 400, 210, 410),
-            word("Heading", 216, 400, 330, 410),
-        ]
-    )
-
-    for row in range(20):
-        y = 450 + row * 14
-        words.extend(
-            [
-                word(f"B{row}L", 60, y, 95, y + 10),
-                word(f"B{row}R", 340, y, 375, y + 10),
+                word(f"L{row}a", 60, y, 90, y + 10),
+                word(f"L{row}b", 100, y, 130, y + 10),
+                word(f"R{row}a", 330, y, 360, y + 10),
+                word(f"R{row}b", 370, y, 400, y + 10),
             ]
         )
 
@@ -139,16 +148,13 @@ def test_full_width_heading_breaks_column_bands():
         words=words,
         page_number=1,
         page_width=500,
-        page_height=800,
+        page_height=700,
     )
     line_texts = [line.text for line in page.lines]
 
-    assert "Full Heading" in line_texts
-    heading_index = line_texts.index("Full Heading")
-    assert line_texts.index("A0L") < heading_index
-    assert line_texts.index("A0R") < heading_index
-    assert heading_index < line_texts.index("B0L")
-    assert heading_index < line_texts.index("B0R")
+    assert page.layout == "two-column"
+    assert line_texts.index("1 INTRODUCTION") < line_texts.index("The Prisoners Dilemma game")
+    assert line_texts.index("studies cooperation") < line_texts.index("neighborhood is NS")
 
 from kurrent.pdf_text_extractor import (
     TextLine,
@@ -727,4 +733,371 @@ def test_compact_fontana_page_filters_copyright_but_keeps_following_body():
     assert [line.text for line in filtered] == [
         "tools (Fontana et al. 2025). To understand and anticipate",
         "the behavioral dynamics that may arise from the interac-",
+    ]
+
+from kurrent.pdf_text_extractor import dehyphenate_line_breaks
+
+
+def test_dehyphenate_line_breaks_joins_split_words():
+    """Verify line-final hyphenation is repaired for ordinary split words."""
+
+    lines = [
+        TextLine(
+            page=1,
+            text="LLMs can operate as artifi-",
+            x0=60,
+            y0=100,
+            x1=250,
+            y1=111,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="cial social agents.",
+            x0=60,
+            y0=114,
+            x1=250,
+            y1=125,
+            column="left",
+        ),
+    ]
+
+    repaired = dehyphenate_line_breaks(lines)
+
+    assert [line.text for line in repaired] == [
+        "LLMs can operate as artificial",
+        "social agents.",
+    ]
+
+
+def test_dehyphenate_line_breaks_handles_short_prefix_fragments():
+    """Verify short real word fragments such as co- / operation are repaired."""
+
+    lines = [
+        TextLine(
+            page=1,
+            text="the evolution of co-",
+            x0=60,
+            y0=100,
+            x1=250,
+            y1=111,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="operation in networks",
+            x0=60,
+            y0=114,
+            x1=250,
+            y1=125,
+            column="left",
+        ),
+    ]
+
+    repaired = dehyphenate_line_breaks(lines)
+
+    assert [line.text for line in repaired] == [
+        "the evolution of cooperation",
+        "in networks",
+    ]
+
+
+def test_dehyphenate_line_breaks_preserves_common_hyphenated_prefixes():
+    """Verify likely real hyphenated compounds keep their hyphen."""
+
+    lines = [
+        TextLine(
+            page=1,
+            text="This produces a well-",
+            x0=60,
+            y0=100,
+            x1=250,
+            y1=111,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="being effect.",
+            x0=60,
+            y0=114,
+            x1=250,
+            y1=125,
+            column="left",
+        ),
+    ]
+
+    repaired = dehyphenate_line_breaks(lines)
+
+    assert [line.text for line in repaired] == [
+        "This produces a well-being",
+        "effect.",
+    ]
+
+
+def test_dehyphenate_line_breaks_does_not_join_before_uppercase_word():
+    """Verify a hyphen before an uppercase starter is not treated as a split word."""
+
+    lines = [
+        TextLine(
+            page=1,
+            text="The options are A-",
+            x0=60,
+            y0=100,
+            x1=250,
+            y1=111,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="Level and B-Level treatments.",
+            x0=60,
+            y0=114,
+            x1=250,
+            y1=125,
+            column="left",
+        ),
+    ]
+
+    repaired = dehyphenate_line_breaks(lines)
+
+    assert [line.text for line in repaired] == [
+        "The options are A-",
+        "Level and B-Level treatments.",
+    ]
+
+
+def test_extract_page_from_words_dehyphenates_in_reading_stream():
+    """Verify page extraction repairs split words after line ordering."""
+
+    words = [
+        word("artifi-", 60, 100, 105, 110),
+        word("cial", 60, 114, 90, 124),
+        word("agents", 96, 114, 140, 124),
+    ]
+
+    page = extract_page_from_words(
+        words=words,
+        page_number=1,
+        page_width=500,
+        page_height=700,
+    )
+
+    assert [line.text for line in page.lines] == [
+        "artificial",
+        "agents",
+    ]
+
+
+def test_normalize_extracted_text_replaces_common_ligatures():
+    """Verify typographic ligatures are normalized for search and embedding."""
+
+    assert normalize_extracted_text("ﬁxed ﬂow oﬀice aﬃnity") == (
+        "fixed flow office affinity"
+    )
+
+
+def test_dehyphenate_line_breaks_does_not_join_across_columns():
+    """Verify dehyphenation is restricted to compatible column geometry."""
+
+    lines = [
+        TextLine(
+            page=1,
+            text="network hetero-",
+            x0=60,
+            y0=100,
+            x1=250,
+            y1=111,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="number of partnerships",
+            x0=330,
+            y0=100,
+            x1=500,
+            y1=111,
+            column="right",
+        ),
+    ]
+
+    repaired = dehyphenate_line_breaks(lines)
+
+    assert [line.text for line in repaired] == [
+        "network hetero-",
+        "number of partnerships",
+    ]
+
+
+def test_figure_heavy_page_detects_columns_from_line_starts():
+    """Verify figure-heavy pages still use left-column then right-column order."""
+
+    words: list[WordBox] = []
+
+    # Left column, including a split word that should be repaired before the
+    # right column is emitted.
+    for row, text in enumerate([
+        "payoffs arising from network hetero-",
+        "geneity would help the evolution of cooperation",
+        "Moreover we confirm stabilization",
+    ]):
+        y = 300 + row * 14
+        x = 60
+        for word_text in text.split():
+            words.append(word(word_text, x, y, x + len(word_text) * 4, y + 10))
+            x += len(word_text) * 4 + 4
+
+    # Right-column prose at similar y positions should not interrupt the left
+    # column.
+    for row, text in enumerate([
+        "number of partnerships readily shift to cooperation during",
+        "strategy dynamics avoiding further unfavorable outcomes",
+    ]):
+        y = 300 + row * 14
+        x = 330
+        for word_text in text.split():
+            words.append(word(word_text, x, y, x + len(word_text) * 4, y + 10))
+            x += len(word_text) * 4 + 4
+
+    for row in range(12):
+        y = 380 + row * 14
+        words.extend(
+            [
+                word(f"L{row}a", 60, y, 90, y + 10),
+                word(f"L{row}b", 100, y, 130, y + 10),
+                word(f"R{row}a", 330, y, 360, y + 10),
+                word(f"R{row}b", 370, y, 400, y + 10),
+            ]
+        )
+
+    page = extract_page_from_words(
+        words=words,
+        page_number=1,
+        page_width=560,
+        page_height=760,
+    )
+    text = " ".join(line.text for line in page.lines)
+
+    assert "network heterogeneity would help" in text
+    assert "heteronumber" not in text
+    assert text.index("network heterogeneity") < text.index("number of partnerships")
+
+
+def test_first_page_author_blocks_stay_before_abstract_body():
+    """Verify right-side author blocks do not interrupt left-column body text."""
+
+    words: list[WordBox] = []
+
+    # Full-width title.
+    x = 60
+    for word_text in "Prisoners Dilemma on Graphs".split():
+        words.append(word(word_text, x, 70, x + len(word_text) * 6, 80))
+        x += len(word_text) * 6 + 5
+
+    # Two-column author/front-matter area above the abstract.
+    for x0, text in [
+        (90, "Left Author"),
+        (330, "Right Author"),
+    ]:
+        x = x0
+        for word_text in text.split():
+            words.append(word(word_text, x, 115, x + len(word_text) * 6, 125))
+            x += len(word_text) * 6 + 5
+
+    # Left-column abstract and introduction body.
+    for row, text in enumerate([
+        "ABSTRACT",
+        "abstract left body line",
+        "1 INTRODUCTION",
+        "Iterated prisoners dilemma and",
+    ]):
+        y = 200 + row * 14
+        x = 60
+        for word_text in text.split():
+            words.append(word(word_text, x, y, x + len(word_text) * 6, y + 10))
+            x += len(word_text) * 6 + 5
+
+    # Right-column continuation of the introduction starts high on the page.
+    for row, text in enumerate([
+        "prisoners dilemma on graphs continues",
+        "right column body line",
+    ]):
+        y = 210 + row * 14
+        x = 330
+        for word_text in text.split():
+            words.append(word(word_text, x, y, x + len(word_text) * 6, y + 10))
+            x += len(word_text) * 6 + 5
+
+    # Add lower rows for robust two-column detection.
+    for row in range(12):
+        y = 330 + row * 14
+        words.extend(
+            [
+                word(f"L{row}a", 60, y, 90, y + 10),
+                word(f"L{row}b", 100, y, 130, y + 10),
+                word(f"R{row}a", 330, y, 360, y + 10),
+                word(f"R{row}b", 370, y, 400, y + 10),
+            ]
+        )
+
+    page = extract_page_from_words(
+        words=words,
+        page_number=1,
+        page_width=560,
+        page_height=760,
+    )
+    line_texts = [line.text for line in page.lines]
+
+    assert line_texts.index("Left Author") < line_texts.index("ABSTRACT")
+    assert line_texts.index("Right Author") < line_texts.index("ABSTRACT")
+    assert line_texts.index("Iterated prisoners dilemma and") < line_texts.index(
+        "prisoners dilemma on graphs continues"
+    )
+
+
+def test_boilerplate_filter_removes_acm_first_page_notice():
+    """Verify ACM conference copyright block lines are filtered."""
+
+    lines = [
+        TextLine(
+            page=1,
+            text="Copyright is held by the author/owner(s).",
+            x0=60,
+            y0=700,
+            x1=260,
+            y1=711,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="GECCO’09, July 8–12, 2009, Montréal Québec, Canada.",
+            x0=60,
+            y0=712,
+            x1=300,
+            y1=723,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="ACM 978-1-60558-505-5/09/07.",
+            x0=60,
+            y0=724,
+            x1=230,
+            y1=735,
+            column="left",
+        ),
+        TextLine(
+            page=1,
+            text="prisoner’s dilemma on graphs continues",
+            x0=330,
+            y0=210,
+            x1=500,
+            y1=221,
+            column="right",
+        ),
+    ]
+
+    filtered = filter_boilerplate_lines(lines)
+
+    assert [line.text for line in filtered] == [
+        "prisoner’s dilemma on graphs continues"
     ]
