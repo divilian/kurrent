@@ -13,13 +13,13 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
-from textwrap import shorten
 
 from kurrent.embedder import Embedder
 from kurrent.ingester import ingest_pdfs_recursively
 from kurrent.schema import DocumentHit
-from kurrent.sectioner import is_reference_section_chunk
 from kurrent.searcher import Searcher
+from kurrent.sectioner import is_reference_section_chunk
+from kurrent.semantic_highlighter import semantically_highlighted_excerpt
 from kurrent.state_store import StateStore
 from playground.common import (
     DEFAULT_ROOT_DIR,
@@ -45,6 +45,7 @@ def print_help() -> None:
     print(f"Type {', '.join(QUIT_COMMANDS)} to leave.")
     print()
 
+
 def reference_marker(hit: DocumentHit) -> str:
     """Return a display marker for chunks that appear to be references."""
 
@@ -52,6 +53,7 @@ def reference_marker(hit: DocumentHit) -> str:
         return " [reference section]"
 
     return ""
+
 
 def print_hit_list(hits) -> None:
     """Print only the numbered list of source PDF base names."""
@@ -79,7 +81,13 @@ def print_hit_list(hits) -> None:
         print(f"{i}. {source_name}  [distance={distance}{pages}]")
 
 
-def print_hit_detail(hit, index: int, *, preview_chars: int = 2000) -> None:
+def print_hit_detail(
+    hit,
+    index: int,
+    search_text: str,
+    embedder: Embedder,
+    preview_chars: int = 2000,
+) -> None:
     """Print the selected chunk hit in detail."""
 
     print()
@@ -101,10 +109,11 @@ def print_hit_detail(hit, index: int, *, preview_chars: int = 2000) -> None:
 
     print()
     print(
-        shorten(
-            " ".join(hit.text.split()),
-            width=preview_chars,
-            placeholder=" [...]",
+        semantically_highlighted_excerpt(
+            hit.text,
+            search_text,
+            embedder,
+            max_chars=preview_chars,
         )
     )
     print()
@@ -116,6 +125,9 @@ def semantic_search_loop(
     max_distance: float | None = None,
 ) -> None:
     """Prompt repeatedly for semantic searches and print top PDF names."""
+
+    if searcher.embedder is None:
+        raise ValueError("Semantic search playground requires an Embedder.")
 
     print_help()
 
@@ -159,7 +171,16 @@ def semantic_search_loop(
                 print(f"Please enter a number from 1 to {len(hits)}.")
                 continue
 
-            print_hit_detail(hits[index - 1], index)
+            if last_search_text is None:
+                print("No active search query is available for highlighting.")
+                continue
+
+            print_hit_detail(
+                hits[index - 1],
+                index,
+                search_text=last_search_text,
+                embedder=searcher.embedder,
+            )
             print_current_hit_list()
             continue
 

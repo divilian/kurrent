@@ -16,8 +16,9 @@ import sys
 
 from kurrent.embedder import Embedder
 from kurrent.ingester import ingest_pdfs_recursively
-from kurrent.schema import ChunkHit
+from kurrent.schema import DocumentHit
 from kurrent.searcher import Searcher
+from kurrent.semantic_highlighter import semantically_highlighted_excerpt
 from kurrent.state_store import StateStore
 from playground.common import (
     DEFAULT_ROOT_DIR,
@@ -48,7 +49,7 @@ def format_chunk_section(chunk) -> str | None:
     return " ".join(pieces)
 
 
-def print_document_hit_list(hits: list[ChunkHit]) -> None:
+def print_document_hit_list(hits: list[DocumentHit]) -> None:
     """Print a numbered list of document search hits."""
 
     if not hits:
@@ -62,12 +63,16 @@ def print_document_hit_list(hits: list[ChunkHit]) -> None:
 
 
 def print_document_hit_detail(
-    hit: ChunkHit,
+    hit: DocumentHit,
     index: int,
     searcher: Searcher,
+    search_text: str,
     preview_chars: int = 2000,
 ) -> None:
     """Print the selected document hit and its best matching chunk."""
+
+    if searcher.embedder is None:
+        raise ValueError("Semantic document search playground requires an Embedder.")
 
     print()
     print(f"Document hit {index}")
@@ -112,12 +117,14 @@ def print_document_hit_detail(
     print(f"pages:    {chunk.page_start}–{chunk.page_end}")
     print()
 
-    text = " ".join(chunk.text.split())
-
-    if len(text) > preview_chars:
-        text = text[:preview_chars] + " [...]"
-
-    print(text)
+    print(
+        semantically_highlighted_excerpt(
+            chunk.text,
+            search_text,
+            searcher.embedder,
+            max_chars=preview_chars,
+        )
+    )
     print()
 
 
@@ -127,6 +134,9 @@ def semantic_document_search_loop(
     max_distance: float | None = None,
 ) -> None:
     """Prompt repeatedly for semantic document searches."""
+
+    if searcher.embedder is None:
+        raise ValueError("Semantic document search playground requires an Embedder.")
 
     print()
     print("Semantic document search playground")
@@ -170,7 +180,16 @@ def semantic_document_search_loop(
                 print(f"Please enter a number from 1 to {len(hits)}.")
                 continue
 
-            print_document_hit_detail(hits[index - 1], index, searcher)
+            if last_search_text is None:
+                print("No active search query is available for highlighting.")
+                continue
+
+            print_document_hit_detail(
+                hits[index - 1],
+                index,
+                searcher,
+                search_text=last_search_text,
+            )
             print_current_hit_list()
             continue
 
