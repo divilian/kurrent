@@ -14,6 +14,18 @@ import re
 from kurrent.pdf_text_extractor import extract_pdf_lines as extract_layout_pdf_lines
 from kurrent.schema import SectionLine, SectionSpan
 
+__all__ = [
+    "HeadingCandidate",
+    "detect_heading_candidates",
+    "detect_heading_candidates_with_context",
+    "make_section_spans_from_llm_decisions",
+    "make_section_spans_from_headings",
+    "parse_section_heading",
+    "is_reference_section_title",
+    "is_reference_section_chunk",
+    "looks_like_reference_text",
+    "normalize_section_title",
+]
 
 @dataclass(frozen=True, slots=True)
 class HeadingCandidate:
@@ -374,13 +386,13 @@ def is_reference_section_chunk(chunk) -> bool:
     return looks_like_reference_text(getattr(chunk, "text", None))
 
 
-def normalize_line(line: str) -> str:
+def _normalize_line(line: str) -> str:
     """Normalize one extracted-text line for heading matching."""
 
     return re.sub(r"\s+", " ", line).strip()
 
 
-def looks_like_bad_heading(line: str) -> bool:
+def _looks_like_bad_heading(line: str) -> bool:
     """Return True for obvious header/footer/citation junk."""
 
     lowered = line.lower().strip()
@@ -391,10 +403,10 @@ def looks_like_bad_heading(line: str) -> bool:
     return any(re.search(pattern, lowered) for pattern in BAD_HEADING_PATTERNS)
 
 
-def looks_like_author_or_affiliation_line(line: str) -> bool:
+def _looks_like_author_or_affiliation_line(line: str) -> bool:
     """Return whether a line looks like authors/affiliations, not a heading."""
 
-    line = normalize_line(line)
+    line = _normalize_line(line)
 
     if re.search(r"\b[A-Z][A-Za-z.-]+[0-9,*†‡]", line):
         if "," in line or " and " in line:
@@ -429,10 +441,10 @@ def looks_like_author_or_affiliation_line(line: str) -> bool:
 
 
 
-def strip_extraction_artifacts(text: str) -> str:
+def _strip_extraction_artifacts(text: str) -> str:
     """Remove common PDF extraction artifacts glued to heading text."""
 
-    text = normalize_line(text)
+    text = _normalize_line(text)
 
     # NIH/PMC manuscript PDFs often glue side-margin labels to headings or
     # body text:
@@ -466,11 +478,11 @@ def strip_extraction_artifacts(text: str) -> str:
                 text = text[: -len(artifact)].strip()
                 changed = True
 
-    return normalize_line(text)
+    return _normalize_line(text)
 
 
 
-def known_heading_prefix_from_rest(rest: str) -> str | None:
+def _known_heading_prefix_from_rest(rest: str) -> str | None:
     """Return the longest known heading title at the start of rest.
 
     The heading may be followed by whitespace, punctuation, or glued body text.
@@ -479,7 +491,7 @@ def known_heading_prefix_from_rest(rest: str) -> str | None:
         ACKNOWLEDGMENTS. We thank ...
     """
 
-    rest = normalize_line(rest)
+    rest = _normalize_line(rest)
     rest_lower = rest.lower()
 
     for heading in sorted(COMMON_SECTION_HEADINGS, key=len, reverse=True):
@@ -495,7 +507,7 @@ def known_heading_prefix_from_rest(rest: str) -> str | None:
     return None
 
 
-def extract_line_initial_lettered_heading_text(line: str) -> str | None:
+def _extract_line_initial_lettered_heading_text(line: str) -> str | None:
     """Return a cleaned A./B./C. heading from the start of a line.
 
     This handles cases such as:
@@ -507,9 +519,9 @@ def extract_line_initial_lettered_heading_text(line: str) -> str | None:
     of relying on llm_sectioner.py to infer the correct prefix.
     """
 
-    line = strip_extraction_artifacts(normalize_line(line))
+    line = _strip_extraction_artifacts(_normalize_line(line))
 
-    if looks_like_bad_heading(line):
+    if _looks_like_bad_heading(line):
         return None
 
     match = re.match(r"^(?P<number>[A-Z])\.\s+(?P<rest>.+)$", line)
@@ -520,10 +532,10 @@ def extract_line_initial_lettered_heading_text(line: str) -> str | None:
     number = match.group("number")
     rest = match.group("rest")
 
-    known_prefix = known_heading_prefix_from_rest(rest)
+    known_prefix = _known_heading_prefix_from_rest(rest)
 
     if known_prefix is not None:
-        return f"{number}. {normalize_line(known_prefix)}"
+        return f"{number}. {_normalize_line(known_prefix)}"
 
     # Fallback: take words until the first strongly body-like transition.
     # Lowercase stopwords are allowed inside headings.
@@ -572,13 +584,13 @@ def extract_line_initial_lettered_heading_text(line: str) -> str | None:
     if not kept:
         return None
 
-    return f"{number}. {normalize_line(' '.join(kept))}"
+    return f"{number}. {_normalize_line(' '.join(kept))}"
 
 
-def starts_with_common_section_heading(line: str) -> bool:
+def _starts_with_common_section_heading(line: str) -> bool:
     """Return whether line starts with a known unnumbered section heading."""
 
-    line = normalize_line(line)
+    line = _normalize_line(line)
     lowered = line.lower()
 
     for heading in sorted(UNNUMBERED_EXTRACTABLE_HEADINGS, key=len, reverse=True):
@@ -590,7 +602,7 @@ def starts_with_common_section_heading(line: str) -> bool:
     return False
 
 
-def common_section_heading_prefix(line: str) -> str | None:
+def _common_section_heading_prefix(line: str) -> str | None:
     """Return the known common heading at the start of line, if any.
 
     This can produce a clean candidate_text from glued lines like:
@@ -601,12 +613,12 @@ def common_section_heading_prefix(line: str) -> str | None:
     by returning only the heading prefix.
     """
 
-    line = normalize_line(line)
+    line = _normalize_line(line)
 
     if not line or not line[0].isupper():
         return None
 
-    known_prefix = known_heading_prefix_from_rest(line)
+    known_prefix = _known_heading_prefix_from_rest(line)
 
     if known_prefix is not None:
         return known_prefix
@@ -615,7 +627,7 @@ def common_section_heading_prefix(line: str) -> str | None:
 
 
 
-def looks_like_heading(line: str) -> bool:
+def _looks_like_heading(line: str) -> bool:
     """Return whether a line looks like a section heading.
 
     This is the older, stricter non-LLM heading detector used by
@@ -623,32 +635,32 @@ def looks_like_heading(line: str) -> bool:
     detect_heading_candidates_with_context() function instead.
     """
 
-    line = normalize_line(line)
+    line = _normalize_line(line)
 
     if len(line) < 3 or len(line) > 120:
         return False
 
-    if looks_like_bad_heading(line):
+    if _looks_like_bad_heading(line):
         return False
 
-    if looks_like_author_or_affiliation_line(line):
+    if _looks_like_author_or_affiliation_line(line):
         return False
 
     if normalize_section_title(line) in COMMON_SECTION_HEADINGS:
         return True
 
-    if looks_like_numbered_heading(line):
+    if _looks_like_numbered_heading(line):
         return True
 
     return False
 
-def looks_like_numbered_heading(line: str) -> bool:
+def _looks_like_numbered_heading(line: str) -> bool:
     """Return whether a line looks like a numbered section heading.
 
     This is the stricter rule used by the non-LLM heading path.
     """
 
-    line = normalize_line(line)
+    line = _normalize_line(line)
 
     patterns = [
         r"^[IVXLCDM]+\.?\s+[A-Z][A-Za-z0-9 ,;:/()&\-]+$",
@@ -659,7 +671,7 @@ def looks_like_numbered_heading(line: str) -> bool:
     return any(re.match(pattern, line) for pattern in patterns)
 
 
-def looks_like_llm_numbered_candidate(line: str) -> bool:
+def _looks_like_llm_numbered_candidate(line: str) -> bool:
     """Return whether line may contain a numbered or lettered heading.
 
     This is intentionally broader than looks_like_numbered_heading because the
@@ -676,15 +688,15 @@ def looks_like_llm_numbered_candidate(line: str) -> bool:
     heading.
     """
 
-    line = strip_extraction_artifacts(normalize_line(line))
+    line = _strip_extraction_artifacts(_normalize_line(line))
 
     if len(line) < 3 or len(line) > 220:
         return False
 
-    if looks_like_bad_heading(line):
+    if _looks_like_bad_heading(line):
         return False
 
-    if looks_like_author_or_affiliation_line(line):
+    if _looks_like_author_or_affiliation_line(line):
         return False
 
     patterns = [
@@ -699,7 +711,7 @@ def looks_like_llm_numbered_candidate(line: str) -> bool:
     return any(re.match(pattern, line) for pattern in patterns)
 
 
-def looks_like_llm_heading_candidate(line: str) -> bool:
+def _looks_like_llm_heading_candidate(line: str) -> bool:
     """Return whether line should be sent as a possible LLM heading candidate.
 
     This favors recall over precision. Later deterministic filters in
@@ -707,40 +719,40 @@ def looks_like_llm_heading_candidate(line: str) -> bool:
     can recover headings that never become candidates.
     """
 
-    line = normalize_line(line)
+    line = _normalize_line(line)
 
     if len(line) < 3 or len(line) > 220:
         return False
 
-    if looks_like_bad_heading(line):
+    if _looks_like_bad_heading(line):
         return False
 
-    if looks_like_author_or_affiliation_line(line):
+    if _looks_like_author_or_affiliation_line(line):
         return False
 
-    if starts_with_common_section_heading(line):
+    if _starts_with_common_section_heading(line):
         return True
 
-    if looks_like_llm_numbered_candidate(line):
+    if _looks_like_llm_numbered_candidate(line):
         return True
 
-    if extract_embedded_heading_texts(line):
+    if _extract_embedded_heading_texts(line):
         return True
 
     return False
 
 
-def normalize_common_heading_match(text: str) -> str:
+def _normalize_common_heading_match(text: str) -> str:
     """Normalize text for common-heading substring matching."""
 
-    text = normalize_line(text).lower()
+    text = _normalize_line(text).lower()
     text = text.replace("’", "'")
     text = text.strip(" .:-")
 
     return text
 
 
-def common_heading_title_pattern() -> str:
+def _common_heading_title_pattern() -> str:
     """Return a regex alternation for known common section titles."""
 
     titles = sorted(COMMON_SECTION_HEADINGS, key=len, reverse=True)
@@ -752,7 +764,7 @@ def common_heading_title_pattern() -> str:
     return "|".join(escaped_titles)
 
 
-def extract_embedded_heading_texts(line: str) -> list[str]:
+def _extract_embedded_heading_texts(line: str) -> list[str]:
     """Return heading-like substrings embedded inside a messy PDF line.
 
     Two-column PDF extraction often glues left-column prose to a right-column
@@ -767,12 +779,12 @@ def extract_embedded_heading_texts(line: str) -> list[str]:
     The full line remains the source anchor in HeadingCandidate.line_text.
     """
 
-    line = normalize_line(line)
+    line = _normalize_line(line)
 
     if not line:
         return []
 
-    heading_title = common_heading_title_pattern()
+    heading_title = _common_heading_title_pattern()
     candidates: list[str] = []
 
     patterns = [
@@ -795,7 +807,7 @@ def extract_embedded_heading_texts(line: str) -> list[str]:
                 continue
 
             number = match.group("number").rstrip(".")
-            title = normalize_line(match.group("title"))
+            title = _normalize_line(match.group("title"))
             candidate_text = f"{number} {title}"
 
             if candidate_text not in candidates:
@@ -825,7 +837,7 @@ def extract_embedded_heading_texts(line: str) -> list[str]:
 
         for pattern in patterns:
             for match in re.finditer(pattern, line, flags=re.IGNORECASE):
-                candidate_text = normalize_line(match.group("title"))
+                candidate_text = _normalize_line(match.group("title"))
 
                 if candidate_text not in candidates:
                     candidates.append(candidate_text)
@@ -833,7 +845,7 @@ def extract_embedded_heading_texts(line: str) -> list[str]:
     return candidates
 
 
-def dedupe_preserving_order(values: Iterable[str]) -> list[str]:
+def _dedupe_preserving_order(values: Iterable[str]) -> list[str]:
     """Return unique values while preserving first occurrence order."""
 
     seen = set()
@@ -864,12 +876,12 @@ def detect_heading_candidates(
         if section_line.page > max_pages:
             continue
 
-        line = normalize_line(section_line.text)
+        line = _normalize_line(section_line.text)
 
-        if looks_like_heading(line):
+        if _looks_like_heading(line):
             candidates.append(line)
 
-    candidates = dedupe_preserving_order(candidates)
+    candidates = _dedupe_preserving_order(candidates)
 
     if len(candidates) < 2:
         return []
@@ -888,7 +900,7 @@ def parse_section_heading(
         "Abstract" -> (None, "Abstract")
     """
 
-    heading = normalize_line(heading)
+    heading = _normalize_line(heading)
 
     patterns = [
         r"^(?P<number>\d+(?:\.\d+)*\.?)[ ]+(?P<title>.+)$",
@@ -903,21 +915,21 @@ def parse_section_heading(
             continue
 
         number = match.group("number").rstrip(".")
-        title = normalize_line(match.group("title"))
+        title = _normalize_line(match.group("title"))
 
         return number or None, title or None
 
     return None, heading or None
 
 
-def extract_pdf_lines_with_pages(pdf_path: str | Path) -> list[tuple[int, str]]:
+def _extract_pdf_lines_with_pages(pdf_path: str | Path) -> list[tuple[int, str]]:
     """Extract normalized nonempty text lines paired with 1-based page nums."""
 
     pdf_path = Path(pdf_path)
     lines: list[tuple[int, str]] = []
 
     for section_line in extract_layout_pdf_lines(pdf_path):
-        line = normalize_line(section_line.text)
+        line = _normalize_line(section_line.text)
 
         if line:
             lines.append((section_line.page, line))
@@ -925,12 +937,12 @@ def extract_pdf_lines_with_pages(pdf_path: str | Path) -> list[tuple[int, str]]:
     return lines
 
 
-def extract_pdf_lines_with_pages_and_indexes(
+def _extract_pdf_lines_with_pages_and_indexes(
     pdf_path: str | Path,
 ) -> list[tuple[int, int, str]]:
     """Extract normalized nonempty PDF text lines with global line indexes."""
 
-    lines_with_pages = extract_pdf_lines_with_pages(pdf_path)
+    lines_with_pages = _extract_pdf_lines_with_pages(pdf_path)
 
     return [
         (line_index, page_num, line)
@@ -938,24 +950,24 @@ def extract_pdf_lines_with_pages_and_indexes(
     ]
 
 
-def heading_candidate_features(line: str) -> dict[str, object]:
+def _heading_candidate_features(line: str) -> dict[str, object]:
     """Return lightweight deterministic features for a candidate heading.
 
     The LLM prompt no longer needs these features, but we keep the function for
     diagnostics and possible future ranking/filtering.
     """
 
-    normalized = normalize_line(line)
+    normalized = _normalize_line(line)
 
     return {
-        "looks_numbered": looks_like_llm_numbered_candidate(normalized),
-        "is_common_heading": starts_with_common_section_heading(normalized),
-        "has_embedded_heading": bool(extract_embedded_heading_texts(normalized)),
+        "looks_numbered": _looks_like_llm_numbered_candidate(normalized),
+        "is_common_heading": _starts_with_common_section_heading(normalized),
+        "has_embedded_heading": bool(_extract_embedded_heading_texts(normalized)),
         "char_len": len(normalized),
     }
 
 
-def add_heading_candidate(
+def _add_heading_candidate(
     candidates: list[HeadingCandidate],
     seen_keys: set[tuple[int, str | None]],
     line_index: int,
@@ -968,11 +980,11 @@ def add_heading_candidate(
     """Append a HeadingCandidate unless this anchor/text pair is duplicated."""
 
     if candidate_text is not None:
-        candidate_text = strip_extraction_artifacts(candidate_text)
+        candidate_text = _strip_extraction_artifacts(candidate_text)
 
     key = (
         line_index,
-        normalize_line(candidate_text).lower() if candidate_text else None,
+        _normalize_line(candidate_text).lower() if candidate_text else None,
     )
 
     if key in seen_keys:
@@ -988,7 +1000,7 @@ def add_heading_candidate(
             line_text=line,
             previous_lines=previous_lines,
             next_lines=next_lines,
-            features=heading_candidate_features(line),
+            features=_heading_candidate_features(line),
             candidate_text=candidate_text,
         )
     )
@@ -1010,7 +1022,7 @@ def detect_heading_candidates_with_context(
     full extracted line in line_text.
     """
 
-    lines = extract_pdf_lines_with_pages_and_indexes(pdf_path)
+    lines = _extract_pdf_lines_with_pages_and_indexes(pdf_path)
     candidates: list[HeadingCandidate] = []
     seen_keys: set[tuple[int, str | None]] = set()
 
@@ -1028,11 +1040,11 @@ def detect_heading_candidates_with_context(
         ]
 
         line_initial_lettered_heading = (
-            extract_line_initial_lettered_heading_text(line)
+            _extract_line_initial_lettered_heading_text(line)
         )
 
         if line_initial_lettered_heading is not None:
-            add_heading_candidate(
+            _add_heading_candidate(
                 candidates=candidates,
                 seen_keys=seen_keys,
                 line_index=line_index,
@@ -1044,11 +1056,11 @@ def detect_heading_candidates_with_context(
             )
             continue
 
-        embedded_headings = extract_embedded_heading_texts(line)
+        embedded_headings = _extract_embedded_heading_texts(line)
 
         if embedded_headings:
             for embedded_heading in embedded_headings:
-                add_heading_candidate(
+                _add_heading_candidate(
                     candidates=candidates,
                     seen_keys=seen_keys,
                     line_index=line_index,
@@ -1060,10 +1072,10 @@ def detect_heading_candidates_with_context(
                 )
             continue
 
-        common_prefix = common_section_heading_prefix(line)
+        common_prefix = _common_section_heading_prefix(line)
 
         if common_prefix is not None:
-            add_heading_candidate(
+            _add_heading_candidate(
                 candidates=candidates,
                 seen_keys=seen_keys,
                 line_index=line_index,
@@ -1075,8 +1087,8 @@ def detect_heading_candidates_with_context(
             )
             continue
 
-        if looks_like_llm_heading_candidate(line):
-            add_heading_candidate(
+        if _looks_like_llm_heading_candidate(line):
+            _add_heading_candidate(
                 candidates=candidates,
                 seen_keys=seen_keys,
                 line_index=line_index,
@@ -1163,7 +1175,7 @@ def make_section_spans_from_llm_decisions(
             section_title,
         )
 
-    lines = extract_pdf_lines_with_pages_and_indexes(pdf_path)
+    lines = _extract_pdf_lines_with_pages_and_indexes(pdf_path)
     sections: list[SectionSpan] = []
 
     current_section_index: int | None = None
@@ -1240,12 +1252,12 @@ def make_section_spans_from_headings(
     """
 
     accepted_by_normalized = {
-        normalize_line(heading): heading
+        _normalize_line(heading): heading
         for heading in headings
-        if normalize_line(heading)
+        if _normalize_line(heading)
     }
 
-    lines = extract_pdf_lines_with_pages(pdf_path)
+    lines = _extract_pdf_lines_with_pages(pdf_path)
     sections: list[SectionSpan] = []
 
     current_section_index: int | None = None
@@ -1279,7 +1291,7 @@ def make_section_spans_from_headings(
         )
 
     for page_num, line in lines:
-        normalized = normalize_line(line)
+        normalized = _normalize_line(line)
 
         if normalized in accepted_by_normalized:
             emit_current()

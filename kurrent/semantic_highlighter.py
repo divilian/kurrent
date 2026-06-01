@@ -15,6 +15,16 @@ from kurrent.cli_display import (
     context_window,
 )
 
+__all__ = [
+    "cosine_similarity",
+    "semantic_windows",
+    "best_semantic_excerpt",
+    "semantic_candidate_words",
+    "semantic_highlight_tiers",
+    "apply_semantic_highlights",
+    "semantically_highlighted_excerpt",
+    "semantically_highlighted_text",
+]
 
 SEMANTIC_HIGHLIGHT_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",

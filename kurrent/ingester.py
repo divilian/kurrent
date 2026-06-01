@@ -22,6 +22,13 @@ from kurrent.metadata_extractor import extract_metadata
 from kurrent.state_store import StateStore
 from kurrent.chunker import chunk_document
 
+__all__ = [
+    "CROSSREF_REQUEST_INTERVAL_SECONDS",
+    "ingest_pdf",
+    "discover_pdfs",
+    "ingest_pdfs_recursively",
+    "print_batch_ingest_summary",
+]
 
 silence_mupdf_messages()
 

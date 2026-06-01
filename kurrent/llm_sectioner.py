@@ -40,6 +40,19 @@ from urllib import error, request
 
 from kurrent.sectioner import HeadingCandidate, parse_section_heading
 
+__all__ = [
+    "DEFAULT_OLLAMA_URL",
+    "DEFAULT_OLLAMA_MODEL",
+    "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
+    "DEFAULT_OLLAMA_SINGLETON_TIMEOUT_SECONDS",
+    "DEFAULT_OLLAMA_NUM_PREDICT",
+    "DEFAULT_OLLAMA_BATCH_SIZE",
+    "OllamaTimeoutError",
+    "SectionHeadingDecision",
+    "candidate_to_prompt_dict",
+    "filtered_candidates",
+    "select_section_headings_with_ollama",
+]
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
@@ -172,17 +185,17 @@ class SectionHeadingDecision:
     confidence: str | None = None
 
 
-def normalize_spaces(text: str) -> str:
+def _normalize_spaces(text: str) -> str:
     """Normalize whitespace in LLM-facing strings."""
 
     return re.sub(r"\s+", " ", text).strip()
 
 
 
-def strip_extraction_artifacts(text: str) -> str:
+def _strip_extraction_artifacts(text: str) -> str:
     """Remove common PDF extraction artifacts glued to heading text."""
 
-    text = normalize_spaces(text)
+    text = _normalize_spaces(text)
 
     artifact_words = [
         "NIH-PA",
@@ -208,22 +221,22 @@ def strip_extraction_artifacts(text: str) -> str:
                 text = text[: -len(artifact)].strip()
                 changed = True
 
-    return normalize_spaces(text)
+    return _normalize_spaces(text)
 
 
-def normalize_for_match(text: str) -> str:
+def _normalize_for_match(text: str) -> str:
     """Normalize a string for simple lower-case matching."""
 
-    text = normalize_spaces(text).lower()
+    text = _normalize_spaces(text).lower()
     text = text.strip(".:;,-")
 
     return text
 
 
-def looks_like_page_footer_or_running_header(line_text: str) -> bool:
+def _looks_like_page_footer_or_running_header(line_text: str) -> bool:
     """Return whether a line is obvious page/footer/header debris."""
 
-    line = normalize_spaces(line_text)
+    line = _normalize_spaces(line_text)
     lower = line.lower()
 
     footer_patterns = [
@@ -245,7 +258,7 @@ def looks_like_page_footer_or_running_header(line_text: str) -> bool:
     )
 
 
-def context_text(candidate: HeadingCandidate) -> str:
+def _context_text(candidate: HeadingCandidate) -> str:
     """Return candidate context as one normalized lower-case string."""
 
     pieces = (
@@ -254,15 +267,15 @@ def context_text(candidate: HeadingCandidate) -> str:
         + list(candidate.next_lines)
     )
 
-    return normalize_spaces(" ".join(pieces)).lower()
+    return _normalize_spaces(" ".join(pieces)).lower()
 
 
-def looks_like_chart_or_figure_debris(candidate: HeadingCandidate) -> bool:
+def _looks_like_chart_or_figure_debris(candidate: HeadingCandidate) -> bool:
     """Return whether a candidate is probably an axis/legend/chart label."""
 
-    line = normalize_spaces(candidate.line_text)
+    line = _normalize_spaces(candidate.line_text)
     lower = line.lower()
-    context = context_text(candidate)
+    context = _context_text(candidate)
 
     # Examples observed in Fontana 2025:
     #   1.0 Llama2
@@ -330,7 +343,7 @@ BIBLIOGRAPHIC_SIGNALS = {
 }
 
 
-def looks_like_numbered_reference_entry(text: str) -> bool:
+def _looks_like_numbered_reference_entry(text: str) -> bool:
     """Return whether text looks like a numbered bibliography entry.
 
     This deliberately requires a leading reference number plus bibliographic
@@ -339,7 +352,7 @@ def looks_like_numbered_reference_entry(text: str) -> bool:
     a number.
     """
 
-    text = normalize_spaces(text)
+    text = _normalize_spaces(text)
 
     if not re.match(r"^\d+\.?\s+", text):
         return False
@@ -378,7 +391,7 @@ def looks_like_numbered_reference_entry(text: str) -> bool:
     return False
 
 
-def looks_like_unnumbered_reference_entry_fragment(text: str) -> bool:
+def _looks_like_unnumbered_reference_entry_fragment(text: str) -> bool:
     """Return whether text looks like a bibliography fragment candidate.
 
     Two-column/reference extraction can produce candidate_text without the
@@ -388,7 +401,7 @@ def looks_like_unnumbered_reference_entry_fragment(text: str) -> bool:
     reference number.
     """
 
-    text = normalize_spaces(text)
+    text = _normalize_spaces(text)
     lower = text.lower()
 
     if any(signal in lower for signal in BIBLIOGRAPHIC_SIGNALS):
@@ -408,41 +421,41 @@ def looks_like_unnumbered_reference_entry_fragment(text: str) -> bool:
     return False
 
 
-def looks_like_reference_entry_candidate(candidate: HeadingCandidate) -> bool:
+def _looks_like_reference_entry_candidate(candidate: HeadingCandidate) -> bool:
     """Return whether a candidate appears to be a reference-list entry."""
 
-    candidate_text = candidate_text_for_filtering(candidate)
-    raw_line = normalize_spaces(candidate.line_text)
+    candidate_text = _candidate_text_for_filtering(candidate)
+    raw_line = _normalize_spaces(candidate.line_text)
 
-    if looks_like_numbered_reference_entry(candidate_text):
+    if _looks_like_numbered_reference_entry(candidate_text):
         return True
 
-    if looks_like_numbered_reference_entry(raw_line):
+    if _looks_like_numbered_reference_entry(raw_line):
         return True
 
     # If the raw line is clearly a numbered reference entry, reject even if the
     # cleaned candidate_text lost the leading number and now looks like a title.
     if re.match(r"^\d+\.?\s+", raw_line):
-        return looks_like_unnumbered_reference_entry_fragment(candidate_text)
+        return _looks_like_unnumbered_reference_entry_fragment(candidate_text)
 
     return False
 
-def should_send_candidate_to_llm(candidate: HeadingCandidate) -> bool:
+def _should_send_candidate_to_llm(candidate: HeadingCandidate) -> bool:
     """Return whether a candidate should be included in the LLM payload."""
 
-    if looks_like_page_footer_or_running_header(candidate.line_text):
+    if _looks_like_page_footer_or_running_header(candidate.line_text):
         return False
 
-    if looks_like_chart_or_figure_debris(candidate):
+    if _looks_like_chart_or_figure_debris(candidate):
         return False
 
-    if looks_like_reference_entry_candidate(candidate):
+    if _looks_like_reference_entry_candidate(candidate):
         return False
 
     return True
 
 
-def title_case_prefix(rest: str, max_words: int = 10) -> str:
+def _title_case_prefix(rest: str, max_words: int = 10) -> str:
     """Return a plausible title-case heading prefix from remaining text.
 
     This keeps title stopwords such as "of" and "and", so:
@@ -474,10 +487,10 @@ def title_case_prefix(rest: str, max_words: int = 10) -> str:
         if len(kept) >= max_words:
             break
 
-    return strip_extraction_artifacts(normalize_spaces(" ".join(kept)))
+    return _strip_extraction_artifacts(_normalize_spaces(" ".join(kept)))
 
 
-def clean_heading_prefix(line_text: str) -> str:
+def _clean_heading_prefix(line_text: str) -> str:
     """Return a deterministic best-effort heading prefix.
 
     This tries to rescue common headings from PDF lines where the heading has
@@ -492,7 +505,7 @@ def clean_heading_prefix(line_text: str) -> str:
     The raw extracted line is still preserved separately for the LLM.
     """
 
-    line = strip_extraction_artifacts(normalize_spaces(line_text))
+    line = _strip_extraction_artifacts(_normalize_spaces(line_text))
 
     if not line:
         return line
@@ -515,7 +528,7 @@ def clean_heading_prefix(line_text: str) -> str:
         for title in sorted(COMMON_HEADING_TITLES, key=len, reverse=True):
             if rest_lower == title or rest_lower.startswith(title):
                 title_text = rest[:len(title)]
-                return f"{number} {normalize_spaces(title_text)}"
+                return f"{number} {_normalize_spaces(title_text)}"
 
         # Otherwise keep an initial all-caps run. This catches headings like:
         #   IV DISCUSSION In summary, ...
@@ -525,7 +538,7 @@ def clean_heading_prefix(line_text: str) -> str:
         )
 
         if caps_match is not None:
-            title_text = normalize_spaces(caps_match.group("title"))
+            title_text = _normalize_spaces(caps_match.group("title"))
             return f"{number} {title_text}"
 
     # Decimal or integer-numbered headings:
@@ -546,9 +559,9 @@ def clean_heading_prefix(line_text: str) -> str:
         for title in sorted(COMMON_HEADING_TITLES, key=len, reverse=True):
             if rest_lower == title or rest_lower.startswith(title):
                 title_text = rest[:len(title)]
-                return f"{number} {normalize_spaces(title_text)}"
+                return f"{number} {_normalize_spaces(title_text)}"
 
-        title_prefix = title_case_prefix(rest)
+        title_prefix = _title_case_prefix(rest)
 
         if title_prefix:
             return f"{number} {title_prefix}"
@@ -570,15 +583,15 @@ def clean_heading_prefix(line_text: str) -> str:
         for title in sorted(COMMON_HEADING_TITLES, key=len, reverse=True):
             if rest_lower == title or rest_lower.startswith(title + " "):
                 title_text = rest[:len(title)]
-                return f"{number}. {normalize_spaces(title_text)}"
+                return f"{number}. {_normalize_spaces(title_text)}"
 
-        title_prefix = title_case_prefix(rest)
+        title_prefix = _title_case_prefix(rest)
 
         if title_prefix:
             return f"{number}. {title_prefix}"
 
     # Unnumbered common headings embedded in an otherwise clean line.
-    normalized = normalize_for_match(line)
+    normalized = _normalize_for_match(line)
 
     if normalized in COMMON_HEADING_TITLES:
         return line
@@ -589,13 +602,13 @@ def clean_heading_prefix(line_text: str) -> str:
 def candidate_to_prompt_dict(candidate: HeadingCandidate) -> dict[str, Any]:
     """Convert a HeadingCandidate into a compact JSON-serializable dict."""
 
-    raw_line = normalize_spaces(candidate.line_text)
+    raw_line = _normalize_spaces(candidate.line_text)
 
     if getattr(candidate, "candidate_text", None) is None:
-        candidate_text = clean_heading_prefix(raw_line)
+        candidate_text = _clean_heading_prefix(raw_line)
     else:
-        candidate_text = strip_extraction_artifacts(
-            normalize_spaces(candidate.candidate_text)
+        candidate_text = _strip_extraction_artifacts(
+            _normalize_spaces(candidate.candidate_text)
         )
 
     return {
@@ -604,33 +617,33 @@ def candidate_to_prompt_dict(candidate: HeadingCandidate) -> dict[str, Any]:
         "candidate_text": candidate_text,
         "raw_line": raw_line,
         "previous_lines": [
-            normalize_spaces(line)
+            _normalize_spaces(line)
             for line in candidate.previous_lines
         ],
         "next_lines": [
-            normalize_spaces(line)
+            _normalize_spaces(line)
             for line in candidate.next_lines
         ],
     }
 
 
-def candidate_text_for_filtering(candidate: HeadingCandidate) -> str:
+def _candidate_text_for_filtering(candidate: HeadingCandidate) -> str:
     """Return the exact candidate_text that would be sent to the LLM."""
 
-    raw_line = normalize_spaces(candidate.line_text)
+    raw_line = _normalize_spaces(candidate.line_text)
 
     if getattr(candidate, "candidate_text", None) is None:
-        return clean_heading_prefix(raw_line)
+        return _clean_heading_prefix(raw_line)
 
-    return strip_extraction_artifacts(
-        normalize_spaces(candidate.candidate_text)
+    return _strip_extraction_artifacts(
+        _normalize_spaces(candidate.candidate_text)
     )
 
 
-def candidate_text_is_heading_like(candidate_text: str) -> bool:
+def _candidate_text_is_heading_like(candidate_text: str) -> bool:
     """Return whether candidate_text is plausible heading text."""
 
-    text = normalize_spaces(candidate_text)
+    text = _normalize_spaces(candidate_text)
     lowered = text.lower().strip(" .:")
 
     if not text:
@@ -666,7 +679,7 @@ def candidate_text_is_heading_like(candidate_text: str) -> bool:
         if number_text.endswith(".0"):
             return False
 
-        title = normalize_spaces(number_match.group("title"))
+        title = _normalize_spaces(number_match.group("title"))
 
         if title and title[0].isupper():
             return True
@@ -691,10 +704,10 @@ def candidate_text_is_heading_like(candidate_text: str) -> bool:
 
 
 
-def section_level(candidate_text: str) -> int:
+def _section_level(candidate_text: str) -> int:
     """Return a rough nesting level for a section candidate."""
 
-    text = normalize_spaces(candidate_text)
+    text = _normalize_spaces(candidate_text)
 
     if re.match(r"^[A-Z]\.\s+", text):
         return 3
@@ -712,7 +725,7 @@ def section_level(candidate_text: str) -> int:
     return 0
 
 
-def group_candidates_for_prompt(
+def _group_candidates_for_prompt(
     candidates: list[HeadingCandidate],
 ) -> list[dict[str, object]]:
     """Return compact grouped candidate dicts for the LLM prompt."""
@@ -721,7 +734,7 @@ def group_candidates_for_prompt(
 
     for candidate in filtered_candidates(candidates):
         prompt_dict = candidate_to_prompt_dict(candidate)
-        candidate_text = normalize_spaces(str(prompt_dict["candidate_text"]))
+        candidate_text = _normalize_spaces(str(prompt_dict["candidate_text"]))
 
         key = (candidate.page, candidate_text.lower())
 
@@ -744,7 +757,7 @@ def group_candidates_for_prompt(
                     if prompt_dict["next_lines"]
                     else ""
                 ),
-                "level_hint": section_level(candidate_text),
+                "level_hint": _section_level(candidate_text),
             }
             continue
 
@@ -762,12 +775,12 @@ def filtered_candidates(
     seen_texts: set[str] = set()
 
     for candidate in candidates:
-        if not should_send_candidate_to_llm(candidate):
+        if not _should_send_candidate_to_llm(candidate):
             continue
 
-        candidate_text = candidate_text_for_filtering(candidate)
+        candidate_text = _candidate_text_for_filtering(candidate)
 
-        if not candidate_text_is_heading_like(candidate_text):
+        if not _candidate_text_is_heading_like(candidate_text):
             continue
 
         key = candidate_text.lower()
@@ -781,12 +794,12 @@ def filtered_candidates(
     return filtered
 
 
-def build_section_heading_prompt(
+def _build_section_heading_prompt(
     candidates: list[HeadingCandidate],
 ) -> str:
     """Build the user prompt for LLM heading adjudication."""
 
-    candidate_payload = group_candidates_for_prompt(candidates)
+    candidate_payload = _group_candidates_for_prompt(candidates)
     example_payload = {
         "section_headings": [
             {
@@ -828,7 +841,7 @@ def build_section_heading_prompt(
     )
 
 
-def strip_code_fence(text: str) -> str:
+def _strip_code_fence(text: str) -> str:
     """Remove a surrounding Markdown code fence if the LLM added one."""
 
     text = text.strip()
@@ -845,10 +858,10 @@ def strip_code_fence(text: str) -> str:
     return match.group(1).strip()
 
 
-def extract_json_payload(response_text: str) -> str:
+def _extract_json_payload(response_text: str) -> str:
     """Extract a JSON object/list from an LLM response."""
 
-    response_text = strip_code_fence(response_text).strip()
+    response_text = _strip_code_fence(response_text).strip()
 
     if not response_text:
         raise ValueError("Ollama returned an empty response.")
@@ -888,13 +901,13 @@ def extract_json_payload(response_text: str) -> str:
     return response_text[start:end + 1]
 
 
-def parse_section_heading_response(
+def _parse_section_heading_response(
     response_text: str,
     valid_candidate_ids: set[int],
 ) -> list[SectionHeadingDecision]:
     """Parse and validate the LLM's JSON heading response."""
 
-    json_text = extract_json_payload(response_text)
+    json_text = _extract_json_payload(response_text)
 
     try:
         payload = json.loads(json_text)
@@ -976,7 +989,7 @@ def parse_section_heading_response(
     return decisions
 
 
-def build_singleton_json_prompt(candidate: HeadingCandidate) -> str:
+def _build_singleton_json_prompt(candidate: HeadingCandidate) -> str:
     """Build a compact JSON prompt for judging one candidate."""
 
     prompt_dict = candidate_to_prompt_dict(candidate)
@@ -1009,13 +1022,13 @@ def build_singleton_json_prompt(candidate: HeadingCandidate) -> str:
     )
 
 
-def parse_singleton_heading_response(
+def _parse_singleton_heading_response(
     response_text: str,
     candidate: HeadingCandidate,
 ) -> list[SectionHeadingDecision]:
     """Parse and validate one-candidate JSON heading response."""
 
-    json_text = extract_json_payload(response_text)
+    json_text = _extract_json_payload(response_text)
 
     try:
         payload = json.loads(json_text)
@@ -1029,7 +1042,7 @@ def parse_singleton_heading_response(
 
     # Be forgiving if the model accidentally returns the old batch shape.
     if isinstance(payload, dict) and "section_headings" in payload:
-        return parse_section_heading_response(
+        return _parse_section_heading_response(
             response_text,
             valid_candidate_ids={candidate.candidate_id},
         )
@@ -1065,7 +1078,7 @@ def parse_singleton_heading_response(
     )
 
     if section_title is None:
-        candidate_text = candidate_text_for_filtering(candidate)
+        candidate_text = _candidate_text_for_filtering(candidate)
         parsed_number, parsed_title = parse_section_heading(candidate_text)
 
         if section_number is None:
@@ -1087,7 +1100,7 @@ def parse_singleton_heading_response(
     ]
 
 
-def chunked_candidates(
+def _chunked_candidates(
     candidates: list[HeadingCandidate],
     batch_size: int,
 ) -> list[list[HeadingCandidate]]:
@@ -1102,7 +1115,7 @@ def chunked_candidates(
     ]
 
 
-def sort_decisions_by_candidate_order(
+def _sort_decisions_by_candidate_order(
     decisions: list[SectionHeadingDecision],
     candidates: list[HeadingCandidate],
 ) -> list[SectionHeadingDecision]:
@@ -1119,7 +1132,7 @@ def sort_decisions_by_candidate_order(
     )
 
 
-def dedupe_decisions(
+def _dedupe_decisions(
     decisions: list[SectionHeadingDecision],
 ) -> list[SectionHeadingDecision]:
     """Remove duplicate decisions by candidate ID while preserving order."""
@@ -1137,7 +1150,7 @@ def dedupe_decisions(
     return deduped
 
 
-def ollama_chat(
+def _ollama_chat(
     prompt: str,
     model: str,
     ollama_url: str = DEFAULT_OLLAMA_URL,
@@ -1220,7 +1233,7 @@ def ollama_chat(
     return str(content)
 
 
-def save_ollama_timeout_debug_file(
+def _save_ollama_timeout_debug_file(
     prompt: str,
     candidates: list[HeadingCandidate],
     model: str,
@@ -1267,7 +1280,7 @@ def save_ollama_timeout_debug_file(
         )
 
 
-def build_singleton_yes_no_prompt(candidate: HeadingCandidate) -> str:
+def _build_singleton_yes_no_prompt(candidate: HeadingCandidate) -> str:
     """Build a simpler non-JSON fallback prompt for one candidate."""
 
     prompt_dict = candidate_to_prompt_dict(candidate)
@@ -1283,7 +1296,7 @@ def build_singleton_yes_no_prompt(candidate: HeadingCandidate) -> str:
     )
 
 
-def singleton_yes_no_fallback(
+def _singleton_yes_no_fallback(
     candidate: HeadingCandidate,
     model: str,
     ollama_url: str,
@@ -1292,10 +1305,10 @@ def singleton_yes_no_fallback(
 ) -> list[SectionHeadingDecision]:
     """Try a non-JSON YES/NO fallback for a single candidate."""
 
-    prompt = build_singleton_yes_no_prompt(candidate)
+    prompt = _build_singleton_yes_no_prompt(candidate)
 
     try:
-        response_text = ollama_chat(
+        response_text = _ollama_chat(
             prompt=prompt,
             model=model,
             ollama_url=ollama_url,
@@ -1305,7 +1318,7 @@ def singleton_yes_no_fallback(
             use_json_format=False,
         )
     except OllamaTimeoutError:
-        save_ollama_timeout_debug_file(
+        _save_ollama_timeout_debug_file(
             prompt=prompt,
             candidates=[candidate],
             model=model,
@@ -1320,7 +1333,7 @@ def singleton_yes_no_fallback(
     if not normalized.startswith("YES"):
         return []
 
-    candidate_text = candidate_text_for_filtering(candidate)
+    candidate_text = _candidate_text_for_filtering(candidate)
     section_number, section_title = parse_section_heading(candidate_text)
 
     if section_title is None:
@@ -1363,11 +1376,11 @@ def _select_heading_batch_with_timeout_fallback(
 
     if len(candidates) == 1:
         effective_timeout = min(timeout_seconds, singleton_timeout_seconds)
-        prompt = build_singleton_json_prompt(candidates[0])
+        prompt = _build_singleton_json_prompt(candidates[0])
         prompt_kind = "singleton_json"
         effective_num_predict = min(num_predict, 128)
     else:
-        prompt = build_section_heading_prompt(candidates)
+        prompt = _build_section_heading_prompt(candidates)
         prompt_kind = "batch_json"
         effective_num_predict = num_predict
 
@@ -1375,7 +1388,7 @@ def _select_heading_batch_with_timeout_fallback(
 
     for attempt_number in range(1, 3):
         try:
-            response_text = ollama_chat(
+            response_text = _ollama_chat(
                 prompt=prompt,
                 model=model,
                 ollama_url=ollama_url,
@@ -1386,12 +1399,12 @@ def _select_heading_batch_with_timeout_fallback(
             )
 
             if len(candidates) == 1:
-                return parse_singleton_heading_response(
+                return _parse_singleton_heading_response(
                     response_text,
                     candidate=candidates[0],
                 )
 
-            return parse_section_heading_response(
+            return _parse_section_heading_response(
                 response_text,
                 valid_candidate_ids={
                     candidate.candidate_id
@@ -1400,7 +1413,7 @@ def _select_heading_batch_with_timeout_fallback(
             )
         except OllamaTimeoutError:
             last_failure = "timeout"
-            save_ollama_timeout_debug_file(
+            _save_ollama_timeout_debug_file(
                 prompt=prompt,
                 candidates=candidates,
                 model=model,
@@ -1410,7 +1423,7 @@ def _select_heading_batch_with_timeout_fallback(
             )
         except ValueError as exc:
             last_failure = "malformed JSON"
-            save_ollama_timeout_debug_file(
+            _save_ollama_timeout_debug_file(
                 prompt=prompt,
                 candidates=candidates,
                 model=model,
@@ -1443,11 +1456,11 @@ def _select_heading_batch_with_timeout_fallback(
             "Warning: Ollama failed twice on a single heading candidate; "
             "trying simpler non-JSON YES/NO fallback for "
             f"candidate_id={candidate.candidate_id} on page {candidate.page}: "
-            f"{candidate_text_for_filtering(candidate)!r}",
+            f"{_candidate_text_for_filtering(candidate)!r}",
             file=sys.stderr,
         )
 
-        yes_no_decisions = singleton_yes_no_fallback(
+        yes_no_decisions = _singleton_yes_no_fallback(
             candidate=candidate,
             model=model,
             ollama_url=ollama_url,
@@ -1462,7 +1475,7 @@ def _select_heading_batch_with_timeout_fallback(
             "Warning: skipping single heading candidate after LLM/fallback "
             f"failure: candidate_id={candidate.candidate_id} "
             f"on page {candidate.page}: "
-            f"{candidate_text_for_filtering(candidate)!r}",
+            f"{_candidate_text_for_filtering(candidate)!r}",
             file=sys.stderr,
         )
         return []
@@ -1502,7 +1515,7 @@ def _select_heading_batch_with_timeout_fallback(
     )
 
 
-def drop_reference_entry_decisions(
+def _drop_reference_entry_decisions(
     decisions: list[SectionHeadingDecision],
     candidates: list[HeadingCandidate],
 ) -> list[SectionHeadingDecision]:
@@ -1522,7 +1535,7 @@ def drop_reference_entry_decisions(
     in_references = False
 
     for decision in decisions:
-        title = normalize_for_match(decision.section_title)
+        title = _normalize_for_match(decision.section_title)
 
         if title in {"references", "bibliography", "works cited", "literature cited"}:
             in_references = True
@@ -1532,17 +1545,17 @@ def drop_reference_entry_decisions(
         candidate = candidate_by_id.get(decision.candidate_id)
 
         if candidate is not None:
-            if looks_like_reference_entry_candidate(candidate):
+            if _looks_like_reference_entry_candidate(candidate):
                 continue
 
             if in_references:
-                candidate_text = candidate_text_for_filtering(candidate)
-                raw_line = normalize_spaces(candidate.line_text)
+                candidate_text = _candidate_text_for_filtering(candidate)
+                raw_line = _normalize_spaces(candidate.line_text)
 
                 if (
-                    looks_like_numbered_reference_entry(candidate_text)
-                    or looks_like_numbered_reference_entry(raw_line)
-                    or looks_like_unnumbered_reference_entry_fragment(candidate_text)
+                    _looks_like_numbered_reference_entry(candidate_text)
+                    or _looks_like_numbered_reference_entry(raw_line)
+                    or _looks_like_unnumbered_reference_entry_fragment(candidate_text)
                 ):
                     continue
 
@@ -1623,7 +1636,7 @@ def select_section_headings_with_ollama(
 
     decisions: list[SectionHeadingDecision] = []
 
-    for batch in chunked_candidates(candidates, batch_size):
+    for batch in _chunked_candidates(candidates, batch_size):
         decisions.extend(
             _select_heading_batch_with_timeout_fallback(
                 candidates=batch,
@@ -1639,7 +1652,7 @@ def select_section_headings_with_ollama(
         if progress_callback is not None:
             progress_callback(len(batch))
 
-    decisions = dedupe_decisions(decisions)
-    decisions = drop_reference_entry_decisions(decisions, candidates)
+    decisions = _dedupe_decisions(decisions)
+    decisions = _drop_reference_entry_decisions(decisions, candidates)
 
-    return sort_decisions_by_candidate_order(decisions, candidates)
+    return _sort_decisions_by_candidate_order(decisions, candidates)

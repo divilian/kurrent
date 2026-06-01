@@ -1,6 +1,14 @@
 # Storage and retrieval layer for the kurrent corpus (documents, chunks, and
 # vector search).
 
+__all__ = [
+    "get_document",
+    "list_documents",
+    "upsert_document",
+    "upsert_chunks",
+    "search",
+]
+
 def get_document(doc_id: str) -> DocumentRecord | None:
     """
     Used to display:

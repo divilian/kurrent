@@ -19,7 +19,7 @@ def test_sectioner_extracts_lines_through_layout_aware_extractor(monkeypatch):
         fake_extract_layout_pdf_lines,
     )
 
-    lines = sectioner.extract_pdf_lines_with_pages("fake.pdf")
+    lines = sectioner._extract_pdf_lines_with_pages("fake.pdf")
 
     assert lines == [
         (2, "First layout-aware line"),

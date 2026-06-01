@@ -16,6 +16,10 @@ from kurrent.schema import (
     ExtractedMetadata,
 )
 
+__all__ = [
+    "canonical_chunk_pair",
+    "StateStore",
+]
 
 def canonical_chunk_pair(
     chunk_a_id: str,

@@ -135,26 +135,26 @@ def test_ingest_targets_recursively_finds_pdfs(tmp_path):
 def test_sectioner_accepts_common_and_numbered_headings():
     """Verify that plausible section headings are accepted."""
 
-    assert sectioner.looks_like_heading("Abstract")
-    assert sectioner.looks_like_heading("I. Introduction")
-    assert sectioner.looks_like_heading("II. The Model")
-    assert sectioner.looks_like_heading("2.3 Simulation Results")
+    assert sectioner._looks_like_heading("Abstract")
+    assert sectioner._looks_like_heading("I. Introduction")
+    assert sectioner._looks_like_heading("II. The Model")
+    assert sectioner._looks_like_heading("2.3 Simulation Results")
 
 
 def test_sectioner_rejects_front_matter_junk():
     """Verify that author, affiliation, and manuscript-junk lines are rejected."""
 
-    assert not sectioner.looks_like_heading(
+    assert not sectioner._looks_like_heading(
         "Feng Fu1,2, Christoph Hauert1,3, Martin A. Nowak1,4,*, "
         "and Long Wang2,†"
     )
-    assert not sectioner.looks_like_heading(
+    assert not sectioner._looks_like_heading(
         "1Program for Evolutionary Dynamics, Harvard University, "
         "One Brattle Square, Cambridge, MA 02138, USA"
     )
-    assert not sectioner.looks_like_heading("NIH Public Access")
-    assert not sectioner.looks_like_heading("Author Manuscript")
-    assert not sectioner.looks_like_heading("PHYSICAL REVIEW E 89, 042142 (2014)")
+    assert not sectioner._looks_like_heading("NIH Public Access")
+    assert not sectioner._looks_like_heading("Author Manuscript")
+    assert not sectioner._looks_like_heading("PHYSICAL REVIEW E 89, 042142 (2014)")
 
 
 def test_parse_number_list_parses_comma_separated_heading_numbers():
@@ -181,7 +181,7 @@ def test_sectioner_dedupe_preserving_order_is_case_insensitive():
         "INTRODUCTION",
     ]
 
-    assert sectioner.dedupe_preserving_order(values) == [
+    assert sectioner._dedupe_preserving_order(values) == [
         "Abstract",
         "Introduction",
         "Methods",

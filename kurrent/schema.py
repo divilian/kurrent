@@ -7,6 +7,24 @@ from pathlib import Path
 from typing import Literal, Self
 from uuid import uuid4
 
+__all__ = [
+    "make_chunk_id",
+    "parse_chunk_id",
+    "Document",
+    "Chunk",
+    "SectionLine",
+    "SectionSpan",
+    "SearchHit",
+    "ProximityAlertRecord",
+    "ConfirmedLink",
+    "ChunkIdProperties",
+    "VectorChunkMatch",
+    "ChunkHit",
+    "DocumentHit",
+    "ProximityAlert",
+    "ExtractedMetadata",
+]
+
 StorageMode = Literal["managed", "library", "external"]
 PAStatus = Literal["pending", "confirmed", "rejected"]
 

@@ -17,6 +17,12 @@ from kurrent.schema import ChunkHit, DocumentHit
 from kurrent.state_store import StateStore
 from kurrent.sectioner import is_reference_section_chunk
 
+__all__ = [
+    "Searcher",
+    "make_smoke_searcher",
+    "print_smoke_summary",
+]
+
 if TYPE_CHECKING:
     from kurrent.embedder import Embedder
 

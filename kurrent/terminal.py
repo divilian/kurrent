@@ -1,5 +1,10 @@
 """Shared terminal interaction constants and helpers."""
 
+__all__ = [
+    "QUIT_COMMANDS",
+    "is_quit_command",
+]
+
 QUIT_COMMANDS = {"q", "quit", "done", "exit"}
 
 

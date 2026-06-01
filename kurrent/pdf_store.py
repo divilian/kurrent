@@ -8,6 +8,13 @@ import shutil
 
 from kurrent.file_utils import normalize_path, sha256_file
 
+__all__ = [
+    "safe_pdf_stem",
+    "managed_pdf_filename",
+    "managed_pdf_path",
+    "copy_pdf_to_managed_store",
+]
+
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _REPEATED_DASH_RE = re.compile(r"-+")
 

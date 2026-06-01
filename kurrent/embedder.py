@@ -14,6 +14,10 @@ from kurrent.file_utils import normalize_path
 from kurrent.schema import Chunk, VectorChunkMatch, make_chunk_id
 from kurrent.state_store import StateStore
 
+__all__ = [
+    "DEFAULT_EMBED_MODEL_NAME",
+    "Embedder",
+]
 
 DEFAULT_EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 

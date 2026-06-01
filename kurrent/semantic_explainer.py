@@ -17,6 +17,14 @@ from kurrent.cli_display import (
     source_name_for_hit,
 )
 
+__all__ = [
+    "DEFAULT_OLLAMA_URL",
+    "DEFAULT_OLLAMA_MODEL",
+    "ChunkExplanation",
+    "explain_chunk_with_ollama",
+    "SemanticExplanationBuffer",
+]
+
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = os.environ.get(
     "KURRENT_OLLAMA_MODEL",
@@ -33,7 +41,7 @@ class ChunkExplanation:
     error: str | None = None
 
 
-def ollama_chat_json(
+def _ollama_chat_json(
     messages: list[dict[str, str]],
     model: str,
     ollama_url: str,
@@ -67,7 +75,7 @@ def ollama_chat_json(
     return json.loads(content)
 
 
-def build_chunk_explanation_prompt(query: str, hit) -> list[dict[str, str]]:
+def _build_chunk_explanation_prompt(query: str, hit) -> list[dict[str, str]]:
     """Build a compact Ollama prompt for explaining one semantic hit."""
 
     source = source_name_for_hit(hit) or "unknown source"
@@ -116,7 +124,7 @@ Return exactly this JSON shape:
 
 
 
-def clean_ollama_explanation(text: str) -> str:
+def _clean_ollama_explanation(text: str) -> str:
     """Remove repetitive Ollama lead-ins from a relevance explanation."""
 
     text = collapse_whitespace(text)
@@ -152,8 +160,8 @@ def explain_chunk_with_ollama(
     """Ask Ollama how a semantic chunk hit relates to the query."""
 
     try:
-        data = ollama_chat_json(
-            build_chunk_explanation_prompt(query, hit),
+        data = _ollama_chat_json(
+            _build_chunk_explanation_prompt(query, hit),
             model=model,
             ollama_url=ollama_url,
             timeout_seconds=timeout_seconds,
@@ -180,7 +188,7 @@ def explain_chunk_with_ollama(
 
     return ChunkExplanation(
         relevant=relevant,
-        explanation=clean_ollama_explanation(explanation),
+        explanation=_clean_ollama_explanation(explanation),
     )
 
 

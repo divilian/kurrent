@@ -32,6 +32,10 @@ from kurrent.schema import (
 from kurrent.sectioner import is_reference_section_chunk
 from kurrent.state_store import StateStore
 
+__all__ = [
+    "make_proximity_alert_record",
+    "ProximityAlerter",
+]
 
 def make_proximity_alert_record(
     alert: ProximityAlert,
@@ -208,7 +212,7 @@ class ProximityAlerter:
         return alerts
 
 
-def head_tail_wrap(
+def _head_tail_wrap(
     text,
     head_chars=400,
     tail_chars=400,
@@ -249,7 +253,7 @@ def head_tail_wrap(
         subsequent_indent=indent,
     )
 
-def boxed(text):
+def _boxed(text):
     inner = f"* {text} *"
     border = "*" * len(inner)
     return f"{border}\n{inner}\n{border}"
@@ -334,16 +338,16 @@ if __name__ == "__main__":
             or alert.source_page_end is not None
         ):
             print(
-                boxed(
+                _boxed(
                     f"source: {alert.source_path.name} ("
                     f"pp.{alert.source_page_start}-{alert.source_page_end})"
                 )
             )
         else:
-            print(boxed(f"   source: {alert.source_path.name}"))
+            print(_boxed(f"   source: {alert.source_path.name}"))
 
         print(
-            head_tail_wrap(
+            _head_tail_wrap(
                 " ".join(alert.source_text.split()),
                 indent="",
                 sep=" [...] ",
@@ -356,16 +360,16 @@ if __name__ == "__main__":
             or alert.target_page_end is not None
         ):
             print(
-                boxed(
+                _boxed(
                     f"target: {alert.target_path.name} ("
                     f"pp.{alert.target_page_start}-{alert.target_page_end})"
                 )
             )
         else:
-            print(boxed(f"   target: {alert.target_path.name}"))
+            print(_boxed(f"   target: {alert.target_path.name}"))
 
         print(
-            head_tail_wrap(
+            _head_tail_wrap(
                 " ".join(alert.target_text.split()),
                 indent="",
                 sep=" [...] ",

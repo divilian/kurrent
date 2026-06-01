@@ -11,6 +11,18 @@ from tqdm import tqdm
 from kurrent.file_utils import is_pdf
 from kurrent.terminal import QUIT_COMMANDS
 
+__all__ = [
+    "DEFAULT_ROOT_DIR",
+    "PLAYGROUND_BASE_DIR",
+    "QUIT_COMMANDS",
+    "TqdmProgress",
+    "playground_dir",
+    "discover_pdfs",
+    "print_pdf_list",
+    "existing_playground_paths",
+    "prepare_fresh_playground_state",
+    "cleanup_playground_state",
+]
 
 DEFAULT_ROOT_DIR = Path("/home/stephen/papers")
 PLAYGROUND_BASE_DIR = Path("/tmp/kurrent-playgrounds")
@@ -113,7 +125,7 @@ def existing_playground_paths(
     return [path for path in candidates if path.exists()]
 
 
-def delete_playground_paths(paths: Sequence[Path]) -> None:
+def _delete_playground_paths(paths: Sequence[Path]) -> None:
     """Delete playground files/directories."""
 
     for path in paths:
@@ -162,7 +174,7 @@ def prepare_fresh_playground_state(
     if response not in {"", "y", "yes"}:
         raise SystemExit(f"Cancelled; existing {label} left in place.")
 
-    delete_playground_paths(existing_paths)
+    _delete_playground_paths(existing_paths)
 
     print(f"Deleted existing {label}.")
 
@@ -176,7 +188,7 @@ def cleanup_playground_state(
 
     existing_paths = existing_playground_paths(db_path, chroma_path)
 
-    delete_playground_paths(existing_paths)
+    _delete_playground_paths(existing_paths)
 
     if existing_paths:
         print()

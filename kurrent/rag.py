@@ -1,5 +1,10 @@
 # Functions to perform (raw text) retrieval-augmented queries against LLMs.
 
+__all__ = [
+    "build_rag_prompts",
+    "perform_rag_query",
+]
+
 def build_rag_prompts(
     context: str,
     question: str,

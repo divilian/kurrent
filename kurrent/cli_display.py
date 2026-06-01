@@ -7,6 +7,30 @@ import re
 import shutil
 import sys
 
+__all__ = [
+    "ANSI_BOLD",
+    "ANSI_BOLD_YELLOW",
+    "ANSI_BOLD_RED",
+    "ANSI_RESET",
+    "ansi_enabled",
+    "terminal_width",
+    "visible_len",
+    "wrapped_lines",
+    "print_wrapped",
+    "separator_line",
+    "collapse_whitespace",
+    "bold_matches",
+    "context_window",
+    "print_field",
+    "print_body",
+    "section_label",
+    "reference_marker",
+    "source_name_for_hit",
+    "pages_label",
+    "distance_label",
+    "highlighted_metadata_value",
+]
+
 ANSI_BOLD = "\033[1m"
 ANSI_BOLD_YELLOW = "\033[1;33m"
 ANSI_BOLD_RED = "\033[1;31m"

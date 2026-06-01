@@ -27,6 +27,23 @@ import pymupdf
 from kurrent.file_utils import silence_mupdf_messages
 from kurrent.schema import ExtractedMetadata
 
+__all__ = [
+    "clean_metadata_text",
+    "looks_like_bad_title",
+    "extract_embedded_metadata",
+    "extract_text_from_first_pages",
+    "extract_doi",
+    "extract_year",
+    "first_nonempty_lines",
+    "looks_like_header_noise",
+    "guess_title_from_first_page",
+    "guess_authors_from_first_page",
+    "guess_metadata_from_filename",
+    "metadata_from_crossref_work",
+    "lookup_crossref_metadata",
+    "merge_metadata",
+    "extract_metadata",
+]
 
 silence_mupdf_messages()
 
@@ -124,7 +141,7 @@ def extract_text_from_first_pages(
     return "\n".join(pieces)
 
 
-def clean_doi_candidate(candidate: str) -> str | None:
+def _clean_doi_candidate(candidate: str) -> str | None:
     """Clean and validate one DOI candidate extracted from PDF text."""
 
     candidate = candidate.strip()
@@ -167,7 +184,7 @@ def clean_doi_candidate(candidate: str) -> str | None:
     return candidate
 
 
-def doi_candidate_score(candidate: str, from_doi_url: bool) -> tuple[int, int]:
+def _doi_candidate_score(candidate: str, from_doi_url: bool) -> tuple[int, int]:
     """Score DOI candidates so complete DOI URLs beat short fragments."""
 
     return (int(from_doi_url), len(candidate))
@@ -184,16 +201,16 @@ def extract_doi(text: str) -> str | None:
     candidates: list[tuple[tuple[int, int], str]] = []
 
     for match in DOI_URL_RE.finditer(text):
-        doi = clean_doi_candidate(match.group("doi"))
+        doi = _clean_doi_candidate(match.group("doi"))
 
         if doi is not None:
-            candidates.append((doi_candidate_score(doi, True), doi))
+            candidates.append((_doi_candidate_score(doi, True), doi))
 
     for match in DOI_RE.finditer(text):
-        doi = clean_doi_candidate(match.group("doi"))
+        doi = _clean_doi_candidate(match.group("doi"))
 
         if doi is not None:
-            candidates.append((doi_candidate_score(doi, False), doi))
+            candidates.append((_doi_candidate_score(doi, False), doi))
 
     if not candidates:
         return None

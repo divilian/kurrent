@@ -5,6 +5,12 @@ from pathlib import Path
 
 import pymupdf
 
+__all__ = [
+    "is_pdf",
+    "sha256_file",
+    "normalize_path",
+    "silence_mupdf_messages",
+]
 
 def is_pdf(path: str | Path) -> bool:
     path = normalize_path(path)
