@@ -47,11 +47,11 @@ from kurrent.cli_display import (
     separator_line,
     source_name_for_hit,
 )
-from kurrent.semantic_explainer import (
+from kurrent.relevance_judge import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_URL,
-    ChunkExplanation,
-    SemanticExplanationBuffer,
+    RelevanceJudgment,
+    RelevanceJudgmentBuffer,
 )
 from kurrent.semantic_highlighter import (
     semantically_highlighted_excerpt,
@@ -620,8 +620,8 @@ def ingest_targets(path: Path, recursive: bool) -> list[Path]:
 
 
 def print_chunk_explanation(
-    explanation: ChunkExplanation | None,
-    waiting_message: str = "still thinking...",
+    explanation: RelevanceJudgment | None,
+    waiting_message: str = "checking relevance...",
 ) -> None:
     """Print a semantic relevance explanation, if available."""
 
@@ -766,8 +766,8 @@ def print_chunk_summary(
     embedder=None,
     show_distance: bool = False,
     state_store=None,
-    explanation_buffer: SemanticExplanationBuffer | None = None,
-    explanation: ChunkExplanation | None = None,
+    explanation_buffer: RelevanceJudgmentBuffer | None = None,
+    explanation: RelevanceJudgment | None = None,
 ) -> None:
     """Print one chunk-level result summary."""
 
@@ -818,7 +818,7 @@ def print_chunk_detail(
     semantic_query: str | None = None,
     embedder=None,
     show_distance: bool = False,
-    explanation_buffer: SemanticExplanationBuffer | None = None,
+    explanation_buffer: RelevanceJudgmentBuffer | None = None,
 ) -> None:
     """Print one chunk-level result in detail."""
 
@@ -845,7 +845,7 @@ def print_chunk_detail(
         explanation = explanation_buffer.get(hit, wait_seconds=20.0)
         print_chunk_explanation(
             explanation,
-            waiting_message="still thinking...",
+            waiting_message="checking relevance...",
         )
 
     detail_text = full_chunk_text(
@@ -916,7 +916,7 @@ def present_chunk_hits(
     embedder=None,
     show_distance: bool = False,
     state_store=None,
-    explanation_buffer: SemanticExplanationBuffer | None = None,
+    explanation_buffer: RelevanceJudgmentBuffer | None = None,
 ) -> None:
     """Present chunk hits one at a time."""
 
@@ -1038,7 +1038,7 @@ def run_search(args: argparse.Namespace) -> int:
             explanation_buffer = None
 
             if not args.no_explain:
-                explanation_buffer = SemanticExplanationBuffer(
+                explanation_buffer = RelevanceJudgmentBuffer(
                     query=query,
                     hits=hits,
                     model=args.ollama_model,
@@ -1052,7 +1052,7 @@ def run_search(args: argparse.Namespace) -> int:
                 print_wrapped(f"Hits: {len(hits)}")
                 if explanation_buffer is not None:
                     print_wrapped(
-                        "Explanations are being generated in the background. "
+                        "Candidate chunks are being checked for relevance in the background. "
                         "Chunks judged not relevant will be skipped."
                     )
                 present_chunk_hits(
