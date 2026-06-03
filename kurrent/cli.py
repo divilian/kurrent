@@ -60,6 +60,7 @@ from kurrent.semantic_highlighter import (
 from kurrent.terminal import QUIT_COMMANDS, is_quit_command
 
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
+SEMANTIC_OVERFETCH_FACTOR = 5
 
 
 class CliUsageError(Exception):
@@ -96,7 +97,8 @@ class ExistingDocumentStatus:
 
     pdf_sha256: str
     document: object
-    has_current_chunks: bool
+    has_chunks: bool
+    has_current_pipeline: bool
 
 
 
@@ -304,11 +306,13 @@ def metadata_update_kwargs(metadata) -> dict:
 def existing_document_status(
     pdf_path: Path,
     store,
+    use_llm_sectioning: bool = True,
 ) -> ExistingDocumentStatus | None:
     """Return existing-document status for this PDF content, if any."""
 
     from kurrent.chunker import chunker_version
     from kurrent.file_utils import sha256_file
+    from kurrent.pipeline import current_text_pipeline_fingerprint
 
     pdf_sha256 = sha256_file(pdf_path)
     existing = store.get_document_by_sha256(pdf_sha256)
@@ -320,11 +324,21 @@ def existing_document_status(
         doc_id=existing.doc_id,
         chunker_version=chunker_version(),
     )
+    pipeline_fingerprint = current_text_pipeline_fingerprint(
+        use_llm_sectioning=use_llm_sectioning,
+    )
 
     return ExistingDocumentStatus(
         pdf_sha256=pdf_sha256,
         document=existing,
-        has_current_chunks=bool(existing_chunks),
+        has_chunks=bool(existing_chunks),
+        has_current_pipeline=(
+            bool(existing_chunks)
+            and store.document_has_current_pipeline(
+                existing.doc_id,
+                pipeline_fingerprint,
+            )
+        ),
     )
 
 
@@ -356,11 +370,11 @@ def print_existing_document_needs_current_chunks_message(
     print(f"Existing document: {source_pdf_path}", flush=True)
     print_wrapped(
         "Found existing document record for this PDF, but it has not been "
-        "chunked with the current chunker version.",
+        "processed with the current extraction/sectioning/chunking pipeline.",
     )
     print_field("stored PDF", existing_document.pdf_path)
     print_wrapped(
-        "Completing ingest using the existing document record.",
+        "Refreshing derived artifacts using the existing document record.",
     )
 
 
@@ -388,8 +402,9 @@ def ingest_pdf_with_metadata(
     managed PDF directory or left in place.
     """
 
-    from kurrent.chunker import chunk_document
+    from kurrent.chunker import chunk_document, chunker_version
     from kurrent.file_utils import is_pdf, normalize_path, sha256_file
+    from kurrent.pipeline import current_text_pipeline_fingerprint
     from kurrent.schema import Document
 
     pdf_path = normalize_path(pdf_path)
@@ -433,6 +448,26 @@ def ingest_pdf_with_metadata(
             if updates:
                 store.update_document_metadata(doc_id, **updates)
 
+    pipeline_fingerprint = current_text_pipeline_fingerprint(
+        reviewed_headings=reviewed_headings,
+        use_llm_sectioning=use_llm_sectioning,
+    )
+    existing_current_version_chunks = store.get_chunks_for_document(
+        doc_id=doc_id,
+        chunker_version=chunker_version(),
+    )
+    stale_existing_chunks = (
+        already_existed
+        and bool(existing_current_version_chunks)
+        and not store.document_has_current_pipeline(
+            doc_id,
+            pipeline_fingerprint,
+        )
+    )
+
+    if stale_existing_chunks:
+        embedder.delete_document(doc_id)
+
     chunk_document(
         doc_id,
         store,
@@ -467,9 +502,13 @@ def ingest_one_pdf(
 
     pdf_path = normalize_path(pdf_path)
 
-    existing_status = existing_document_status(pdf_path, store)
+    existing_status = existing_document_status(
+        pdf_path,
+        store,
+        use_llm_sectioning=use_llm_sectioning,
+    )
 
-    if existing_status is not None and existing_status.has_current_chunks:
+    if existing_status is not None and existing_status.has_current_pipeline:
         print_already_ingested_message(
             source_pdf_path=pdf_path,
             existing_document=existing_status.document,
@@ -562,7 +601,7 @@ def ingest_one_pdf(
     print()
 
     if outcome.already_existed:
-        print("Updated existing document with current chunks.", flush=True)
+        print("Updated existing document with current pipeline output.", flush=True)
     else:
         print("Created new document.", flush=True)
 
@@ -842,7 +881,7 @@ def print_chunk_detail(
         print_field("source", source_name)
 
     if explanation_buffer is not None:
-        explanation = explanation_buffer.get(hit, wait_seconds=20.0)
+        explanation = explanation_buffer.get(hit, wait_seconds=0.0)
         print_chunk_explanation(
             explanation,
             waiting_message="checking relevance...",
@@ -917,6 +956,7 @@ def present_chunk_hits(
     show_distance: bool = False,
     state_store=None,
     explanation_buffer: RelevanceJudgmentBuffer | None = None,
+    max_display: int | None = None,
 ) -> None:
     """Present chunk hits one at a time."""
 
@@ -930,6 +970,9 @@ def present_chunk_hits(
     skipped = 0
 
     for hit in hits:
+        if max_display is not None and displayed >= max_display:
+            break
+
         explanation = None
 
         if explanation_buffer is not None:
@@ -960,17 +1003,6 @@ def present_chunk_hits(
                 break
 
             if choice == "d":
-                if explanation_buffer is not None:
-                    refreshed = explanation_buffer.get(hit, wait_seconds=20.0)
-
-                    if refreshed is not None and refreshed.relevant is False:
-                        print_wrapped(
-                            "This result was later judged not relevant, "
-                            "so it is being skipped."
-                        )
-                        skipped += 1
-                        break
-
                 print_chunk_detail(
                     hit,
                     displayed,
@@ -1028,9 +1060,14 @@ def run_search(args: argparse.Namespace) -> int:
 
             embedder = Embedder(chroma_path=state_paths.chroma_path)
             searcher = Searcher(state_store=store, embedder=embedder)
+            candidate_limit = args.limit
+
+            if not args.no_explain:
+                candidate_limit = args.limit * SEMANTIC_OVERFETCH_FACTOR
+
             hits = searcher.semantic_chunk_search(
                 query,
-                n_results=args.limit,
+                n_results=candidate_limit,
                 max_distance=args.max_distance,
                 include_reference_sections=args.include_reference_sections,
             )
@@ -1049,8 +1086,11 @@ def run_search(args: argparse.Namespace) -> int:
 
             try:
                 print_wrapped(f"Semantic search: {query!r}")
-                print_wrapped(f"Hits: {len(hits)}")
-                if explanation_buffer is not None:
+                if explanation_buffer is None:
+                    print_wrapped(f"Hits: {len(hits)}")
+                else:
+                    print_wrapped(f"Candidate chunks retrieved: {len(hits)}")
+                    print_wrapped(f"Display limit: {args.limit}")
                     print_wrapped(
                         "Candidate chunks are being checked for relevance in the background. "
                         "Chunks judged not relevant will be skipped."
@@ -1062,6 +1102,7 @@ def run_search(args: argparse.Namespace) -> int:
                     show_distance=True,
                     state_store=store,
                     explanation_buffer=explanation_buffer,
+                    max_display=args.limit if explanation_buffer is not None else None,
                 )
             finally:
                 if explanation_buffer is not None:
@@ -1410,26 +1451,26 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument(
         "--no-explain",
         action="store_true",
-        help="disable background Ollama explanations for semantic search hits.",
+        help="disable background Ollama relevance judging for semantic search hits.",
     )
     search_parser.add_argument(
         "--ollama-model",
         default=DEFAULT_OLLAMA_MODEL,
         help=(
-            "Ollama model used for semantic-hit explanations "
+            "Ollama model used for semantic-hit relevance judging "
             f"(default: {DEFAULT_OLLAMA_MODEL})."
         ),
     )
     search_parser.add_argument(
         "--ollama-url",
         default=DEFAULT_OLLAMA_URL,
-        help=f"Ollama base URL for explanations (default: {DEFAULT_OLLAMA_URL}).",
+        help=f"Ollama base URL for relevance judging (default: {DEFAULT_OLLAMA_URL}).",
     )
     search_parser.add_argument(
         "--ollama-timeout",
         type=float,
         default=45.0,
-        help="seconds before one Ollama explanation request times out.",
+        help="seconds before one Ollama relevance judgment request times out.",
     )
     search_parser.add_argument(
         "--ollama-workers",

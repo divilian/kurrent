@@ -20,7 +20,8 @@ from kurrent.file_utils import (
 )
 from kurrent.metadata_extractor import extract_metadata
 from kurrent.state_store import StateStore
-from kurrent.chunker import chunk_document
+from kurrent.chunker import chunk_document, chunker_version
+from kurrent.pipeline import current_text_pipeline_fingerprint
 
 __all__ = [
     "CROSSREF_REQUEST_INTERVAL_SECONDS",
@@ -79,6 +80,25 @@ def ingest_pdf(
         sha256,
         metadata=metadata,
     )
+
+    pipeline_fingerprint = current_text_pipeline_fingerprint(
+        reviewed_headings=reviewed_headings,
+        use_llm_sectioning=use_llm_sectioning,
+    )
+    existing_current_version_chunks = store.get_chunks_for_document(
+        doc_id=doc.doc_id,
+        chunker_version=chunker_version(),
+    )
+    stale_existing_chunks = (
+        bool(existing_current_version_chunks)
+        and not store.document_has_current_pipeline(
+            doc.doc_id,
+            pipeline_fingerprint,
+        )
+    )
+
+    if embedder is not None and stale_existing_chunks:
+        embedder.delete_document(doc.doc_id)
 
     chunk_document(
         doc.doc_id,

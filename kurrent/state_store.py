@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import sqlite3
 
@@ -309,6 +309,101 @@ class StateStore:
         ).fetchall()
 
         return [self._row_to_chunk(row) for row in rows]
+
+    def get_document_pipeline_fingerprint(self, doc_id: str) -> str | None:
+        """Return the stored derived-text pipeline fingerprint, if present."""
+
+        row = self.conn.execute(
+            """
+            SELECT pipeline_fingerprint
+            FROM document_pipeline_state
+            WHERE doc_id = ?
+            """,
+            (doc_id,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return row["pipeline_fingerprint"]
+
+    def set_document_pipeline_fingerprint(
+        self,
+        doc_id: str,
+        pipeline_fingerprint: str,
+    ) -> None:
+        """Record the pipeline fingerprint used for this document's chunks."""
+
+        if self.get_document(doc_id) is None:
+            raise ValueError(f"Document not found: {doc_id}")
+
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO document_pipeline_state
+                (doc_id, pipeline_fingerprint, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    pipeline_fingerprint = excluded.pipeline_fingerprint,
+                    updated_at = excluded.updated_at
+                """,
+                (doc_id, pipeline_fingerprint, updated_at),
+            )
+
+    def document_has_current_pipeline(
+        self,
+        doc_id: str,
+        pipeline_fingerprint: str,
+    ) -> bool:
+        """Return whether stored derived artifacts match the given pipeline."""
+
+        return self.get_document_pipeline_fingerprint(doc_id) == pipeline_fingerprint
+
+    def delete_derived_artifacts_for_document(self, doc_id: str) -> None:
+        """Delete disposable derived artifacts for one document.
+
+        This preserves the document record and its metadata, but removes stored
+        chunks and the pipeline-state row so the PDF can be extracted, sectioned,
+        and chunked again. Current PA/CL rows are structurally chunk-based, so
+        rows referencing this document's chunks must also be removed before the
+        chunks can be deleted.
+        """
+
+        with self.conn:
+            self.conn.execute(
+                """
+                DELETE FROM confirmed_links
+                WHERE pa_id IN (
+                    SELECT pa_id
+                    FROM proximity_alerts
+                    WHERE doc_a_id = ? OR doc_b_id = ?
+                )
+                """,
+                (doc_id, doc_id),
+            )
+            self.conn.execute(
+                """
+                DELETE FROM proximity_alerts
+                WHERE doc_a_id = ? OR doc_b_id = ?
+                """,
+                (doc_id, doc_id),
+            )
+            self.conn.execute(
+                """
+                DELETE FROM chunks
+                WHERE doc_id = ?
+                """,
+                (doc_id,),
+            )
+            self.conn.execute(
+                """
+                DELETE FROM document_pipeline_state
+                WHERE doc_id = ?
+                """,
+                (doc_id,),
+            )
 
 
     @staticmethod

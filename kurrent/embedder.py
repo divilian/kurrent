@@ -76,6 +76,13 @@ class Embedder:
             ],
         )
 
+    def delete_document(self, doc_id: str) -> None:
+        """Remove all vector-index entries for one document from this collection."""
+
+        self.collection.delete(
+            where={"doc_id": doc_id},
+        )
+
     def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
         """
         Generate embedding vectors for a list of texts using this Embedder's

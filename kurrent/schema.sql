@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS documents (
     CHECK (storage_mode IN ('managed', 'library', 'external'))
 );
 
+CREATE TABLE IF NOT EXISTS document_pipeline_state (
+    doc_id TEXT PRIMARY KEY,
+    pipeline_fingerprint TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+
+    FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS chunks (
     doc_id TEXT NOT NULL,
     chunker_version TEXT NOT NULL,

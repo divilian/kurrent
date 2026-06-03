@@ -299,14 +299,14 @@ def test_existing_document_status_reports_missing_current_chunks(tmp_path):
 
     assert status is not None
     assert status.document.doc_id == document.doc_id
-    assert status.has_current_chunks is False
+    assert status.has_current_pipeline is False
 
 
-def test_missing_current_chunks_message_mentions_current_chunker_version(
+def test_missing_current_chunks_message_mentions_stale_pipeline(
     tmp_path,
     capsys,
 ):
-    """Verify the user-facing wording for incomplete/current-version ingest."""
+    """Verify the user-facing wording for stale derived ingest artifacts."""
 
     source_pdf = write_fake_pdf(tmp_path / "paper.pdf", b"message case\n")
     document = Document.for_pdf(
@@ -320,5 +320,7 @@ def test_missing_current_chunks_message_mentions_current_chunker_version(
 
     output = " ".join(capsys.readouterr().out.split())
 
-    assert "has not been chunked with the current chunker version" in output
-    assert "Completing ingest using the existing document record" in output
+    assert (
+        "has not been processed with the current "
+        "extraction/sectioning/chunking pipeline" in output
+    )

@@ -12,6 +12,7 @@ from kurrent.pdf_text_extractor import (
 )
 from kurrent.state_store import StateStore
 from kurrent.schema import Chunk, SectionSpan
+from kurrent.pipeline import current_text_pipeline_fingerprint
 from kurrent.sectioner import (
     detect_heading_candidates,
     detect_heading_candidates_with_context,
@@ -78,13 +79,24 @@ def chunk_document(
     if doc is None:
         raise ValueError(f"No such document: {doc_id}")
 
+    pipeline_fingerprint = current_text_pipeline_fingerprint(
+        reviewed_headings=reviewed_headings,
+        use_llm_sectioning=use_llm_sectioning,
+    )
+
     existing_chunks = store.get_chunks_for_document(
         doc_id=doc.doc_id,
         chunker_version=chunker_version(),
     )
 
-    if existing_chunks:
+    if existing_chunks and store.document_has_current_pipeline(
+        doc.doc_id,
+        pipeline_fingerprint,
+    ):
         return existing_chunks
+
+    if existing_chunks:
+        store.delete_derived_artifacts_for_document(doc.doc_id)
 
     if reviewed_headings is not None:
         sections = make_section_spans_from_headings(
@@ -114,6 +126,10 @@ def chunk_document(
     )
 
     store.insert_chunks(chunks)
+    store.set_document_pipeline_fingerprint(
+        doc.doc_id,
+        pipeline_fingerprint,
+    )
     return chunks
 
 
