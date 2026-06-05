@@ -691,11 +691,257 @@ def document_for_hit(hit, state_store):
         return None
 
 
+def document_path_for_pipeline_message(document) -> Path | None:
+    """Return the best available PDF path for a stale-pipeline hint."""
+
+    path = getattr(document, "pdf_path", None)
+
+    if path is None:
+        path = getattr(document, "path", None)
+
+    return path
+
+
+def document_has_stale_search_pipeline(document, state_store) -> bool:
+    """Return whether a search-result document has stale derived artifacts.
+
+    Search is read-only, so stale detection must not trigger a refresh or make
+    search fail. The stored document-level pipeline fingerprint is the source of
+    truth here: chunk IDs and Chroma collection names can still look current
+    when extractor or sectioner code has changed without a chunker-version bump.
+    """
+
+    if document is None or state_store is None:
+        return False
+
+    try:
+        from kurrent.pipeline import is_current_text_pipeline_fingerprint
+
+        pipeline_fingerprint = state_store.get_document_pipeline_fingerprint(
+            document.doc_id,
+        )
+        return not is_current_text_pipeline_fingerprint(pipeline_fingerprint)
+    except Exception:
+        return False
+
+
+def stale_pipeline_message(document) -> str:
+    """Return a concise user-facing stale-pipeline refresh hint."""
+
+    path = document_path_for_pipeline_message(document)
+
+    if path is None:
+        return "stale; run `kurrent ingest <pdf>` to refresh"
+
+    return f"stale; run `kurrent ingest {path}` to refresh"
+
+
+def print_stale_pipeline_warning(document, state_store) -> None:
+    """Print a stale-pipeline warning for a search result, if needed."""
+
+    if document_has_stale_search_pipeline(document, state_store):
+        print_field("pipeline", stale_pipeline_message(document))
+
+
+
+
+def all_documents_for_semantic_maintenance(store) -> list:
+    """Return all documents known to kurrent for semantic-index checks.
+
+    StateStore will likely grow a public list_documents() method. Until then,
+    keep this helper tolerant of both real StateStore objects and lightweight
+    unit-test fakes.
+    """
+
+    if hasattr(store, "list_documents"):
+        return list(store.list_documents())
+
+    if hasattr(store, "conn") and hasattr(store, "_row_to_document"):
+        rows = store.conn.execute(
+            """
+            SELECT *
+            FROM documents
+            ORDER BY
+                title IS NULL,
+                title COLLATE NOCASE,
+                pdf_path COLLATE NOCASE
+            """
+        ).fetchall()
+        return [store._row_to_document(row) for row in rows]
+
+    return []
+
+
+def document_needs_semantic_refresh(document, store, embedder) -> bool:
+    """Return whether a document needs refresh for current semantic search.
+
+    A document needs semantic refresh if its stored text pipeline is stale, or if
+    it has current text artifacts in SQLite but has not yet been indexed into the
+    current semantic-search Chroma collection.
+    """
+
+    if document is None:
+        return False
+
+    try:
+        from kurrent.pipeline import is_current_text_pipeline_fingerprint
+
+        pipeline_fingerprint = store.get_document_pipeline_fingerprint(
+            document.doc_id,
+        )
+        if not is_current_text_pipeline_fingerprint(pipeline_fingerprint):
+            return True
+
+        if hasattr(embedder, "has_document"):
+            return not embedder.has_document(document.doc_id)
+    except Exception:
+        return False
+
+    return False
+
+
+def semantic_refresh_documents(store, embedder) -> list:
+    """Return documents needing refresh before trustworthy semantic search."""
+
+    return [
+        document
+        for document in all_documents_for_semantic_maintenance(store)
+        if document_needs_semantic_refresh(document, store, embedder)
+    ]
+
+
+def prompt_refresh_semantic_documents(documents: list) -> bool:
+    """Ask whether semantic search should refresh stale/missing documents."""
+
+    if not documents:
+        return False
+
+    count = len(documents)
+    noun = "document" if count == 1 else "documents"
+
+    print()
+    print_wrapped(
+        f"{count} {noun} need refresh before semantic search is fully current."
+    )
+    print_wrapped(
+        "They may have been ingested with an older extraction/sectioning/"
+        "chunking pipeline, or may be missing from the current semantic index."
+    )
+    print_wrapped(
+        "Refreshing now will rebuild derived artifacts as needed, update the "
+        "current Chroma collection, and then run the search."
+    )
+
+    try:
+        answer = input("Refresh them now? [Y/n] ").strip().lower()
+    except EOFError:
+        print()
+        print_wrapped(
+            "Continuing without refresh. Semantic search may omit stale or "
+            "unindexed documents."
+        )
+        return False
+
+    if answer in {"", "y", "yes"}:
+        return True
+
+    print_wrapped(
+        "Continuing without refresh. Semantic search may omit stale or "
+        "unindexed documents."
+    )
+    return False
+
+
+def metadata_from_document(document):
+    """Return ExtractedMetadata preserving existing document metadata."""
+
+    from kurrent.schema import ExtractedMetadata
+
+    return ExtractedMetadata(
+        title=document.title,
+        authors=document.authors,
+        year=document.year,
+        doi=document.doi,
+    )
+
+
+def refresh_documents_for_semantic_search(
+    documents: list,
+    store,
+    embedder,
+) -> tuple[int, int]:
+    """Refresh documents before semantic search and return successes/failures."""
+
+    if not documents:
+        return 0, 0
+
+    print()
+    print_wrapped(f"Refreshing {len(documents)} documents for semantic search...")
+
+    refreshed = 0
+    failed = 0
+
+    for i, document in enumerate(documents, start=1):
+        print()
+        print(f"[{i}/{len(documents)}] {document.pdf_path}", flush=True)
+
+        try:
+            ingest_pdf_with_metadata(
+                pdf_path=document.pdf_path,
+                store=store,
+                embedder=embedder,
+                metadata=metadata_from_document(document),
+                metadata_was_reviewed=False,
+                reviewed_headings=None,
+                use_llm_sectioning=True,
+                storage_mode=document.storage_mode,
+                managed_pdf_dir=None,
+            )
+            refreshed += 1
+        except Exception as exc:
+            failed += 1
+            message = f"{type(exc).__name__}: {exc}"
+            print_wrapped(
+                f"Could not refresh {document.pdf_path}: {message}",
+            )
+
+    print()
+    print_wrapped(
+        f"Semantic refresh complete: {refreshed} refreshed, {failed} failed."
+    )
+
+    if failed:
+        print_wrapped(
+            "Running search anyway. Results may omit documents that failed refresh."
+        )
+    else:
+        print_wrapped("Semantic index is current. Running search.")
+
+    return refreshed, failed
+
+
+def offer_semantic_refresh_if_needed(store, embedder) -> None:
+    """Offer to refresh stale/missing semantic-search documents before search."""
+
+    documents = semantic_refresh_documents(store, embedder)
+
+    if not documents:
+        return
+
+    if prompt_refresh_semantic_documents(documents):
+        refresh_documents_for_semantic_search(
+            documents=documents,
+            store=store,
+            embedder=embedder,
+        )
+
+
 def print_document_summary(
     hit,
     index: int,
     total: int,
     search_text: str | None = None,
+    state_store=None,
 ) -> None:
     """Print one document-level result summary."""
 
@@ -721,12 +967,15 @@ def print_document_summary(
     if hit.score is not None:
         print_field("score", f"{hit.score:.4f}")
 
+    print_stale_pipeline_warning(hit, state_store)
+
 
 def print_document_detail(
     hit,
     index: int,
     total: int,
     search_text: str | None = None,
+    state_store=None,
 ) -> None:
     """Print one document-level result in detail."""
 
@@ -751,6 +1000,8 @@ def print_document_detail(
 
     if hit.score is not None:
         print_field("score", f"{hit.score:.4f}")
+
+    print_stale_pipeline_warning(hit, state_store)
 
 
 def chunk_excerpt(
@@ -828,6 +1079,8 @@ def print_chunk_summary(
         print_field("authors", document.authors or "unknown author")
         print_field("year", document.year if document.year is not None else "n.d.")
 
+    print_stale_pipeline_warning(document, state_store)
+
     section = section_label(hit)
     if section is not None:
         print_field("section", section)
@@ -857,9 +1110,12 @@ def print_chunk_detail(
     semantic_query: str | None = None,
     embedder=None,
     show_distance: bool = False,
+    state_store=None,
     explanation_buffer: RelevanceJudgmentBuffer | None = None,
 ) -> None:
     """Print one chunk-level result in detail."""
+
+    document = document_for_hit(hit, state_store)
 
     print()
     print_wrapped(
@@ -879,6 +1135,8 @@ def print_chunk_detail(
     source_name = source_name_for_hit(hit)
     if source_name is not None:
         print_field("source", source_name)
+
+    print_stale_pipeline_warning(document, state_store)
 
     if explanation_buffer is not None:
         explanation = explanation_buffer.get(hit, wait_seconds=0.0)
@@ -910,6 +1168,7 @@ def prompt_result_action() -> str:
 def present_document_hits(
     hits,
     search_text: str | None = None,
+    state_store=None,
 ) -> None:
     """Present document hits one at a time."""
 
@@ -925,6 +1184,7 @@ def present_document_hits(
             i,
             total,
             search_text=search_text,
+            state_store=state_store,
         )
 
         while True:
@@ -939,6 +1199,7 @@ def present_document_hits(
                     i,
                     total,
                     search_text=search_text,
+                    state_store=state_store,
                 )
                 continue
 
@@ -1011,6 +1272,7 @@ def present_chunk_hits(
                     semantic_query=semantic_query,
                     embedder=embedder,
                     show_distance=show_distance,
+                    state_store=state_store,
                     explanation_buffer=explanation_buffer,
                 )
                 continue
@@ -1060,6 +1322,9 @@ def run_search(args: argparse.Namespace) -> int:
 
             embedder = Embedder(chroma_path=state_paths.chroma_path)
             searcher = Searcher(state_store=store, embedder=embedder)
+
+            offer_semantic_refresh_if_needed(store, embedder)
+
             candidate_limit = args.limit
 
             if not args.no_explain:
@@ -1116,14 +1381,14 @@ def run_search(args: argparse.Namespace) -> int:
             hits = searcher.metadata_search(query, limit=args.limit)
             print_wrapped(f"Metadata search: {query!r}")
             print_wrapped(f"Documents: {len(hits)}")
-            present_document_hits(hits, search_text=query)
+            present_document_hits(hits, search_text=query, state_store=store)
             return 0
 
         if args.search_mode == "text":
             hits = searcher.full_text_search(query, limit=args.limit)
             print_wrapped(f"Full-text search: {query!r}")
             print_wrapped(f"Chunks: {len(hits)}")
-            present_chunk_hits(hits, search_text=query)
+            present_chunk_hits(hits, search_text=query, state_store=store)
             return 0
 
         raise CliUsageError(f"Unknown search mode: {args.search_mode}")

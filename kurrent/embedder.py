@@ -1,7 +1,6 @@
 # Functions/classes to compute embeddings for chunks of text and index them in
 # Chroma.
 from __future__ import annotations
-from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Sequence
@@ -11,7 +10,8 @@ from sentence_transformers import SentenceTransformer
 
 from kurrent.chunker import chunker_version
 from kurrent.file_utils import normalize_path
-from kurrent.schema import Chunk, VectorChunkMatch, make_chunk_id
+from kurrent.pipeline import current_semantic_index_fingerprint
+from kurrent.schema import Chunk, VectorChunkMatch
 from kurrent.state_store import StateStore
 
 __all__ = [
@@ -35,8 +35,9 @@ class Embedder:
     ):
         self.chroma_path = normalize_path(chroma_path)
         self.model_name = model_name
+        self.semantic_index_fingerprint = current_semantic_index_fingerprint()
         self.collection_name = collection_name or self._make_collection_name(
-            chunker_version=chunker_version(),
+            semantic_index_fingerprint=self.semantic_index_fingerprint,
             model_name=model_name,
         )
 
@@ -63,6 +64,7 @@ class Embedder:
         if not chunks:
             raise ValueError(f"No chunks found for document: {doc_id}")
 
+        pipeline_fingerprint = store.get_document_pipeline_fingerprint(doc_id)
         texts = [chunk.text for chunk in chunks]
         embeddings = self.generate_embeddings(texts)
 
@@ -71,7 +73,11 @@ class Embedder:
             documents=texts,
             embeddings=embeddings,
             metadatas=[
-                self._metadata_for_chunk(chunk)
+                self._metadata_for_chunk(
+                    chunk,
+                    pipeline_fingerprint=pipeline_fingerprint,
+                    semantic_index_fingerprint=self.semantic_index_fingerprint,
+                )
                 for chunk in chunks
             ],
         )
@@ -83,6 +89,17 @@ class Embedder:
             where={"doc_id": doc_id},
         )
 
+    def has_document(self, doc_id: str) -> bool:
+        """Return whether this Chroma collection has entries for a document."""
+
+        results = self.collection.get(
+            where={"doc_id": doc_id},
+            limit=1,
+            include=[],
+        )
+
+        return bool(results.get("ids"))
+
     def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
         """
         Generate embedding vectors for a list of texts using this Embedder's
@@ -93,18 +110,18 @@ class Embedder:
 
     @staticmethod
     def _make_collection_name(
-        chunker_version: str,
+        semantic_index_fingerprint: str,
         model_name: str,
     ) -> str:
         """
-        Build a Chroma-safe collection name from the chunker and embedding
-        model.
+        Build a Chroma-safe collection name from the semantic index and
+        embedding model.
 
         Chroma collection names cannot contain arbitrary characters such as
-        slashes, so model names like sentence-transformers/all-MiniLM-L6-v2 are
-        sanitized.
+        slashes, so model names like sentence-transformers/all-MiniLM-L6-v2 and
+        pipeline fingerprints are sanitized.
         """
-        raw_name = f"kurrent_chunks__{chunker_version}__{model_name}"
+        raw_name = f"kurrent_chunks__{semantic_index_fingerprint}__{model_name}"
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name)
         safe_name = re.sub(r"\.{2,}", ".", safe_name)
         safe_name = safe_name.strip("._-")
@@ -116,20 +133,36 @@ class Embedder:
 
         return safe_name[:512]
 
-    def _metadata_for_chunk(self, chunk: Chunk) -> dict:
+    def _metadata_for_chunk(
+        self,
+        chunk: Chunk,
+        pipeline_fingerprint: str | None = None,
+        semantic_index_fingerprint: str | None = None,
+    ) -> dict:
         """
         Return Chroma metadata for a Chunk.
 
         Chroma metadata values should be scalar values, and None values are best
-        avoided, so page_start/page_end are included only when present.
+        avoided, so page_start/page_end and fingerprints are included only when
+        present.
         """
         metadata = {
             "doc_id": chunk.doc_id,
             "chunker_version": chunk.chunker_version,
             "chunk_index": chunk.chunk_index,
             "text_sha256": chunk.text_sha256,
-            "embedding_model": self.model_name,
+            "embedding_model": getattr(
+                self,
+                "model_name",
+                DEFAULT_EMBED_MODEL_NAME,
+            ),
         }
+
+        if pipeline_fingerprint is not None:
+            metadata["text_pipeline_fingerprint"] = pipeline_fingerprint
+
+        if semantic_index_fingerprint is not None:
+            metadata["semantic_index_fingerprint"] = semantic_index_fingerprint
 
         if chunk.page_start is not None:
             metadata["page_start"] = chunk.page_start
@@ -243,12 +276,12 @@ class Embedder:
 
         return matches
 
+
 if __name__ == "__main__":
 
     # Smoke test.
     from pathlib import Path
     from pprint import pprint
-    from tempfile import TemporaryDirectory
 
     from kurrent.ingester import ingest_pdf
 
