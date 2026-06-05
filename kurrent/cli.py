@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -1004,6 +1006,113 @@ def print_document_detail(
     print_stale_pipeline_warning(hit, state_store)
 
 
+def prompt_document_result_action() -> str:
+    """Prompt for the next interactive document-result action."""
+
+    try:
+        return input("[Enter] next, d details, e edit metadata, q quit > ").strip().lower()
+    except EOFError:
+        print()
+        return "q"
+
+
+def open_pdf_for_metadata_edit(document) -> None:
+    """Best-effort open of a document PDF in the user's default viewer."""
+
+    path = document_path_for_pipeline_message(document)
+
+    if path is None:
+        print_wrapped("No PDF path is available for this document.")
+        return
+
+    path = Path(path)
+
+    if not path.exists():
+        print_wrapped(f"PDF path does not exist: {path}")
+        return
+
+    print_wrapped("Opening PDF so you can inspect title/authors/year/DOI.")
+    print_wrapped("When ready, return here and edit metadata.")
+
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+            return
+
+        command = ["open", str(path)] if sys.platform == "darwin" else ["xdg-open", str(path)]
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        print_wrapped(
+            f"Could not open PDF automatically: {type(exc).__name__}: {exc}"
+        )
+        print_wrapped(f"PDF path: {path}")
+
+
+def document_hit_from_document(document, previous_hit):
+    """Return a DocumentHit refreshed from an updated Document record."""
+
+    from kurrent.schema import DocumentHit
+
+    return DocumentHit(
+        doc_id=document.doc_id,
+        path=document.pdf_path,
+        title=document.title,
+        authors=document.authors,
+        year=document.year,
+        score=getattr(previous_hit, "score", None),
+        best_chunk_id=getattr(previous_hit, "best_chunk_id", None),
+    )
+
+
+def metadata_changes(document, metadata) -> dict:
+    """Return metadata update kwargs whose values differ from the document."""
+
+    updates = metadata_update_kwargs(metadata)
+
+    return {
+        key: value
+        for key, value in updates.items()
+        if getattr(document, key) != value
+    }
+
+
+def edit_document_hit_metadata(hit, state_store):
+    """Interactively edit metadata for a document search hit."""
+
+    if state_store is None:
+        print_wrapped("Metadata editing requires an open kurrent state store.")
+        return hit
+
+    document = state_store.get_document(hit.doc_id)
+
+    if document is None:
+        print_wrapped("Could not find this document in kurrent state.")
+        return hit
+
+    open_pdf_for_metadata_edit(document)
+    edited_metadata = review_metadata(metadata_from_document(document))
+    updates = metadata_changes(document, edited_metadata)
+
+    if not updates:
+        print_wrapped("Metadata unchanged.")
+        return hit
+
+    state_store.update_document_metadata(document.doc_id, **updates)
+    refreshed = state_store.get_document(document.doc_id)
+
+    if refreshed is None:
+        print_wrapped("Metadata updated, but the refreshed document could not be loaded.")
+        return hit
+
+    print_wrapped("Metadata updated.")
+    return document_hit_from_document(refreshed, hit)
+
+
 def chunk_excerpt(
     hit,
     search_text: str | None,
@@ -1188,7 +1297,7 @@ def present_document_hits(
         )
 
         while True:
-            choice = prompt_result_action()
+            choice = prompt_document_result_action()
 
             if choice == "":
                 break
@@ -1203,10 +1312,21 @@ def present_document_hits(
                 )
                 continue
 
+            if choice == "e":
+                hit = edit_document_hit_metadata(hit, state_store)
+                print_document_summary(
+                    hit,
+                    i,
+                    total,
+                    search_text=search_text,
+                    state_store=state_store,
+                )
+                continue
+
             if is_quit_command(choice):
                 return
 
-            print("Please press Enter, or type d or q.")
+            print("Please press Enter, or type d, e, or q.")
 
 
 def present_chunk_hits(
