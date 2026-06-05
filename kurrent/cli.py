@@ -1395,6 +1395,85 @@ def run_search(args: argparse.Namespace) -> int:
     finally:
         store.close()
 
+
+def run_converse(args: argparse.Namespace) -> int:
+    """Run the kurrent converse command."""
+
+    from kurrent.config import get_kurrent_state_paths
+    from kurrent.converser import ConverseEngine, ConverseError
+    from kurrent.embedder import Embedder
+    from kurrent.searcher import Searcher
+    from kurrent.state_store import StateStore
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    if not state_paths.sqlite_path.exists():
+        raise CliUsageError(
+            "No kurrent SQLite database exists yet. Ingest PDFs first, or pass "
+            "--state-dir pointing to an existing kurrent state directory. "
+            f"Expected database: {state_paths.sqlite_path}"
+        )
+
+    if not state_paths.chroma_path.exists():
+        raise CliUsageError(
+            "No kurrent Chroma directory exists yet. Converse requires "
+            "embedded chunks. Ingest PDFs first, or pass --state-dir pointing "
+            "to an existing kurrent state directory. "
+            f"Expected Chroma directory: {state_paths.chroma_path}"
+        )
+
+    store = StateStore(state_paths.sqlite_path)
+
+    try:
+        embedder = Embedder(chroma_path=state_paths.chroma_path)
+        searcher = Searcher(state_store=store, embedder=embedder)
+
+        offer_semantic_refresh_if_needed(store, embedder)
+
+        engine = ConverseEngine(
+            searcher=searcher,
+            model=args.ollama_model,
+            ollama_url=args.ollama_url,
+            timeout_seconds=args.ollama_timeout,
+            top_k=args.limit,
+            max_distance=args.max_distance,
+            include_reference_sections=args.include_reference_sections,
+        )
+
+        print("\nHi, what research question are you interested in today?")
+        print(f"(Type {', '.join(QUIT_COMMANDS)} to leave.)")
+
+        def report_progress(message: str) -> None:
+            print_wrapped(f"  {message}")
+
+        while True:
+            try:
+                user_text = input("> ").strip()
+            except EOFError:
+                print()
+                return 0
+
+            if is_quit_command(user_text):
+                return 0
+
+            if not user_text:
+                continue
+
+            try:
+                turn = engine.answer_user_turn(
+                    user_text,
+                    progress_callback=report_progress,
+                )
+            except ConverseError as exc:
+                print_wrapped(str(exc))
+                continue
+
+            print()
+            print_wrapped(turn.assistant_text)
+            print()
+    finally:
+        store.close()
+
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""
 
@@ -1453,7 +1532,7 @@ def run_ingest(args: argparse.Namespace) -> int:
 
     if storage_mode == "managed":
         if state_paths.pdfs_path.exists():
-            print(f"Managed PDF directory:  {state_paths.pdfs_path}", flush=True)
+            print(f"Managed PDF directory:   {state_paths.pdfs_path}", flush=True)
         else:
             print(
                 "Managed PDF directory does not exist; it will be created: "
@@ -1752,6 +1831,47 @@ def build_parser() -> argparse.ArgumentParser:
         func=run_search,
         search_mode="semantic",
     )
+
+
+    converse_parser = subparsers.add_parser(
+        "converse",
+        help="open a stateful RAG research-inquiry session",
+    )
+    converse_parser.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        default=8,
+        help="number of semantic chunks to retrieve for each turn (default: 8).",
+    )
+    converse_parser.add_argument(
+        "--max-distance",
+        type=float,
+        default=None,
+        help="semantic-search distance cutoff; lower is more similar.",
+    )
+    converse_parser.add_argument(
+        "--include-reference-sections",
+        action="store_true",
+        help="include reference/bibliography chunks in RAG evidence.",
+    )
+    converse_parser.add_argument(
+        "--ollama-model",
+        default=DEFAULT_OLLAMA_MODEL,
+        help=f"Ollama model used for RAG answers (default: {DEFAULT_OLLAMA_MODEL}).",
+    )
+    converse_parser.add_argument(
+        "--ollama-url",
+        default=DEFAULT_OLLAMA_URL,
+        help=f"Ollama base URL for RAG answers (default: {DEFAULT_OLLAMA_URL}).",
+    )
+    converse_parser.add_argument(
+        "--ollama-timeout",
+        type=float,
+        default=120.0,
+        help="seconds before one Ollama RAG answer request times out.",
+    )
+    converse_parser.set_defaults(func=run_converse)
 
     return parser
 

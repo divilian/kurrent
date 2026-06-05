@@ -16,8 +16,11 @@
 - [x] basic search - metadata (wire in to cli.py)
 - [x] basic search - full text (simple LIKE-based) (wire in to cli.py)
 - [x] semantic search (wire in to cli.py)
-- [ ] basic RAG chat over a selected corpus
+- [x] basic RAG chat over a selected corpus
 - [x] boldface the parts of the chunks that semantically match
+- [x] manual ingest mode
+- [ ] zotero ingest mode
+- [x] two-column parsing
 
 this is now pushed to github repo, along with a couple message wording changes and a parameter tweak. use the github repo version as a basis for future work in this chat.
 
@@ -27,7 +30,7 @@ this is now pushed to github repo, along with a couple message wording changes a
 
 - [x] Write `corpus_store.py` functions
 - [x] Write `ingester.py` functions
-- [ ] Filter out unnecessary code from `llm_backend.py` and focus it
+- [x] Filter out unnecessary code from `llm_backend.py` and focus it
 - [x] Migrate from pypdf to PyMuPdf/fitz
 - [x] Be sure to enable SQLite foreign keys from Python
 
@@ -37,9 +40,15 @@ this is now pushed to github repo, along with a couple message wording changes a
 - [ ] automatic source polling
 - [ ] Zotero write-back/import
 - [ ] integrations beyond Zotero
-- [ ] advanced section-aware chunking
+- [x] advanced section-aware chunking
 - [ ] advanced relationship taxonomies
 - [ ] metadata quality check, and auto-Crossref if it looks sus
+- [ ] "-f" option to ingest.py, to overwrite previous data explicitly (like for
+  refreshing data for a new chunker/sectioner pipeline)
+- [ ] Use citation count (or citation count divided by years since published)
+  as a proxy for turning up in searches
+- [ ] Alternatives to local Ollama for the corpus-grounded assessment (an API
+  key, etc)
 
 
 # Design decisions
