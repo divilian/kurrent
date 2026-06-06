@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from types import SimpleNamespace
 
 from kurrent.converser import (
@@ -9,7 +10,9 @@ from kurrent.converser import (
     build_evidence_packets,
     build_research_inquiry_messages,
     build_retrieval_query,
+    call_ollama_chat,
     citation_for_hit,
+    evidence_sources,
     format_evidence_packets,
     source_label_for_hit,
     user_facing_pdf_name,
@@ -87,6 +90,10 @@ def test_build_evidence_packets_preserves_source_page_section_and_chunk_provenan
             section="2 Model",
             distance=0.1234,
             text="Homophily affects tie formation in adaptive networks.",
+            source_label="adaptive-networks.pdf",
+            pdf_path=Path("/tmp/adaptive-networks.pdf"),
+            page_start=3,
+            page_end=4,
         ),
     )
 
@@ -173,6 +180,34 @@ def test_build_evidence_packets_uses_document_lookup_for_citation():
     )
 
     assert packets[0].citation == "Davies and Muller 2011, p. 5"
+
+
+def test_evidence_sources_group_chunks_by_pdf_and_keep_first_page():
+    """Source navigation should group chunks by PDF and open at the first page."""
+
+    packets = build_evidence_packets(
+        [
+            make_hit(
+                chunk_id="doc-1:section-aware-fixed-char-2000-v2:0",
+                page_start=3,
+                page_end=4,
+            ),
+            make_hit(
+                chunk_id="doc-1:section-aware-fixed-char-2000-v2:1",
+                page_start=7,
+                page_end=8,
+            ),
+        ]
+    )
+
+    sources = evidence_sources(packets)
+
+    assert len(sources) == 1
+    assert sources[0].source_number == 1
+    assert sources[0].citation == "adaptive-networks.pdf, pp. 3–4; pp. 7–8"
+    assert sources[0].pdf_path == Path("/tmp/adaptive-networks.pdf")
+    assert sources[0].page_start == 3
+    assert sources[0].evidence_count == 2
 
 
 def test_build_research_inquiry_messages_frames_task_as_literature_assessment():
@@ -310,3 +345,45 @@ def test_converse_engine_reports_progress_between_slow_stages():
         "Asking Ollama for a corpus-grounded assessment...",
         "Recording this turn in the conversation state...",
     ]
+
+
+def test_call_ollama_chat_streams_tokens_and_returns_full_answer(monkeypatch):
+    """Streaming Ollama calls should expose live tokens and keep final text."""
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            return iter([
+                b'{"message":{"content":"Closest"},"done":false}\n',
+                b'{"message":{"content":" evidence"},"done":false}\n',
+                b'{"done":true}\n',
+            ])
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("kurrent.converser.urlopen", fake_urlopen)
+
+    tokens = []
+    answer = call_ollama_chat(
+        [{"role": "user", "content": "hello"}],
+        model="test-model",
+        ollama_url="http://ollama.example",
+        timeout_seconds=12.5,
+        token_callback=tokens.append,
+    )
+
+    assert tokens == ["Closest", " evidence"]
+    assert answer == "Closest evidence"
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["model"] == "test-model"
+    assert captured["timeout"] == 12.5

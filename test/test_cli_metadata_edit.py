@@ -132,32 +132,51 @@ def test_prompt_document_result_action_accepts_edit_choice(monkeypatch):
     assert cli.prompt_document_result_action() == "e"
 
 
-def test_open_pdf_for_metadata_edit_uses_linux_default_viewer(monkeypatch, tmp_path):
-    """PDF opening should be best-effort and use the platform default viewer."""
+def test_open_pdf_for_metadata_edit_delegates_to_pdf_opener(monkeypatch, tmp_path):
+    """Metadata editing should use the shared PDF opener helper."""
 
     pdf_path = tmp_path / "paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
     document = make_document(pdf_path=pdf_path)
-    popen_calls = []
+    opened_paths = []
 
-    monkeypatch.setattr(cli.sys, "platform", "linux")
+    class FakeOpenResult:
+        success = True
+        path = pdf_path
+        page = None
+        page_supported = False
+        message = None
+
     monkeypatch.setattr(
-        cli.subprocess,
-        "Popen",
-        lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+        cli,
+        "open_pdf",
+        lambda path, page=None: opened_paths.append((path, page)) or FakeOpenResult(),
     )
 
     cli.open_pdf_for_metadata_edit(document)
 
-    assert popen_calls
-    assert popen_calls[0][0][0] == ["xdg-open", str(pdf_path)]
-    assert popen_calls[0][1]["start_new_session"] is True
+    assert opened_paths == [(pdf_path, None)]
 
 
-def test_open_pdf_for_metadata_edit_reports_missing_pdf_without_crashing(capsys):
+def test_open_pdf_for_metadata_edit_reports_missing_pdf_without_crashing(monkeypatch, capsys):
     """Missing PDFs should not prevent the metadata edit workflow from continuing."""
 
-    cli.open_pdf_for_metadata_edit(make_document(pdf_path=Path("/tmp/not-here.pdf")))
+    missing_path = Path("/tmp/not-here.pdf")
+
+    class FakeOpenResult:
+        success = False
+        path = missing_path
+        page = None
+        page_supported = False
+        message = f"PDF path does not exist: {missing_path}"
+
+    monkeypatch.setattr(
+        cli,
+        "open_pdf",
+        lambda path, page=None: FakeOpenResult(),
+    )
+
+    cli.open_pdf_for_metadata_edit(make_document(pdf_path=missing_path))
 
     captured = capsys.readouterr()
     assert "PDF path does not exist" in captured.out

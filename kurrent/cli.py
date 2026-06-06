@@ -27,9 +27,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 
@@ -60,6 +58,7 @@ from kurrent.semantic_highlighter import (
     semantically_highlighted_text,
 )
 from kurrent.terminal import QUIT_COMMANDS, is_quit_command
+from kurrent.pdf_opener import open_pdf
 
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 SEMANTIC_OVERFETCH_FACTOR = 5
@@ -1016,6 +1015,24 @@ def prompt_document_result_action() -> str:
         return "q"
 
 
+def open_pdf_result_message(result, purpose: str = "PDF") -> str:
+    """Return a concise user-facing message for a PDF-open result."""
+
+    if not result.success:
+        return result.message or f"Could not open {purpose}: {result.path}"
+
+    if result.page is not None and result.page_supported:
+        return f"Opened {purpose} near p. {result.page}: {result.path}"
+
+    if result.page is not None:
+        return (
+            f"Opened {purpose}: {result.path}. "
+            f"Your viewer may not jump to p. {result.page} automatically."
+        )
+
+    return f"Opened {purpose}: {result.path}"
+
+
 def open_pdf_for_metadata_edit(document) -> None:
     """Best-effort open of a document PDF in the user's default viewer."""
 
@@ -1025,32 +1042,11 @@ def open_pdf_for_metadata_edit(document) -> None:
         print_wrapped("No PDF path is available for this document.")
         return
 
-    path = Path(path)
-
-    if not path.exists():
-        print_wrapped(f"PDF path does not exist: {path}")
-        return
-
     print_wrapped("Opening PDF so you can inspect title/authors/year/DOI.")
     print_wrapped("When ready, return here and edit metadata.")
 
-    try:
-        if sys.platform == "win32":
-            os.startfile(str(path))  # type: ignore[attr-defined]
-            return
-
-        command = ["open", str(path)] if sys.platform == "darwin" else ["xdg-open", str(path)]
-        subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        print_wrapped(
-            f"Could not open PDF automatically: {type(exc).__name__}: {exc}"
-        )
-        print_wrapped(f"PDF path: {path}")
+    result = open_pdf(path)
+    print_wrapped(open_pdf_result_message(result, purpose="PDF"))
 
 
 def document_hit_from_document(document, previous_hit):
@@ -1516,6 +1512,113 @@ def run_search(args: argparse.Namespace) -> int:
         store.close()
 
 
+
+def print_converse_help() -> None:
+    """Print available kurrent converse slash commands."""
+
+    print()
+    print("Available commands")
+    print("------------------")
+    print_wrapped("/help       Show this help.")
+    print_wrapped("/sources    Show the sources retrieved for the most recent answer.")
+    print_wrapped("/open N     Open source N from the most recent /sources list.")
+    print_wrapped("/quit       Leave converse.")
+
+
+def _latest_converse_sources(turn):
+    """Return source-navigation entries for the most recent converse turn."""
+
+    if turn is None:
+        return ()
+
+    from kurrent.converser import evidence_sources
+
+    return evidence_sources(turn.evidence)
+
+
+def print_converse_sources(turn) -> None:
+    """Print source-navigation entries for the most recent converse turn."""
+
+    sources = _latest_converse_sources(turn)
+
+    if not sources:
+        print_wrapped("No sources are available yet. Ask a research question first.")
+        return
+
+    print()
+    print("Sources from the most recent answer")
+    print("-----------------------------------")
+
+    for source in sources:
+        print_wrapped(f"{source.source_number}. {source.citation}")
+
+
+def open_converse_source(turn, source_number_text: str) -> None:
+    """Open one source from the most recent converse turn."""
+
+    sources = _latest_converse_sources(turn)
+
+    if not sources:
+        print_wrapped("No sources are available yet. Ask a research question first.")
+        return
+
+    try:
+        source_number = int(source_number_text.strip())
+    except ValueError:
+        print_wrapped("Usage: /open N, where N is a source number from /sources.")
+        return
+
+    if not 1 <= source_number <= len(sources):
+        print_wrapped(
+            f"Source number out of range. Choose 1 through {len(sources)}."
+        )
+        return
+
+    source = sources[source_number - 1]
+
+    if source.pdf_path is None:
+        print_wrapped(f"No PDF path is available for source {source_number}.")
+        return
+
+    result = open_pdf(source.pdf_path, page=source.page_start)
+    print_wrapped(open_pdf_result_message(result, purpose=f"source {source_number}"))
+
+
+def handle_converse_command(command: str, last_turn) -> bool:
+    """Handle a kurrent converse slash command.
+
+    Return True when the caller should continue the session and False when it
+    should exit.
+    """
+
+    command = command.strip()
+    lowered = command.lower()
+
+    if lowered in {"/quit", "/q", "/exit"}:
+        return False
+
+    if lowered == "/help":
+        print_converse_help()
+        return True
+
+    if lowered == "/sources":
+        print_converse_sources(last_turn)
+        return True
+
+    if lowered.startswith("/open"):
+        parts = command.split(maxsplit=1)
+
+        if len(parts) != 2:
+            print_wrapped("Usage: /open N, where N is a source number from /sources.")
+            return True
+
+        open_converse_source(last_turn, parts[1])
+        return True
+
+    print_wrapped(f"Unknown command: {command}")
+    print_wrapped("Type /help for available commands.")
+    return True
+
 def run_converse(args: argparse.Namespace) -> int:
     """Run the kurrent converse command."""
 
@@ -1561,10 +1664,11 @@ def run_converse(args: argparse.Namespace) -> int:
         )
 
         print("\nHi, what research question are you interested in today?")
-        print(f"(Type {', '.join(QUIT_COMMANDS)} to leave.)")
 
         def report_progress(message: str) -> None:
             print_wrapped(f"  {message}")
+
+        last_turn = None
 
         while True:
             try:
@@ -1579,20 +1683,50 @@ def run_converse(args: argparse.Namespace) -> int:
             if not user_text:
                 continue
 
+            if user_text.startswith("/"):
+                if not handle_converse_command(user_text, last_turn):
+                    return 0
+                continue
+
+            streamed_answer = False
+
+            def stream_answer_token(text: str) -> None:
+                nonlocal streamed_answer
+
+                if not streamed_answer:
+                    print()
+                    streamed_answer = True
+
+                print(text, end="", flush=True)
+
             try:
                 turn = engine.answer_user_turn(
                     user_text,
                     progress_callback=report_progress,
+                    token_callback=stream_answer_token,
                 )
             except ConverseError as exc:
+                if streamed_answer:
+                    print()
                 print_wrapped(str(exc))
                 continue
 
-            print()
-            print_wrapped(turn.assistant_text)
+            last_turn = turn
+
+            if streamed_answer:
+                print()
+                print()
+            else:
+                print()
+                print_wrapped(turn.assistant_text)
+                print()
+
+            print_wrapped(f"(Type {', '.join(QUIT_COMMANDS)} or /quit to leave.)")
+            print_wrapped("Commands: /help, /sources, /open N, /quit")
             print()
     finally:
         store.close()
+
 
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
 import re
 from typing import Callable, Iterable, Protocol
 from urllib.error import URLError
@@ -28,6 +29,7 @@ __all__ = [
     "DEFAULT_CONVERSE_MAX_CONTEXT_CHARS",
     "ConverseError",
     "EvidencePacket",
+    "EvidenceSource",
     "ConverseTurn",
     "ConversationState",
     "ConverseEngine",
@@ -36,6 +38,7 @@ __all__ = [
     "user_facing_pdf_name",
     "source_label_for_hit",
     "citation_for_hit",
+    "evidence_sources",
     "format_evidence_packets",
     "build_research_inquiry_messages",
     "call_ollama_chat",
@@ -69,8 +72,8 @@ class EvidencePacket:
     """One retrieved chunk plus internal provenance for a RAG answer.
 
     citation is the only source label intended for Ollama-facing prompts. The
-    other fields remain available to kurrent for debugging, tests, and future
-    /show evidence style commands.
+    other fields remain available to kurrent for debugging, source navigation,
+    tests, and future evidence-inspection commands.
     """
 
     evidence_id: int
@@ -82,6 +85,23 @@ class EvidencePacket:
     section: str | None
     distance: float | None
     text: str
+    source_label: str | None = None
+    pdf_path: Path | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceSource:
+    """A user-openable source summarized from one or more evidence packets."""
+
+    source_number: int
+    source_label: str
+    citation: str
+    pdf_path: Path | None
+    page_start: int | None
+    page_end: int | None
+    evidence_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,13 +304,19 @@ def build_evidence_packets(
         if document_lookup is not None:
             document = document_lookup(hit)
 
+        source_label = source_label_for_hit(hit, document=document)
+
         packets.append(
             EvidencePacket(
                 evidence_id=i,
                 chunk_id=hit.chunk_id,
+                source_label=source_label,
                 citation=citation_for_hit(hit, document=document),
                 title=_title_for_hit(hit),
                 source_name=source_name_for_hit(hit),
+                pdf_path=getattr(hit, "path", None),
+                page_start=getattr(hit, "page_start", None),
+                page_end=getattr(hit, "page_end", None),
                 pages=pages_label(hit),
                 section=section_label(hit),
                 distance=getattr(hit, "distance", None),
@@ -300,6 +326,103 @@ def build_evidence_packets(
 
     return tuple(packets)
 
+
+
+def _page_range_key(packet: EvidencePacket) -> tuple[int | None, int | None]:
+    return packet.page_start, packet.page_end
+
+
+def _page_range_label(page_start: int | None, page_end: int | None) -> str | None:
+    """Return a compact page-range label from raw page numbers."""
+
+    if page_start is None and page_end is None:
+        return None
+
+    if page_start is None:
+        return f"p. {page_end}"
+
+    if page_end is None or page_end == page_start:
+        return f"p. {page_start}"
+
+    return f"pp. {page_start}–{page_end}"
+
+
+def _source_group_key(packet: EvidencePacket) -> tuple[str, str]:
+    """Return a stable grouping key for source-navigation entries."""
+
+    if packet.pdf_path is not None:
+        return ("path", str(packet.pdf_path))
+
+    return ("label", packet.source_label or packet.citation)
+
+
+def evidence_sources(evidence: Iterable[EvidencePacket]) -> tuple[EvidenceSource, ...]:
+    """Return user-openable source entries from retrieved evidence packets.
+
+    Multiple chunks from the same PDF are grouped together so /sources stays
+    compact. The source opens at the first page seen for that PDF.
+    """
+
+    grouped: dict[tuple[str, str], list[EvidencePacket]] = {}
+
+    for packet in evidence:
+        grouped.setdefault(_source_group_key(packet), []).append(packet)
+
+    sources: list[EvidenceSource] = []
+
+    for source_number, packets in enumerate(grouped.values(), start=1):
+        first_packet = packets[0]
+        page_ranges = []
+        seen_ranges = set()
+
+        for packet in packets:
+            range_key = _page_range_key(packet)
+
+            if range_key in seen_ranges:
+                continue
+
+            seen_ranges.add(range_key)
+            page_label = _page_range_label(*range_key)
+
+            if page_label is not None:
+                page_ranges.append(page_label)
+
+        source_label = first_packet.source_label or first_packet.citation
+        citation = source_label
+
+        if page_ranges:
+            citation = f"{citation}, {'; '.join(page_ranges)}"
+
+        page_start = next(
+            (
+                packet.page_start
+                for packet in packets
+                if packet.page_start is not None
+            ),
+            None,
+        )
+        page_end = next(
+            (
+                packet.page_end
+                for packet in packets
+                if packet.page_end is not None
+            ),
+            None,
+        )
+
+        sources.append(
+            EvidenceSource(
+                source_number=source_number,
+                source_label=source_label,
+                citation=citation,
+                pdf_path=first_packet.pdf_path,
+                page_start=page_start,
+                page_end=page_end,
+                evidence_count=len(packets),
+            )
+        )
+
+    return tuple(sources)
 
 def format_evidence_packets(
     evidence: Iterable[EvidencePacket],
@@ -399,13 +522,16 @@ section unless the user explicitly asks for one.
     ]
 
 
-def call_ollama_chat(
+TokenCallback = Callable[[str], None]
+
+
+def _call_ollama_chat_nonstreaming(
     messages: list[dict[str, str]],
-    model: str = DEFAULT_OLLAMA_MODEL,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    timeout_seconds: float = 120.0,
+    model: str,
+    ollama_url: str,
+    timeout_seconds: float,
 ) -> str:
-    """Call Ollama's chat API and return the assistant message content."""
+    """Call Ollama's chat API without streaming and return final content."""
 
     api_url = f"{ollama_url.rstrip('/')}/api/chat"
     payload = {
@@ -421,11 +547,8 @@ def call_ollama_chat(
         method="POST",
     )
 
-    try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ConverseError(f"Ollama chat unavailable: {type(exc).__name__}: {exc}") from exc
+    with urlopen(request, timeout=timeout_seconds) as response:
+        response_data = json.loads(response.read().decode("utf-8"))
 
     content = response_data.get("message", {}).get("content", "")
 
@@ -433,6 +556,90 @@ def call_ollama_chat(
         raise ConverseError("Ollama returned an empty converse response.")
 
     return content.strip()
+
+
+def _call_ollama_chat_streaming(
+    messages: list[dict[str, str]],
+    model: str,
+    ollama_url: str,
+    timeout_seconds: float,
+    token_callback: TokenCallback,
+) -> str:
+    """Call Ollama's streaming chat API and return accumulated content."""
+
+    api_url = f"{ollama_url.rstrip('/')}/api/chat"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "options": {"temperature": 0.2},
+    }
+    request = Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    parts: list[str] = []
+
+    with urlopen(request, timeout=timeout_seconds) as response:
+        for raw_line in response:
+            raw_line = raw_line.strip()
+
+            if not raw_line:
+                continue
+
+            data = json.loads(raw_line.decode("utf-8"))
+            content = data.get("message", {}).get("content", "")
+
+            if isinstance(content, str) and content:
+                parts.append(content)
+                token_callback(content)
+
+            if data.get("done"):
+                break
+
+    content = "".join(parts)
+
+    if not content.strip():
+        raise ConverseError("Ollama returned an empty converse response.")
+
+    return content.strip()
+
+
+def call_ollama_chat(
+    messages: list[dict[str, str]],
+    model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_url: str = DEFAULT_OLLAMA_URL,
+    timeout_seconds: float = 120.0,
+    token_callback: TokenCallback | None = None,
+) -> str:
+    """Call Ollama's chat API and return the assistant message content.
+
+    When token_callback is provided, use Ollama streaming and call it with each
+    generated text fragment as it arrives. The returned string is still the full
+    accumulated assistant response, so callers can store conversation state.
+    """
+
+    try:
+        if token_callback is not None:
+            return _call_ollama_chat_streaming(
+                messages=messages,
+                model=model,
+                ollama_url=ollama_url,
+                timeout_seconds=timeout_seconds,
+                token_callback=token_callback,
+            )
+
+        return _call_ollama_chat_nonstreaming(
+            messages=messages,
+            model=model,
+            ollama_url=ollama_url,
+            timeout_seconds=timeout_seconds,
+        )
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ConverseError(f"Ollama chat unavailable: {type(exc).__name__}: {exc}") from exc
 
 
 AnswerFunction = Callable[[list[dict[str, str]]], str]
@@ -482,11 +689,13 @@ class ConverseEngine:
         self,
         user_text: str,
         progress_callback: ProgressCallback | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> ConverseTurn:
         """Retrieve Kurrent evidence and answer one user turn.
 
         progress_callback receives short user-facing status messages between
-        slow stages. It is intentionally optional so tests and non-CLI callers
+        slow stages. token_callback receives live Ollama text fragments when the
+        real Ollama API is used. Both are optional so tests and non-CLI callers
         can use the engine silently.
         """
 
@@ -535,6 +744,7 @@ class ConverseEngine:
                 model=self.model,
                 ollama_url=self.ollama_url,
                 timeout_seconds=self.timeout_seconds,
+                token_callback=token_callback,
             )
 
         report("Recording this turn in the conversation state...")
