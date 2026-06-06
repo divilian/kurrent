@@ -90,3 +90,68 @@ def test_handle_converse_command_reports_unknown_command(capsys):
     captured = capsys.readouterr()
     assert "Unknown command: /wat" in captured.out
     assert "Type /help" in captured.out
+
+
+def test_streaming_wrapped_printer_wraps_completed_words(capsys):
+    """Live Ollama output should wrap without waiting for the full answer."""
+
+    printer = cli.StreamingWrappedPrinter(width=12)
+    printer.write("one two thr")
+    printer.write("ee four")
+    printer.finish()
+
+    captured = capsys.readouterr()
+    assert captured.out == "one two\nthree four"
+
+
+def test_streaming_wrapped_printer_preserves_model_newlines(capsys):
+    """Streaming wrapper should preserve explicit paragraph/list newlines."""
+
+    printer = cli.StreamingWrappedPrinter(width=79)
+    printer.write("Line one\n* item")
+    printer.finish()
+
+    captured = capsys.readouterr()
+    assert captured.out == "Line one\n* item"
+
+
+def test_browse_converse_sources_opens_number_and_returns_to_main(monkeypatch, tmp_path):
+    """The source browser should accept bare numbers and q to return."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    turn = make_turn(pdf_path=pdf_path)
+    choices = iter(["1", "q"])
+    prompts = []
+    opened = []
+
+    class FakeOpenResult:
+        success = True
+        path = pdf_path
+        page = 3
+        page_supported = True
+        message = None
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return next(choices)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(
+        cli,
+        "open_pdf",
+        lambda path, page=None: opened.append((path, page)) or FakeOpenResult(),
+    )
+
+    cli.browse_converse_sources(turn)
+
+    assert prompts == ["sources> ", "sources> "]
+    assert opened == [(pdf_path, 3)]
+
+
+def test_source_browser_q_predicate_accepts_slash_q():
+    """q and /q should leave the source browser without leaving converse."""
+
+    assert cli.is_source_browser_quit("q")
+    assert cli.is_source_browser_quit("/q")
+    assert not cli.is_source_browser_quit("1")

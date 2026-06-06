@@ -43,6 +43,7 @@ from kurrent.cli_display import (
     print_field,
     print_wrapped,
     reference_marker,
+    terminal_width,
     section_label,
     separator_line,
     source_name_for_hit,
@@ -72,6 +73,86 @@ def print_usage_error(message: str) -> None:
     """Print a friendly CLI usage error without a Python traceback."""
 
     print_wrapped(message, file=sys.stderr)
+
+
+class StreamingWrappedPrinter:
+    """Incrementally print streamed text with terminal-width wrapping.
+
+    Ollama streaming chunks do not arrive on word boundaries, so this keeps the
+    final partial word buffered until later text or finish() completes it.
+    Whitespace is normalized similarly to print_wrapped(): paragraph newlines are
+    preserved, while runs of spaces/tabs are collapsed to word separators.
+    """
+
+    def __init__(self, width: int | None = None) -> None:
+        self.width = width if width is not None else terminal_width()
+        self.width = max(1, self.width)
+        self.line_len = 0
+        self.buffer = ""
+
+    def write(self, text: str) -> None:
+        """Print a streamed text fragment, wrapping completed words."""
+
+        if not text:
+            return
+
+        self.buffer += text.replace("\r", "")
+
+        while self.buffer:
+            if self.buffer[0] == "\n":
+                print()
+                self.line_len = 0
+                self.buffer = self.buffer[1:]
+                continue
+
+            stripped = self.buffer.lstrip(" \t")
+
+            if stripped != self.buffer:
+                self.buffer = stripped
+                continue
+
+            next_break = self._next_break_index(self.buffer)
+
+            if next_break is None:
+                return
+
+            word = self.buffer[:next_break]
+            self.buffer = self.buffer[next_break:]
+            self._write_word(word)
+
+    def finish(self) -> None:
+        """Flush any final buffered word after streaming completes."""
+
+        final_word = self.buffer.strip()
+        self.buffer = ""
+
+        if final_word:
+            self._write_word(final_word)
+
+    @staticmethod
+    def _next_break_index(text: str) -> int | None:
+        for i, char in enumerate(text):
+            if char in {" ", "\t", "\n"}:
+                return i
+
+        return None
+
+    def _write_word(self, word: str) -> None:
+        if not word:
+            return
+
+        word_len = len(word)
+
+        if self.line_len > 0 and self.line_len + 1 + word_len > self.width:
+            print()
+            self.line_len = 0
+
+        if self.line_len > 0:
+            print(" ", end="", flush=True)
+            self.line_len += 1
+
+        print(word, end="", flush=True)
+        self.line_len += word_len
 
 
 @dataclass(slots=True)
@@ -1520,8 +1601,8 @@ def print_converse_help() -> None:
     print("Available commands")
     print("------------------")
     print_wrapped("/help       Show this help.")
-    print_wrapped("/sources    Show the sources retrieved for the most recent answer.")
-    print_wrapped("/open N     Open source N from the most recent /sources list.")
+    print_wrapped("/sources    Open the source browser for the most recent answer.")
+    print_wrapped("/open N     Open source N from the most recent answer.")
     print_wrapped("/quit       Leave converse.")
 
 
@@ -1584,6 +1665,63 @@ def open_converse_source(turn, source_number_text: str) -> None:
     print_wrapped(open_pdf_result_message(result, purpose=f"source {source_number}"))
 
 
+def prompt_source_action() -> str:
+    """Prompt inside the converse source browser."""
+
+    try:
+        return input("sources> ").strip()
+    except EOFError:
+        print()
+        return "q"
+
+
+def is_source_browser_quit(command: str) -> bool:
+    """Return whether a source-browser command should return to kurrent>."""
+
+    return command.strip().lower() in {
+        "",
+        "q",
+        "/q",
+        ":q",
+        "quit",
+        "/quit",
+        "exit",
+        "/exit",
+    }
+
+
+def browse_converse_sources(turn) -> None:
+    """Open an interactive source browser for the most recent converse turn."""
+
+    sources = _latest_converse_sources(turn)
+
+    if not sources:
+        print_wrapped("No sources are available yet. Ask a research question first.")
+        return
+
+    while True:
+        print_converse_sources(turn)
+        print_wrapped("Type a source number to open it, or q to return to kurrent.")
+
+        choice = prompt_source_action()
+
+        if is_source_browser_quit(choice):
+            return
+
+        if choice.startswith("/open"):
+            parts = choice.split(maxsplit=1)
+
+            if len(parts) == 2:
+                open_converse_source(turn, parts[1])
+            else:
+                print_wrapped(
+                    "Type a source number to open it, or q to return to kurrent."
+                )
+            continue
+
+        open_converse_source(turn, choice)
+
+
 def handle_converse_command(command: str, last_turn) -> bool:
     """Handle a kurrent converse slash command.
 
@@ -1602,7 +1740,7 @@ def handle_converse_command(command: str, last_turn) -> bool:
         return True
 
     if lowered == "/sources":
-        print_converse_sources(last_turn)
+        browse_converse_sources(last_turn)
         return True
 
     if lowered.startswith("/open"):
@@ -1672,7 +1810,7 @@ def run_converse(args: argparse.Namespace) -> int:
 
         while True:
             try:
-                user_text = input("> ").strip()
+                user_text = input("kurrent> ").strip()
             except EOFError:
                 print()
                 return 0
@@ -1689,6 +1827,7 @@ def run_converse(args: argparse.Namespace) -> int:
                 continue
 
             streamed_answer = False
+            answer_printer = StreamingWrappedPrinter()
 
             def stream_answer_token(text: str) -> None:
                 nonlocal streamed_answer
@@ -1697,7 +1836,7 @@ def run_converse(args: argparse.Namespace) -> int:
                     print()
                     streamed_answer = True
 
-                print(text, end="", flush=True)
+                answer_printer.write(text)
 
             try:
                 turn = engine.answer_user_turn(
@@ -1707,6 +1846,7 @@ def run_converse(args: argparse.Namespace) -> int:
                 )
             except ConverseError as exc:
                 if streamed_answer:
+                    answer_printer.finish()
                     print()
                 print_wrapped(str(exc))
                 continue
@@ -1714,6 +1854,7 @@ def run_converse(args: argparse.Namespace) -> int:
             last_turn = turn
 
             if streamed_answer:
+                answer_printer.finish()
                 print()
                 print()
             else:
@@ -1721,8 +1862,7 @@ def run_converse(args: argparse.Namespace) -> int:
                 print_wrapped(turn.assistant_text)
                 print()
 
-            print_wrapped(f"(Type {', '.join(QUIT_COMMANDS)} or /quit to leave.)")
-            print_wrapped("Commands: /help, /sources, /open N, /quit")
+            browse_converse_sources(last_turn)
             print()
     finally:
         store.close()
