@@ -343,7 +343,6 @@ def test_converse_engine_reports_progress_between_slow_stages():
         "Retrieved 1 candidate chunk.",
         "Building evidence packet for Ollama...",
         "Asking Ollama for a corpus-grounded assessment...",
-        "Recording this turn in the conversation state...",
     ]
 
 

@@ -34,6 +34,8 @@ import time
 from tqdm import tqdm
 
 from kurrent.cli_display import (
+    ANSI_RESET,
+    ansi_enabled,
     collapse_whitespace,
     context_window,
     distance_label,
@@ -63,6 +65,9 @@ from kurrent.pdf_opener import open_pdf
 
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 SEMANTIC_OVERFETCH_FACTOR = 5
+ANSI_RED = "\033[31m"
+ANSI_YELLOW = "\033[93m"
+ANSI_GRAY = "\033[90m"
 
 
 class CliUsageError(Exception):
@@ -73,6 +78,39 @@ def print_usage_error(message: str) -> None:
     """Print a friendly CLI usage error without a Python traceback."""
 
     print_wrapped(message, file=sys.stderr)
+
+
+def colored_cli_text(text: str, ansi_code: str) -> str:
+    """Return text wrapped in ANSI color when terminal output supports it."""
+
+    if not ansi_enabled():
+        return text
+
+    return f"{ansi_code}{text}{ANSI_RESET}"
+
+
+def red_prompt(text: str) -> str:
+    """Return the main kurrent prompt colored red when possible."""
+
+    return colored_cli_text(text, ANSI_RED)
+
+
+def yellow_prompt(text: str) -> str:
+    """Return the source-browser prompt colored yellow when possible."""
+
+    return colored_cli_text(text, ANSI_YELLOW)
+
+
+def yellow_menu_text(text: str) -> str:
+    """Return source-browser menu text colored yellow when possible."""
+
+    return colored_cli_text(text, ANSI_YELLOW)
+
+
+def gray_status_text(text: str) -> str:
+    """Return low-priority progress/status text colored gray when possible."""
+
+    return colored_cli_text(text, ANSI_GRAY)
 
 
 class StreamingWrappedPrinter:
@@ -1627,11 +1665,11 @@ def print_converse_sources(turn) -> None:
         return
 
     print()
-    print("Sources from the most recent answer")
-    print("-----------------------------------")
+    print_wrapped(yellow_menu_text("Sources from the most recent answer"))
+    print_wrapped(yellow_menu_text("-----------------------------------"))
 
     for source in sources:
-        print_wrapped(f"{source.source_number}. {source.citation}")
+        print_wrapped(yellow_menu_text(f"{source.source_number}. {source.citation}"))
 
 
 def open_converse_source(turn, source_number_text: str) -> None:
@@ -1662,14 +1700,14 @@ def open_converse_source(turn, source_number_text: str) -> None:
         return
 
     result = open_pdf(source.pdf_path, page=source.page_start)
-    print_wrapped(open_pdf_result_message(result, purpose=f"source {source_number}"))
+    print_wrapped(yellow_menu_text(open_pdf_result_message(result, purpose=f"source {source_number}")))
 
 
 def prompt_source_action() -> str:
     """Prompt inside the converse source browser."""
 
     try:
-        return input("sources> ").strip()
+        return input(yellow_prompt("sources> ")).strip()
     except EOFError:
         print()
         return "q"
@@ -1701,7 +1739,7 @@ def browse_converse_sources(turn) -> None:
 
     while True:
         print_converse_sources(turn)
-        print_wrapped("Type a source number to open it, or q to return to kurrent.")
+        print_wrapped(yellow_menu_text("Type a source number to open it, or q to return to kurrent."))
 
         choice = prompt_source_action()
 
@@ -1801,16 +1839,17 @@ def run_converse(args: argparse.Namespace) -> int:
             include_reference_sections=args.include_reference_sections,
         )
 
-        print("\nHi, what research question are you interested in today?")
+        print()
+        print_wrapped(red_prompt("Hi, what research question are you interested in today?"))
 
         def report_progress(message: str) -> None:
-            print_wrapped(f"  {message}")
+            print_wrapped(gray_status_text(f"  {message}"))
 
         last_turn = None
 
         while True:
             try:
-                user_text = input("kurrent> ").strip()
+                user_text = input(red_prompt("kurrent> ")).strip()
             except EOFError:
                 print()
                 return 0

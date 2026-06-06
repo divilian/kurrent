@@ -747,7 +747,6 @@ class ConverseEngine:
                 token_callback=token_callback,
             )
 
-        report("Recording this turn in the conversation state...")
         turn = ConverseTurn(
             user_text=user_text,
             retrieval_query=retrieval_query,
