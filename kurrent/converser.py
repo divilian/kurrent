@@ -29,6 +29,7 @@ __all__ = [
     "DEFAULT_CONVERSE_MAX_CONTEXT_CHARS",
     "ConverseError",
     "EvidencePacket",
+    "EvidencePassage",
     "EvidenceSource",
     "ConverseTurn",
     "ConversationState",
@@ -92,6 +93,18 @@ class EvidencePacket:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidencePassage:
+    """One openable passage within a grouped converse source."""
+
+    passage_label: str
+    pages: str | None
+    pdf_path: Path | None
+    page_start: int | None
+    page_end: int | None
+    excerpt: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceSource:
     """A user-openable source summarized from one or more evidence packets."""
 
@@ -102,6 +115,8 @@ class EvidenceSource:
     page_start: int | None
     page_end: int | None
     evidence_count: int
+    excerpt: str | None = None
+    passages: tuple[EvidencePassage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,11 +371,31 @@ def _source_group_key(packet: EvidencePacket) -> tuple[str, str]:
     return ("label", packet.source_label or packet.citation)
 
 
+def _passage_label(index: int) -> str:
+    """Return spreadsheet-style lowercase labels: a, b, ..., z, aa, ab, ..."""
+
+    if index < 0:
+        raise ValueError("Passage index must be non-negative.")
+
+    label = ""
+    number = index
+
+    while True:
+        number, remainder = divmod(number, 26)
+        label = chr(ord("a") + remainder) + label
+
+        if number == 0:
+            return label
+
+        number -= 1
+
+
 def evidence_sources(evidence: Iterable[EvidencePacket]) -> tuple[EvidenceSource, ...]:
     """Return user-openable source entries from retrieved evidence packets.
 
     Multiple chunks from the same PDF are grouped together so /sources stays
-    compact. The source opens at the first page seen for that PDF.
+    compact. Within each source, unique page ranges are preserved in retrieval
+    order and exposed as sub-passages such as 1a, 1b, and 1c.
     """
 
     grouped: dict[tuple[str, str], list[EvidencePacket]] = {}
@@ -372,7 +407,7 @@ def evidence_sources(evidence: Iterable[EvidencePacket]) -> tuple[EvidenceSource
 
     for source_number, packets in enumerate(grouped.values(), start=1):
         first_packet = packets[0]
-        page_ranges = []
+        passages: list[EvidencePassage] = []
         seen_ranges = set()
 
         for packet in packets:
@@ -382,43 +417,53 @@ def evidence_sources(evidence: Iterable[EvidencePacket]) -> tuple[EvidenceSource
                 continue
 
             seen_ranges.add(range_key)
-            page_label = _page_range_label(*range_key)
-
-            if page_label is not None:
-                page_ranges.append(page_label)
+            passages.append(
+                EvidencePassage(
+                    passage_label=_passage_label(len(passages)),
+                    pages=_page_range_label(*range_key),
+                    pdf_path=packet.pdf_path,
+                    page_start=packet.page_start,
+                    page_end=packet.page_end,
+                    excerpt=packet.text,
+                )
+            )
 
         source_label = first_packet.source_label or first_packet.citation
+        page_labels = [passage.pages for passage in passages if passage.pages]
         citation = source_label
 
-        if page_ranges:
-            citation = f"{citation}, {'; '.join(page_ranges)}"
+        if page_labels:
+            citation = f"{citation}, {'; '.join(page_labels)}"
 
-        page_start = next(
-            (
-                packet.page_start
-                for packet in packets
-                if packet.page_start is not None
-            ),
-            None,
-        )
-        page_end = next(
-            (
-                packet.page_end
-                for packet in packets
-                if packet.page_end is not None
-            ),
-            None,
-        )
+        first_passage = passages[0] if passages else None
 
         sources.append(
             EvidenceSource(
                 source_number=source_number,
                 source_label=source_label,
                 citation=citation,
-                pdf_path=first_packet.pdf_path,
-                page_start=page_start,
-                page_end=page_end,
+                pdf_path=(
+                    first_passage.pdf_path
+                    if first_passage is not None
+                    else first_packet.pdf_path
+                ),
+                page_start=(
+                    first_passage.page_start
+                    if first_passage is not None
+                    else first_packet.page_start
+                ),
+                page_end=(
+                    first_passage.page_end
+                    if first_passage is not None
+                    else first_packet.page_end
+                ),
                 evidence_count=len(packets),
+                excerpt=(
+                    first_passage.excerpt
+                    if first_passage is not None
+                    else first_packet.text
+                ),
+                passages=tuple(passages),
             )
         )
 

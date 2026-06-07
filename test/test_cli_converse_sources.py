@@ -35,7 +35,58 @@ def test_print_converse_sources_lists_latest_turn_sources(capsys):
 
     captured = capsys.readouterr()
     assert "Sources from the most recent answer" in captured.out
-    assert "1. Nowak and May 1992, pp. 3–4" in captured.out
+    assert "1. Nowak and May 1992: 1a pp. 3–4" in captured.out
+
+
+
+
+def test_print_converse_sources_lists_passage_shortcuts_in_retrieval_order(capsys):
+    """Grouped sources should expose compact shortcuts like 1a and 1b."""
+
+    pdf_path = Path("/tmp/paper.pdf")
+    packets = (
+        EvidencePacket(
+            evidence_id=1,
+            chunk_id="doc-1:v:0",
+            source_label="Nowak and May 1992",
+            citation="Nowak and May 1992, p. 7",
+            title="A paper",
+            source_name="paper.pdf",
+            pdf_path=pdf_path,
+            page_start=7,
+            page_end=7,
+            pages="p. 7",
+            section=None,
+            distance=0.1,
+            text="Third-page excerpt.",
+        ),
+        EvidencePacket(
+            evidence_id=2,
+            chunk_id="doc-1:v:1",
+            source_label="Nowak and May 1992",
+            citation="Nowak and May 1992, p. 3",
+            title="A paper",
+            source_name="paper.pdf",
+            pdf_path=pdf_path,
+            page_start=3,
+            page_end=3,
+            pages="p. 3",
+            section=None,
+            distance=0.2,
+            text="Earlier-page excerpt.",
+        ),
+    )
+    turn = ConverseTurn(
+        user_text="question",
+        retrieval_query="question",
+        assistant_text="answer",
+        evidence=packets,
+    )
+
+    cli.print_converse_sources(turn)
+
+    captured = capsys.readouterr()
+    assert "1. Nowak and May 1992: 1a p. 7; 1b p. 3" in captured.out
 
 
 def test_print_converse_sources_handles_missing_turn(capsys):
@@ -73,13 +124,91 @@ def test_open_converse_source_opens_pdf_to_first_page(monkeypatch, tmp_path):
     assert opened == [(pdf_path, 3)]
 
 
+
+
+def test_open_converse_source_can_open_lettered_passage(monkeypatch, tmp_path):
+    """Source selections like 1b should open the matching grouped passage."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    packets = (
+        EvidencePacket(
+            evidence_id=1,
+            chunk_id="doc-1:v:0",
+            source_label="Nowak and May 1992",
+            citation="Nowak and May 1992, p. 7",
+            title="A paper",
+            source_name="paper.pdf",
+            pdf_path=pdf_path,
+            page_start=7,
+            page_end=7,
+            pages="p. 7",
+            section=None,
+            distance=0.1,
+            text="Page seven excerpt.",
+        ),
+        EvidencePacket(
+            evidence_id=2,
+            chunk_id="doc-1:v:1",
+            source_label="Nowak and May 1992",
+            citation="Nowak and May 1992, p. 3",
+            title="A paper",
+            source_name="paper.pdf",
+            pdf_path=pdf_path,
+            page_start=3,
+            page_end=3,
+            pages="p. 3",
+            section=None,
+            distance=0.2,
+            text="Page three excerpt.",
+        ),
+    )
+    turn = ConverseTurn(
+        user_text="question",
+        retrieval_query="question",
+        assistant_text="answer",
+        evidence=packets,
+    )
+    opened = []
+    highlight_calls = []
+
+    class FakeHighlightResult:
+        success = False
+        highlighted_pdf_path = None
+        message = None
+
+    class FakeOpenResult:
+        success = True
+        path = pdf_path
+        page = 3
+        page_supported = True
+        message = None
+
+    def fake_highlight(**kwargs):
+        highlight_calls.append(kwargs)
+        return FakeHighlightResult()
+
+    monkeypatch.setattr(cli, "create_highlighted_pdf_for_research_interest", fake_highlight)
+    monkeypatch.setattr(
+        cli,
+        "open_pdf",
+        lambda path, page=None: opened.append((path, page)) or FakeOpenResult(),
+    )
+
+    cli.open_converse_source(turn, "1b")
+
+    assert opened == [(pdf_path, 3)]
+    assert highlight_calls[0]["page_start"] == 3
+    assert highlight_calls[0]["fallback_excerpt"] == "Page three excerpt."
+
+
 def test_open_converse_source_rejects_bad_source_number(capsys):
     """Bad /open arguments should produce a friendly message."""
 
     cli.open_converse_source(make_turn(), "bogus")
 
     captured = capsys.readouterr()
-    assert "Usage: /open N" in captured.out
+    assert "source number like 1" in captured.out
 
 
 def test_handle_converse_command_reports_unknown_command(capsys):
@@ -155,3 +284,48 @@ def test_source_browser_q_predicate_accepts_slash_q():
     assert cli.is_source_browser_quit("q")
     assert cli.is_source_browser_quit("/q")
     assert not cli.is_source_browser_quit("1")
+
+
+def test_open_converse_source_prefers_highlighted_pdf_when_available(monkeypatch, tmp_path):
+    """Opening a converse source should use a temporary highlighted PDF when created."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    highlighted_path = tmp_path / "paper-highlighted.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    highlighted_path.write_bytes(b"%PDF-1.4\n")
+    turn = make_turn(pdf_path=pdf_path)
+    opened = []
+    highlight_calls = []
+
+    class FakeHighlightResult:
+        success = True
+        highlighted_pdf_path = highlighted_path
+        message = None
+
+    class FakeOpenResult:
+        success = True
+        path = highlighted_path
+        page = 3
+        page_supported = True
+        message = None
+
+    def fake_highlight(**kwargs):
+        highlight_calls.append(kwargs)
+        return FakeHighlightResult()
+
+    monkeypatch.setattr(cli, "create_highlighted_pdf_for_research_interest", fake_highlight)
+    monkeypatch.setattr(
+        cli,
+        "open_pdf",
+        lambda path, page=None: opened.append((path, page)) or FakeOpenResult(),
+    )
+
+    cli.open_converse_source(turn, "1", ollama_model="model-x", ollama_url="http://ollama")
+
+    assert opened == [(highlighted_path, 3)]
+    assert highlight_calls[0]["pdf_path"] == pdf_path
+    assert highlight_calls[0]["page_start"] == 3
+    assert highlight_calls[0]["research_interest"] == "question"
+    assert highlight_calls[0]["model"] == "model-x"
+    assert highlight_calls[0]["ollama_url"] == "http://ollama"
+    assert highlight_calls[0]["fallback_excerpt"] == "Relevant excerpt."

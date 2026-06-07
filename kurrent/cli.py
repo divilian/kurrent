@@ -62,6 +62,7 @@ from kurrent.semantic_highlighter import (
 )
 from kurrent.terminal import QUIT_COMMANDS, is_quit_command
 from kurrent.pdf_opener import open_pdf
+from kurrent.pdf_highlighter import create_highlighted_pdf_for_research_interest
 
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 SEMANTIC_OVERFETCH_FACTOR = 5
@@ -1655,6 +1656,23 @@ def _latest_converse_sources(turn):
     return evidence_sources(turn.evidence)
 
 
+def _source_passage_menu_text(source) -> str:
+    """Return compact passage shortcuts for one grouped source."""
+
+    items = []
+
+    for passage in source.passages:
+        shortcut = f"{source.source_number}{passage.passage_label}"
+        page_text = passage.pages or "unknown page"
+        items.append(f"{shortcut} {page_text}")
+
+    if not items:
+        page_text = source.page_start if source.page_start is not None else "unknown page"
+        return f"{source.source_number}a p. {page_text}"
+
+    return "; ".join(items)
+
+
 def print_converse_sources(turn) -> None:
     """Print source-navigation entries for the most recent converse turn."""
 
@@ -1669,11 +1687,67 @@ def print_converse_sources(turn) -> None:
     print_wrapped(yellow_menu_text("-----------------------------------"))
 
     for source in sources:
-        print_wrapped(yellow_menu_text(f"{source.source_number}. {source.citation}"))
+        passage_text = _source_passage_menu_text(source)
+        print_wrapped(
+            yellow_menu_text(
+                f"{source.source_number}. {source.source_label}: {passage_text}"
+            )
+        )
 
 
-def open_converse_source(turn, source_number_text: str) -> None:
-    """Open one source from the most recent converse turn."""
+def _parse_source_selection(selection: str, source_count: int) -> tuple[int, int] | None:
+    """Parse source-browser selections like 1, 1a, or 2c.
+
+    Return zero-based (source_index, passage_index), defaulting bare source
+    numbers to the first passage. Return None when parsing fails.
+    """
+
+    text = selection.strip().lower()
+
+    if not text:
+        return None
+
+    digit_prefix = ""
+
+    for char in text:
+        if char.isdigit():
+            digit_prefix += char
+        else:
+            break
+
+    if not digit_prefix:
+        return None
+
+    suffix = text[len(digit_prefix):]
+
+    if suffix and not suffix.isalpha():
+        return None
+
+    source_number = int(digit_prefix)
+
+    if not 1 <= source_number <= source_count:
+        return None
+
+    if not suffix:
+        return source_number - 1, 0
+
+    passage_index = 0
+
+    for char in suffix:
+        passage_index = passage_index * 26 + (ord(char) - ord("a") + 1)
+
+    return source_number - 1, passage_index - 1
+
+
+def open_converse_source(
+    turn,
+    source_number_text: str,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_url: str = DEFAULT_OLLAMA_URL,
+    ollama_timeout: float = 45.0,
+    highlight: bool = True,
+) -> None:
+    """Open one source passage from the most recent converse turn."""
 
     sources = _latest_converse_sources(turn)
 
@@ -1681,26 +1755,70 @@ def open_converse_source(turn, source_number_text: str) -> None:
         print_wrapped("No sources are available yet. Ask a research question first.")
         return
 
-    try:
-        source_number = int(source_number_text.strip())
-    except ValueError:
-        print_wrapped("Usage: /open N, where N is a source number from /sources.")
-        return
+    parsed = _parse_source_selection(source_number_text, len(sources))
 
-    if not 1 <= source_number <= len(sources):
+    if parsed is None:
         print_wrapped(
-            f"Source number out of range. Choose 1 through {len(sources)}."
+            "Type a source number like 1, or a passage like 1c, "
+            "or q to return to kurrent."
         )
         return
 
-    source = sources[source_number - 1]
+    source_index, passage_index = parsed
+    source = sources[source_index]
+    source_number = source.source_number
 
-    if source.pdf_path is None:
-        print_wrapped(f"No PDF path is available for source {source_number}.")
+    if not source.passages:
+        print_wrapped(f"No passages are available for source {source_number}.")
         return
 
-    result = open_pdf(source.pdf_path, page=source.page_start)
-    print_wrapped(yellow_menu_text(open_pdf_result_message(result, purpose=f"source {source_number}")))
+    if not 0 <= passage_index < len(source.passages):
+        last_passage = source.passages[-1].passage_label
+        print_wrapped(
+            f"Passage out of range. Choose {source_number}a through "
+            f"{source_number}{last_passage}."
+        )
+        return
+
+    passage = source.passages[passage_index]
+    shortcut = f"{source_number}{passage.passage_label}"
+
+    if passage.pdf_path is None:
+        print_wrapped(f"No PDF path is available for source {shortcut}.")
+        return
+
+    pdf_path = passage.pdf_path
+    purpose = f"source {shortcut}"
+
+    if highlight and passage.page_start is not None and turn is not None:
+        print_wrapped(
+            gray_status_text(
+                f"  Finding relevant passage for source {shortcut}..."
+            )
+        )
+        highlight_result = create_highlighted_pdf_for_research_interest(
+            pdf_path=passage.pdf_path,
+            page_start=passage.page_start,
+            research_interest=turn.user_text,
+            model=ollama_model,
+            ollama_url=ollama_url,
+            timeout_seconds=ollama_timeout,
+            fallback_excerpt=passage.excerpt,
+        )
+
+        if highlight_result.success and highlight_result.highlighted_pdf_path is not None:
+            pdf_path = highlight_result.highlighted_pdf_path
+            purpose = f"highlighted source {shortcut}"
+        elif highlight_result.message:
+            print_wrapped(
+                gray_status_text(
+                    f"  Could not highlight source {shortcut}: "
+                    f"{highlight_result.message}"
+                )
+            )
+
+    result = open_pdf(pdf_path, page=passage.page_start)
+    print_wrapped(yellow_menu_text(open_pdf_result_message(result, purpose=purpose)))
 
 
 def prompt_source_action() -> str:
@@ -1728,7 +1846,12 @@ def is_source_browser_quit(command: str) -> bool:
     }
 
 
-def browse_converse_sources(turn) -> None:
+def browse_converse_sources(
+    turn,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_url: str = DEFAULT_OLLAMA_URL,
+    ollama_timeout: float = 45.0,
+) -> None:
     """Open an interactive source browser for the most recent converse turn."""
 
     sources = _latest_converse_sources(turn)
@@ -1739,7 +1862,12 @@ def browse_converse_sources(turn) -> None:
 
     while True:
         print_converse_sources(turn)
-        print_wrapped(yellow_menu_text("Type a source number to open it, or q to return to kurrent."))
+        print_wrapped(
+            yellow_menu_text(
+                "Type a source number like 1, or a passage like 1c, "
+                "or q to return to kurrent."
+            )
+        )
 
         choice = prompt_source_action()
 
@@ -1750,17 +1878,36 @@ def browse_converse_sources(turn) -> None:
             parts = choice.split(maxsplit=1)
 
             if len(parts) == 2:
-                open_converse_source(turn, parts[1])
+                open_converse_source(
+                    turn,
+                    parts[1],
+                    ollama_model=ollama_model,
+                    ollama_url=ollama_url,
+                    ollama_timeout=ollama_timeout,
+                )
             else:
                 print_wrapped(
-                    "Type a source number to open it, or q to return to kurrent."
+                    "Type a source number like 1, or a passage like 1c, "
+                    "or q to return to kurrent."
                 )
             continue
 
-        open_converse_source(turn, choice)
+        open_converse_source(
+            turn,
+            choice,
+            ollama_model=ollama_model,
+            ollama_url=ollama_url,
+            ollama_timeout=ollama_timeout,
+        )
 
 
-def handle_converse_command(command: str, last_turn) -> bool:
+def handle_converse_command(
+    command: str,
+    last_turn,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_url: str = DEFAULT_OLLAMA_URL,
+    ollama_timeout: float = 45.0,
+) -> bool:
     """Handle a kurrent converse slash command.
 
     Return True when the caller should continue the session and False when it
@@ -1778,7 +1925,12 @@ def handle_converse_command(command: str, last_turn) -> bool:
         return True
 
     if lowered == "/sources":
-        browse_converse_sources(last_turn)
+        browse_converse_sources(
+            last_turn,
+            ollama_model=ollama_model,
+            ollama_url=ollama_url,
+            ollama_timeout=ollama_timeout,
+        )
         return True
 
     if lowered.startswith("/open"):
@@ -1788,7 +1940,13 @@ def handle_converse_command(command: str, last_turn) -> bool:
             print_wrapped("Usage: /open N, where N is a source number from /sources.")
             return True
 
-        open_converse_source(last_turn, parts[1])
+        open_converse_source(
+            last_turn,
+            parts[1],
+            ollama_model=ollama_model,
+            ollama_url=ollama_url,
+            ollama_timeout=ollama_timeout,
+        )
         return True
 
     print_wrapped(f"Unknown command: {command}")
@@ -1861,7 +2019,13 @@ def run_converse(args: argparse.Namespace) -> int:
                 continue
 
             if user_text.startswith("/"):
-                if not handle_converse_command(user_text, last_turn):
+                if not handle_converse_command(
+                    user_text,
+                    last_turn,
+                    ollama_model=args.ollama_model,
+                    ollama_url=args.ollama_url,
+                    ollama_timeout=args.ollama_timeout,
+                ):
                     return 0
                 continue
 
@@ -1901,7 +2065,12 @@ def run_converse(args: argparse.Namespace) -> int:
                 print_wrapped(turn.assistant_text)
                 print()
 
-            browse_converse_sources(last_turn)
+            browse_converse_sources(
+                last_turn,
+                ollama_model=args.ollama_model,
+                ollama_url=args.ollama_url,
+                ollama_timeout=args.ollama_timeout,
+            )
             print()
     finally:
         store.close()

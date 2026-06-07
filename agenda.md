@@ -23,7 +23,7 @@
 - [x] two-column parsing
 - [x] pop up PDFs in user PDF reader
 - [x] pop up PDFs to correct page in user PDF reader
-- [ ] pop up PDFs highlighting key text in user PDF reader
+- [x] pop up PDFs highlighting key text in user PDF reader
 
 this is now pushed to github repo, along with a couple message wording changes and a parameter tweak. use the github repo version as a basis for future work in this chat.
 
