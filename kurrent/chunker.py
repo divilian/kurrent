@@ -95,6 +95,13 @@ def chunk_document(
     ):
         return existing_chunks
 
+    if (
+        not existing_chunks
+        and hasattr(store, "document_has_no_extractable_text")
+        and store.document_has_no_extractable_text(doc.doc_id)
+    ):
+        return []
+
     if existing_chunks:
         store.delete_derived_artifacts_for_document(doc.doc_id)
 
@@ -124,6 +131,17 @@ def chunk_document(
         sections=sections,
         doc_id=doc.doc_id,
     )
+
+    if not chunks:
+        store.mark_document_no_extractable_text(
+            doc.doc_id,
+            pipeline_fingerprint,
+            message=(
+                "The current text extraction/sectioning/chunking pipeline "
+                "found no text to chunk for this PDF."
+            ),
+        )
+        return chunks
 
     store.insert_chunks(chunks)
     store.set_document_pipeline_fingerprint(

@@ -17,9 +17,18 @@ from kurrent.schema import (
 )
 
 __all__ = [
+    "TEXT_PIPELINE_STATUS_OK",
+    "TEXT_PIPELINE_STATUS_NO_EXTRACTABLE_TEXT",
     "canonical_chunk_pair",
     "StateStore",
 ]
+
+TEXT_PIPELINE_STATUS_OK = "ok"
+TEXT_PIPELINE_STATUS_NO_EXTRACTABLE_TEXT = "no_extractable_text"
+VALID_TEXT_PIPELINE_STATUSES = {
+    TEXT_PIPELINE_STATUS_OK,
+    TEXT_PIPELINE_STATUS_NO_EXTRACTABLE_TEXT,
+}
 
 def canonical_chunk_pair(
     chunk_a_id: str,
@@ -53,6 +62,31 @@ class StateStore:
         schema_sql = schema_path.read_text(encoding="utf-8")
         with self.conn:
             self.conn.executescript(schema_sql)
+            self._migrate_document_pipeline_state()
+
+    def _migrate_document_pipeline_state(self) -> None:
+        """Add pipeline-state columns needed by newer kurrent versions."""
+
+        rows = self.conn.execute(
+            "PRAGMA table_info(document_pipeline_state)"
+        ).fetchall()
+        column_names = {row["name"] for row in rows}
+
+        if "status" not in column_names:
+            self.conn.execute(
+                """
+                ALTER TABLE document_pipeline_state
+                ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'
+                """
+            )
+
+        if "message" not in column_names:
+            self.conn.execute(
+                """
+                ALTER TABLE document_pipeline_state
+                ADD COLUMN message TEXT
+                """
+            )
 
     def insert_document(self, document: Document) -> None:
         with self.conn:
@@ -145,6 +179,22 @@ class StateStore:
             return None
 
         return self._row_to_document(row)
+
+    def list_documents(self) -> list[Document]:
+        """Return all documents known to kurrent, ordered for display."""
+
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM documents
+            ORDER BY
+                title IS NULL,
+                title COLLATE NOCASE,
+                pdf_path COLLATE NOCASE
+            """
+        ).fetchall()
+
+        return [self._row_to_document(row) for row in rows]
 
     def update_document_metadata(
         self,
@@ -310,32 +360,52 @@ class StateStore:
 
         return [self._row_to_chunk(row) for row in rows]
 
-    def get_document_pipeline_fingerprint(self, doc_id: str) -> str | None:
-        """Return the stored derived-text pipeline fingerprint, if present."""
+    def get_document_pipeline_state(self, doc_id: str) -> sqlite3.Row | None:
+        """Return the stored derived-text pipeline-state row, if present."""
 
-        row = self.conn.execute(
+        return self.conn.execute(
             """
-            SELECT pipeline_fingerprint
+            SELECT pipeline_fingerprint, status, message, updated_at
             FROM document_pipeline_state
             WHERE doc_id = ?
             """,
             (doc_id,),
         ).fetchone()
 
+    def get_document_pipeline_fingerprint(self, doc_id: str) -> str | None:
+        """Return the stored derived-text pipeline fingerprint, if present."""
+
+        row = self.get_document_pipeline_state(doc_id)
+
         if row is None:
             return None
 
         return row["pipeline_fingerprint"]
 
-    def set_document_pipeline_fingerprint(
+    def get_document_pipeline_status(self, doc_id: str) -> str | None:
+        """Return the stored derived-text pipeline status, if present."""
+
+        row = self.get_document_pipeline_state(doc_id)
+
+        if row is None:
+            return None
+
+        return row["status"]
+
+    def set_document_pipeline_state(
         self,
         doc_id: str,
         pipeline_fingerprint: str,
+        status: str = TEXT_PIPELINE_STATUS_OK,
+        message: str | None = None,
     ) -> None:
-        """Record the pipeline fingerprint used for this document's chunks."""
+        """Record the pipeline fingerprint and text-artifact status."""
 
         if self.get_document(doc_id) is None:
             raise ValueError(f"Document not found: {doc_id}")
+
+        if status not in VALID_TEXT_PIPELINE_STATUSES:
+            raise ValueError(f"Invalid text pipeline status: {status!r}")
 
         updated_at = datetime.now(timezone.utc).isoformat()
 
@@ -343,21 +413,72 @@ class StateStore:
             self.conn.execute(
                 """
                 INSERT INTO document_pipeline_state
-                (doc_id, pipeline_fingerprint, updated_at)
-                VALUES (?, ?, ?)
+                (doc_id, pipeline_fingerprint, status, message, updated_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(doc_id) DO UPDATE SET
                     pipeline_fingerprint = excluded.pipeline_fingerprint,
+                    status = excluded.status,
+                    message = excluded.message,
                     updated_at = excluded.updated_at
                 """,
-                (doc_id, pipeline_fingerprint, updated_at),
+                (doc_id, pipeline_fingerprint, status, message, updated_at),
             )
+
+    def set_document_pipeline_fingerprint(
+        self,
+        doc_id: str,
+        pipeline_fingerprint: str,
+    ) -> None:
+        """Record that this document has current extractable text chunks."""
+
+        self.set_document_pipeline_state(
+            doc_id=doc_id,
+            pipeline_fingerprint=pipeline_fingerprint,
+            status=TEXT_PIPELINE_STATUS_OK,
+            message=None,
+        )
+
+    def mark_document_no_extractable_text(
+        self,
+        doc_id: str,
+        pipeline_fingerprint: str,
+        message: str | None = None,
+    ) -> None:
+        """Record that this pipeline found no text to chunk for a document."""
+
+        self.set_document_pipeline_state(
+            doc_id=doc_id,
+            pipeline_fingerprint=pipeline_fingerprint,
+            status=TEXT_PIPELINE_STATUS_NO_EXTRACTABLE_TEXT,
+            message=message,
+        )
+
+    def document_has_no_extractable_text(
+        self,
+        doc_id: str,
+        pipeline_fingerprint: str | None = None,
+    ) -> bool:
+        """Return whether the document is known to have no extractable text.
+
+        The optional pipeline_fingerprint argument is accepted for compatibility
+        with older callers, but no-text markings intentionally survive ordinary
+        text-pipeline changes. A future OCR-capable workflow should clear or
+        override this status explicitly when it wants to retry these PDFs.
+        """
+
+        row = self.get_document_pipeline_state(doc_id)
+
+        if row is None:
+            return False
+
+        return row["status"] == TEXT_PIPELINE_STATUS_NO_EXTRACTABLE_TEXT
 
     def document_has_current_pipeline(
         self,
         doc_id: str,
         pipeline_fingerprint: str,
     ) -> bool:
-        """Return whether stored derived artifacts match the given pipeline."""
+        """Return whether stored derived-artifact state matches the pipeline."""
 
         return self.get_document_pipeline_fingerprint(doc_id) == pipeline_fingerprint
 

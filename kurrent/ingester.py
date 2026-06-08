@@ -100,7 +100,7 @@ def ingest_pdf(
     if embedder is not None and stale_existing_chunks:
         embedder.delete_document(doc.doc_id)
 
-    chunk_document(
+    chunks = chunk_document(
         doc.doc_id,
         store,
         reviewed_headings=reviewed_headings,
@@ -109,7 +109,7 @@ def ingest_pdf(
         llm_progress_callback=llm_progress_callback,
     )
 
-    if embedder is not None:
+    if embedder is not None and (chunks is None or chunks):
         # This is possibly slow if this document has been previously ingested.
         # We're redoing the embedding work. Possible performance improvement.
         embedder.index_chunks(doc.doc_id, store)

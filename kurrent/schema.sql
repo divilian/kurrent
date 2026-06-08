@@ -15,9 +15,13 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS document_pipeline_state (
     doc_id TEXT PRIMARY KEY,
     pipeline_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    message TEXT,
     updated_at TEXT NOT NULL,
 
-    FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+    FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE,
+
+    CHECK (status IN ('ok', 'no_extractable_text'))
 );
 
 CREATE TABLE IF NOT EXISTS chunks (

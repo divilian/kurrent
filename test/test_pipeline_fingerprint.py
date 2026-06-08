@@ -113,3 +113,26 @@ def test_delete_derived_artifacts_removes_chunks_and_pipeline_state(tmp_path) ->
     assert store.get_document_pipeline_fingerprint(document.doc_id) is None
 
     store.close()
+
+
+def test_state_store_tracks_no_extractable_text_as_current_pipeline(tmp_path) -> None:
+    """A text-less PDF can be current without having any chunks to embed."""
+
+    store = StateStore(tmp_path / "kurrent.db")
+    document = insert_test_document(store)
+    fingerprint = current_text_pipeline_fingerprint()
+
+    store.mark_document_no_extractable_text(
+        document.doc_id,
+        fingerprint,
+        message="No text found.",
+    )
+
+    assert store.get_chunks_for_document(
+        document.doc_id,
+        "section-aware-fixed-char-2000-v2",
+    ) == []
+    assert store.document_has_current_pipeline(document.doc_id, fingerprint)
+    assert store.document_has_no_extractable_text(document.doc_id, fingerprint)
+
+    store.close()

@@ -145,3 +145,35 @@ def test_refresh_documents_for_semantic_search_reingests_with_existing_metadata(
     assert call["metadata_was_reviewed"] is False
     assert call["reviewed_headings"] is None
     assert call["use_llm_sectioning"] is True
+
+
+def test_semantic_refresh_documents_skips_current_no_text_docs():
+    """Verify known text-less PDFs are not repeatedly offered for refresh."""
+
+    current = current_text_pipeline_fingerprint()
+    no_text = FakeDocument("no-text", Path("scan.pdf"))
+
+    class NoTextStore(FakeStore):
+        def document_has_no_extractable_text(self, doc_id, pipeline_fingerprint=None):
+            return doc_id == no_text.doc_id
+
+    store = NoTextStore([no_text], {no_text.doc_id: current})
+    embedder = FakeEmbedder(set())
+
+    assert cli.semantic_refresh_documents(store, embedder) == []
+
+
+def test_semantic_refresh_documents_skips_stale_no_text_docs():
+    """Verify no-text markings survive ordinary text-pipeline changes."""
+
+    stale = current_text_pipeline_fingerprint(extractor_version="old-extractor")
+    no_text = FakeDocument("no-text", Path("scan.pdf"))
+
+    class NoTextStore(FakeStore):
+        def document_has_no_extractable_text(self, doc_id, pipeline_fingerprint=None):
+            return doc_id == no_text.doc_id
+
+    store = NoTextStore([no_text], {no_text.doc_id: stale})
+    embedder = FakeEmbedder(set())
+
+    assert cli.semantic_refresh_documents(store, embedder) == []

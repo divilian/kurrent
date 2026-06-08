@@ -220,6 +220,7 @@ class ExistingDocumentStatus:
     document: object
     has_chunks: bool
     has_current_pipeline: bool
+    has_no_extractable_text: bool = False
 
 
 
@@ -449,17 +450,26 @@ def existing_document_status(
         use_llm_sectioning=use_llm_sectioning,
     )
 
+    has_no_extractable_text = (
+        hasattr(store, "document_has_no_extractable_text")
+        and store.document_has_no_extractable_text(existing.doc_id)
+    )
+
     return ExistingDocumentStatus(
         pdf_sha256=pdf_sha256,
         document=existing,
         has_chunks=bool(existing_chunks),
         has_current_pipeline=(
-            bool(existing_chunks)
-            and store.document_has_current_pipeline(
-                existing.doc_id,
-                pipeline_fingerprint,
+            has_no_extractable_text
+            or (
+                bool(existing_chunks)
+                and store.document_has_current_pipeline(
+                    existing.doc_id,
+                    pipeline_fingerprint,
+                )
             )
         ),
+        has_no_extractable_text=has_no_extractable_text,
     )
 
 
@@ -589,7 +599,7 @@ def ingest_pdf_with_metadata(
     if stale_existing_chunks:
         embedder.delete_document(doc_id)
 
-    chunk_document(
+    chunks = chunk_document(
         doc_id,
         store,
         reviewed_headings=reviewed_headings,
@@ -597,7 +607,9 @@ def ingest_pdf_with_metadata(
         llm_progress_total_callback=llm_progress_total_callback,
         llm_progress_callback=llm_progress_callback,
     )
-    embedder.index_chunks(doc_id, store)
+
+    if chunks is None or chunks:
+        embedder.index_chunks(doc_id, store)
 
     return IngestOutcome(
         doc_id=doc_id,
@@ -910,6 +922,12 @@ def document_needs_semantic_refresh(document, store, embedder) -> bool:
         pipeline_fingerprint = store.get_document_pipeline_fingerprint(
             document.doc_id,
         )
+        if (
+            hasattr(store, "document_has_no_extractable_text")
+            and store.document_has_no_extractable_text(document.doc_id)
+        ):
+            return False
+
         if not is_current_text_pipeline_fingerprint(pipeline_fingerprint):
             return True
 
@@ -1018,6 +1036,14 @@ def refresh_documents_for_semantic_search(
                 storage_mode=document.storage_mode,
                 managed_pdf_dir=None,
             )
+            if (
+                hasattr(store, "document_has_no_extractable_text")
+                and store.document_has_no_extractable_text(document.doc_id)
+            ):
+                print_wrapped(
+                    "(No extractable text found; excluding this document from "
+                    "semantic search.)"
+                )
             refreshed += 1
         except Exception as exc:
             failed += 1
