@@ -12,9 +12,11 @@ from kurrent.chunker import (
     make_section_aware_fixed_size_chunks,
     make_word_aware_fixed_size_chunks,
     sha256_text,
+    should_use_rules_based_sectioning_for_huge_pdf,
 )
 from kurrent.schema import Document, SectionLine, SectionSpan
 from kurrent.state_store import StateStore
+from kurrent.pipeline import current_text_pipeline_fingerprint
 from test.factories import make_document
 
 
@@ -301,3 +303,51 @@ def test_chunk_document_stores_chunks(store, tmp_path):
 def test_chunk_document_rejects_missing_document(store):
     with pytest.raises(ValueError):
         chunk_document("not-a-real-doc-id", store)
+
+
+def test_chunk_document_uses_rules_based_sectioning_for_huge_pdfs(
+    store,
+    tmp_path,
+    monkeypatch,
+):
+    """Verify giant PDFs skip LLM sectioning while preserving current pipeline."""
+
+    pdf_path = write_pdf(tmp_path / "huge.pdf", ["1 Introduction\nBody text."])
+    doc = make_document(pdf_path)
+    store.insert_document(doc)
+
+    def fail_if_llm_sectioning_is_used(**_kwargs):
+        raise AssertionError("LLM sectioning should not be used for huge PDFs")
+
+    monkeypatch.setattr(
+        "kurrent.chunker.should_use_rules_based_sectioning_for_huge_pdf",
+        lambda _path: (True, 3963, 200),
+    )
+    monkeypatch.setattr(
+        "kurrent.chunker.make_section_spans_with_llm",
+        fail_if_llm_sectioning_is_used,
+    )
+
+    chunks = chunk_document(doc.doc_id, store, use_llm_sectioning=True)
+
+    assert chunks
+    assert store.document_has_current_pipeline(
+        doc.doc_id,
+        current_text_pipeline_fingerprint(use_llm_sectioning=True),
+    )
+
+
+def test_huge_pdf_guard_can_be_disabled_with_zero_cutoff(monkeypatch, tmp_path):
+    """Verify a zero huge-PDF cutoff disables the automatic LLM fallback."""
+
+    pdf_path = write_pdf(tmp_path / "paper.pdf", ["page one"])
+
+    monkeypatch.setenv("KURRENT_LLM_SECTIONING_MAX_PAGES", "0")
+
+    should_skip, page_count, cutoff = should_use_rules_based_sectioning_for_huge_pdf(
+        pdf_path,
+    )
+
+    assert should_skip is False
+    assert page_count == 1
+    assert cutoff == 0

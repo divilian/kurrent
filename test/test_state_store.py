@@ -63,6 +63,62 @@ def test_get_or_create_document_uses_metadata_for_new_document(store):
     assert doc.doi == "10.1145/1897816.1897840"
 
 
+def test_get_or_create_document_title_cases_all_caps_metadata(store):
+    metadata = ExtractedMetadata(
+        title="THE EVOLUTION OF COOPERATION",
+        authors="Martin Nowak",
+        year=2006,
+    )
+
+    doc = store.get_or_create_document(
+        Path("/tmp/cooperation.pdf"),
+        "fake-all-caps-sha256",
+        metadata=metadata,
+    )
+
+    assert doc.title == "The Evolution of Cooperation"
+
+
+def test_update_document_metadata_title_cases_all_caps_title(store):
+    doc = make_document(title="Old Title")
+    store.insert_document(doc)
+
+    updated = store.update_document_metadata(
+        doc.doc_id,
+        title="THE EVOLUTION OF COOPERATION",
+    )
+
+    assert updated.title == "The Evolution of Cooperation"
+
+
+def test_get_or_create_document_name_cases_all_caps_authors(store):
+    metadata = ExtractedMetadata(
+        title="Learning to Classify Text",
+        authors="WILLIAM W. COHEN and YORAM SINGER",
+        year=1996,
+    )
+
+    doc = store.get_or_create_document(
+        Path("/tmp/cohen-singer.pdf"),
+        "fake-all-caps-authors-sha256",
+        metadata=metadata,
+    )
+
+    assert doc.authors == "William W. Cohen and Yoram Singer"
+
+
+def test_update_document_metadata_name_cases_all_caps_authors(store):
+    doc = make_document(title="Old Title")
+    store.insert_document(doc)
+
+    updated = store.update_document_metadata(
+        doc.doc_id,
+        authors="WILLIAM W. COHEN and YORAM SINGER",
+    )
+
+    assert updated.authors == "William W. Cohen and Yoram Singer"
+
+
 def test_get_or_create_document_ignores_metadata_for_existing_document(store):
     """Verify that metadata does not overwrite an existing document."""
 

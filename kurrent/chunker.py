@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 import hashlib
+import os
+import sys
 from collections.abc import Callable, Sequence
 
 
-from kurrent.file_utils import is_pdf
+import pymupdf
+
+from kurrent.file_utils import is_pdf, silence_mupdf_messages
 from kurrent.pdf_text_extractor import (
     extract_pdf_pages as extract_layout_pdf_pages,
 )
@@ -25,8 +29,61 @@ __all__ = [
     "chunker_version",
     "make_word_aware_fixed_size_chunks",
     "make_section_aware_fixed_size_chunks",
+    "DEFAULT_LLM_SECTIONING_MAX_PAGES",
+    "pdf_page_count",
+    "should_use_rules_based_sectioning_for_huge_pdf",
     "make_section_spans_with_llm",
 ]
+
+
+DEFAULT_LLM_SECTIONING_MAX_PAGES = 200
+
+
+def pdf_page_count(pdf_path: str | Path) -> int:
+    """Return the number of pages in a PDF without extracting all text."""
+
+    silence_mupdf_messages()
+
+    with pymupdf.open(pdf_path) as pdf:
+        return int(pdf.page_count)
+
+
+def llm_sectioning_max_pages() -> int:
+    """Return the page-count cutoff for LLM sectioning.
+
+    Very large PDFs can produce thousands of heading candidates, which makes
+    per-candidate Ollama sectioning impractical. Keep this configurable for
+    experiments, but default to a conservative scholarly-article-friendly cap.
+    """
+
+    raw_value = os.environ.get("KURRENT_LLM_SECTIONING_MAX_PAGES")
+
+    if raw_value is None:
+        return DEFAULT_LLM_SECTIONING_MAX_PAGES
+
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return DEFAULT_LLM_SECTIONING_MAX_PAGES
+
+
+def should_use_rules_based_sectioning_for_huge_pdf(
+    pdf_path: str | Path,
+    max_pages: int | None = None,
+) -> tuple[bool, int, int]:
+    """Return whether LLM sectioning should be skipped for a huge PDF.
+
+    The tuple is (should_skip, page_count, cutoff). A cutoff of 0 disables the
+    guard for users who deliberately want to experiment on giant files.
+    """
+
+    cutoff = llm_sectioning_max_pages() if max_pages is None else max_pages
+    page_count = pdf_page_count(pdf_path)
+
+    if cutoff <= 0:
+        return False, page_count, cutoff
+
+    return page_count > cutoff, page_count, cutoff
 
 
 def chunker_version(target_chars: int = 2000) -> str:
@@ -112,13 +169,31 @@ def chunk_document(
             headings=list(reviewed_headings),
         )
     elif use_llm_sectioning:
-        sections = make_section_spans_with_llm(
-            pdf_path=doc.pdf_path,
-            doc_id=doc.doc_id,
-            max_pages=llm_max_pages,
-            progress_total_callback=llm_progress_total_callback,
-            progress_callback=llm_progress_callback,
+        skip_llm, page_count, cutoff = should_use_rules_based_sectioning_for_huge_pdf(
+            doc.pdf_path,
         )
+
+        if skip_llm:
+            print(
+                "Warning: using rules-based sectioning for a very large PDF "
+                f"({page_count} pages > {cutoff} page LLM-sectioning limit): "
+                f"{doc.pdf_path}",
+                file=sys.stderr,
+            )
+            headings = detect_heading_candidates(doc.pdf_path)
+            sections = make_section_spans_from_headings(
+                pdf_path=doc.pdf_path,
+                doc_id=doc.doc_id,
+                headings=headings,
+            )
+        else:
+            sections = make_section_spans_with_llm(
+                pdf_path=doc.pdf_path,
+                doc_id=doc.doc_id,
+                max_pages=llm_max_pages,
+                progress_total_callback=llm_progress_total_callback,
+                progress_callback=llm_progress_callback,
+            )
     else:
         headings = detect_heading_candidates(doc.pdf_path)
         sections = make_section_spans_from_headings(

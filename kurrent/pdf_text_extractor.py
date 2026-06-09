@@ -28,6 +28,7 @@ __all__ = [
     "extract_pdf_lines",
     "extract_pdf_pages",
     "extract_page_from_words",
+    "sanitize_extracted_text",
 ]
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,25 @@ BOILERPLATE_LINE_RE = re.compile(
 
 
 
+SURROGATE_CODEPOINT_RE = re.compile(r"[\ud800-\udfff]")
+
+
+def sanitize_extracted_text(text: str) -> str:
+    """Return text that is safe to store, hash, embed, and send to UTF-8 APIs.
+
+    PyMuPDF can occasionally expose lone UTF-16 surrogate code points from
+    unusual embedded fonts. Those are not valid Unicode scalar values and will
+    crash later when Kurrent serializes text as UTF-8. Drop them at the
+    extraction boundary so one odd glyph cannot poison the derived-text
+    pipeline.
+    """
+
+    if not text:
+        return ""
+
+    text = SURROGATE_CODEPOINT_RE.sub("", str(text))
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
 
 LIGATURE_REPLACEMENTS = {
     "ﬀ": "ff",
@@ -184,6 +204,7 @@ def repair_pdf_control_glyphs(text: str) -> str:
 def normalize_extracted_text(text: str) -> str:
     """Normalize one extracted text fragment for display/chunking."""
 
+    text = sanitize_extracted_text(text)
     text = repair_pdf_control_glyphs(text)
     text = replace_ligatures(text)
     text = text.replace("\u00a0", " ")
@@ -193,7 +214,7 @@ def normalize_extracted_text(text: str) -> str:
     text = re.sub(r"\[\s+", "[", text)
     text = re.sub(r"\s+\]", "]", text)
     text = re.sub(r"\s+([,.;:])", r"\1", text)
-    return text.strip()
+    return sanitize_extracted_text(text.strip())
 
 
 def text_from_words(words: Sequence[WordBox]) -> str:

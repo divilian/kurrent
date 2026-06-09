@@ -2102,6 +2102,255 @@ def run_converse(args: argparse.Namespace) -> int:
         store.close()
 
 
+
+def _document_display_name(document) -> str:
+    """Return a concise display name for metadata refresh output."""
+
+    title = document.title or document.pdf_path.name
+    year = document.year if document.year is not None else "n.d."
+    return f"{title} ({year})"
+
+
+def _print_metadata_refresh_fields(prefix: str, metadata) -> None:
+    """Print metadata fields with a small prefix label."""
+
+    print_field(f"{prefix} title", metadata.title or "")
+    print_field(f"{prefix} authors", metadata.authors or "")
+    print_field(f"{prefix} year", metadata.year if metadata.year is not None else "")
+    print_field(f"{prefix} doi", metadata.doi or "")
+
+
+def _metadata_refresh_documents_for_args(args, store) -> list:
+    """Return documents selected by refresh-metadata CLI arguments."""
+
+    query = " ".join(args.query).strip()
+
+    if not query:
+        return store.list_documents()
+
+    from kurrent.searcher import Searcher
+
+    searcher = Searcher(state_store=store)
+    hits = searcher.metadata_search(query, limit=args.limit)
+    documents = []
+
+    for hit in hits:
+        document = store.get_document(hit.doc_id)
+
+        if document is not None:
+            documents.append(document)
+
+    return documents
+
+
+def prompt_apply_metadata_refresh() -> str:
+    """Ask how one proposed metadata refresh should be handled.
+
+    Returns one of:
+    - ``"yes"`` to apply the current update.
+    - ``"no"`` to skip the current update.
+    - ``"all"`` to apply the current update and all future proposed updates.
+    - ``"quit"`` to stop prompting and leave remaining updates unapplied.
+    """
+
+    prompt = "Apply this metadata update? [y/N/a/q] "
+
+    while True:
+        try:
+            answer = input(prompt).strip().lower()
+        except EOFError:
+            print()
+            return "no"
+
+        if answer in {"", "n", "no"}:
+            return "no"
+
+        if answer in {"y", "yes"}:
+            return "yes"
+
+        if answer in {"a", "all", "yes-all", "yes_all"}:
+            return "all"
+
+        if answer in {"q", "quit", "exit"}:
+            return "quit"
+
+        print("Please enter y, n, a, or q.")
+
+
+def run_refresh_metadata(args: argparse.Namespace) -> int:
+    """Run the kurrent refresh-metadata command."""
+
+    from kurrent.config import get_crossref_mailto, get_kurrent_state_paths
+    from kurrent.metadata_refresher import (
+        MetadataRefreshError,
+        assess_document_metadata,
+        apply_metadata_refresh,
+        ensure_ollama_available,
+        metadata_updates_for_document,
+        propose_metadata_refresh,
+    )
+    from kurrent.state_store import StateStore
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    if not state_paths.sqlite_path.exists():
+        raise CliUsageError(
+            "No kurrent SQLite database exists yet. Ingest PDFs first, or pass "
+            "--state-dir pointing to an existing kurrent state directory. "
+            f"Expected database: {state_paths.sqlite_path}"
+        )
+
+    store = StateStore(state_paths.sqlite_path)
+    crossref_mailto = get_crossref_mailto()
+
+    try:
+        documents = _metadata_refresh_documents_for_args(args, store)
+
+        if args.limit is not None and not args.query:
+            documents = documents[: args.limit]
+
+        if not documents:
+            print_wrapped("No matching documents.")
+            return 0
+
+        print_wrapped(f"Documents selected: {len(documents)}")
+
+        if args.method in {"auto", "llm"}:
+            print_wrapped(gray_status_text("Checking Ollama availability..."))
+            try:
+                started_ollama = ensure_ollama_available(
+                    ollama_url=args.ollama_url,
+                    startup_timeout_seconds=args.ollama_startup_timeout,
+                    progress_callback=lambda message: print_wrapped(
+                        gray_status_text(message)
+                    ),
+                )
+            except MetadataRefreshError as exc:
+                print_usage_error(str(exc))
+                return 2
+
+            if started_ollama:
+                print_wrapped(gray_status_text("Ollama is ready."))
+
+        inspected = 0
+        skipped_good = 0
+        proposed_count = 0
+        updated_count = 0
+        failed = 0
+        apply_all_remaining = False
+        stopped_by_user = False
+
+        for i, document in enumerate(documents, start=1):
+            assessment = assess_document_metadata(document)
+
+            if not assessment.needs_refresh and not args.include_apparently_good:
+                skipped_good += 1
+                continue
+
+            inspected += 1
+            print()
+            print(separator_line())
+            print_wrapped(f"Document {i}/{len(documents)}: {_document_display_name(document)}")
+            print_field("pdf", document.pdf_path)
+
+            if assessment.reasons:
+                print_field("metadata issue", "; ".join(assessment.reasons))
+            else:
+                print_field("metadata issue", "none apparent; forced by --include-apparently-good")
+
+            print_wrapped(gray_status_text("  Looking for improved metadata..."))
+
+            try:
+                proposal = propose_metadata_refresh(
+                    document,
+                    method=args.method,
+                    crossref_mailto=crossref_mailto,
+                    crossref_timeout_seconds=args.crossref_timeout,
+                    ollama_model=args.ollama_model,
+                    ollama_url=args.ollama_url,
+                    ollama_timeout_seconds=args.ollama_timeout,
+                    max_pages=args.pages,
+                )
+            except Exception as exc:
+                failed += 1
+                print_wrapped(f"Metadata refresh failed: {type(exc).__name__}: {exc}")
+                continue
+
+            replace_all = args.replace_all_crossref and proposal.source == "crossref"
+            updates = metadata_updates_for_document(
+                document,
+                proposal,
+                replace_all=replace_all,
+            )
+
+            if not updates:
+                print_wrapped("No useful metadata update found.")
+                print_field("source", proposal.source)
+                print_field("confidence", proposal.confidence)
+                print_field("reason", proposal.reason)
+                continue
+
+            proposed_count += 1
+            print_field("source", proposal.source)
+            print_field("confidence", proposal.confidence)
+            print_field("reason", proposal.reason)
+            _print_metadata_refresh_fields("current", document)
+            _print_metadata_refresh_fields("proposed", proposal.metadata)
+            print_field("fields to update", ", ".join(updates))
+
+            should_apply = False
+
+            if args.dry_run:
+                print_wrapped("Dry run: metadata not changed.")
+            elif args.assume_yes or apply_all_remaining:
+                should_apply = True
+            else:
+                prompt_choice = prompt_apply_metadata_refresh()
+
+                if prompt_choice == "yes":
+                    should_apply = True
+                elif prompt_choice == "all":
+                    apply_all_remaining = True
+                    should_apply = True
+                    print_wrapped("Applying this and all future proposed metadata updates.")
+                elif prompt_choice == "quit":
+                    stopped_by_user = True
+                    print_wrapped("Stopping metadata refresh prompts; remaining updates left unapplied.")
+                    break
+
+            if should_apply:
+                updated_document, applied_updates = apply_metadata_refresh(
+                    document,
+                    store,
+                    proposal,
+                    replace_all=replace_all,
+                )
+
+                if applied_updates and updated_document is not None:
+                    updated_count += 1
+                    print_wrapped("Metadata updated.")
+                else:
+                    print_wrapped("Metadata unchanged.")
+
+            if args.method == "auto" or args.method == "crossref":
+                time.sleep(CROSSREF_REQUEST_INTERVAL_SECONDS)
+
+        print()
+        print("Metadata refresh summary")
+        print("------------------------")
+        print(f"Documents selected:       {len(documents)}")
+        print(f"Inspected:                {inspected}")
+        print(f"Skipped as apparently ok: {skipped_good}")
+        print(f"Updates proposed:         {proposed_count}")
+        print(f"Documents updated:        {updated_count}")
+        print(f"Failed:                   {failed}")
+        if stopped_by_user:
+            print("Stopped by user:          yes")
+
+        return 1 if failed else 0
+    finally:
+        store.close()
+
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""
 
@@ -2458,6 +2707,106 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.set_defaults(
         func=run_search,
         search_mode="semantic",
+    )
+
+
+    refresh_metadata_parser = subparsers.add_parser(
+        "refresh-metadata",
+        help="inspect and repair bad document metadata",
+    )
+    refresh_metadata_parser.add_argument(
+        "query",
+        nargs="*",
+        help=(
+            "optional metadata search text selecting documents to inspect; "
+            "omit to inspect all documents"
+        ),
+    )
+    refresh_metadata_parser.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "maximum number of matching documents to inspect; when no query is "
+            "given, limits the ordered document list"
+        ),
+    )
+    refresh_metadata_parser.add_argument(
+        "-y",
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="apply proposed updates without prompting.",
+    )
+    refresh_metadata_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show proposed updates without changing metadata.",
+    )
+    refresh_metadata_parser.add_argument(
+        "--include-apparently-good",
+        action="store_true",
+        help="also inspect documents whose metadata does not look obviously bad.",
+    )
+    refresh_metadata_parser.add_argument(
+        "--method",
+        choices=["auto", "crossref", "llm"],
+        default="auto",
+        help=(
+            "metadata repair method: auto tries Crossref first, then Ollama; "
+            "crossref uses DOI/Crossref only; llm uses Ollama only (default: auto)"
+        ),
+    )
+    refresh_metadata_parser.add_argument(
+        "--pages",
+        type=int,
+        default=3,
+        help="number of early PDF pages to inspect for DOI/LLM metadata (default: 3).",
+    )
+    refresh_metadata_parser.add_argument(
+        "--crossref-timeout",
+        type=float,
+        default=10.0,
+        help="seconds before one Crossref lookup times out (default: 10).",
+    )
+    refresh_metadata_parser.add_argument(
+        "--ollama-model",
+        default=DEFAULT_OLLAMA_MODEL,
+        help=f"Ollama model used for fallback metadata extraction (default: {DEFAULT_OLLAMA_MODEL}).",
+    )
+    refresh_metadata_parser.add_argument(
+        "--ollama-url",
+        default=DEFAULT_OLLAMA_URL,
+        help=f"Ollama base URL for fallback metadata extraction (default: {DEFAULT_OLLAMA_URL}).",
+    )
+    refresh_metadata_parser.add_argument(
+        "--ollama-timeout",
+        type=float,
+        default=60.0,
+        help="seconds before one Ollama metadata extraction request times out.",
+    )
+    refresh_metadata_parser.add_argument(
+        "--ollama-startup-timeout",
+        type=float,
+        default=20.0,
+        help=(
+            "seconds to wait for Ollama to become reachable after attempting "
+            "to start 'ollama serve' (default: 20)"
+        ),
+    )
+    refresh_metadata_parser.add_argument(
+        "--no-replace-all-crossref",
+        action="store_false",
+        dest="replace_all_crossref",
+        help=(
+            "when Crossref succeeds, update only fields that currently look bad "
+            "instead of replacing all available metadata fields"
+        ),
+    )
+    refresh_metadata_parser.set_defaults(
+        func=run_refresh_metadata,
+        replace_all_crossref=True,
     )
 
 

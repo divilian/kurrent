@@ -25,9 +25,16 @@ from urllib.request import Request, urlopen
 import pymupdf
 
 from kurrent.file_utils import silence_mupdf_messages
+from kurrent.pdf_text_extractor import sanitize_extracted_text
+from kurrent.metadata_cleaning import (
+    clean_author_metadata_text,
+    clean_metadata_text,
+    clean_title_metadata_text,
+)
 from kurrent.schema import ExtractedMetadata
 
 __all__ = [
+    "clean_author_metadata_text",
     "clean_metadata_text",
     "looks_like_bad_title",
     "extract_embedded_metadata",
@@ -75,20 +82,6 @@ BAD_TITLE_PATTERNS = [
 CROSSREF_API_BASE_URL = "https://api.crossref.org/works"
 
 
-def clean_metadata_text(value: str | None) -> str | None:
-    """Normalize a metadata string and turn empty values into None."""
-
-    if value is None:
-        return None
-
-    value = " ".join(value.split()).strip()
-
-    if not value:
-        return None
-
-    return value
-
-
 def looks_like_bad_title(title: str | None) -> bool:
     """Return True when embedded PDF title metadata looks unhelpful."""
 
@@ -114,8 +107,8 @@ def extract_embedded_metadata(pdf_path: str | Path) -> ExtractedMetadata:
     with pymupdf.open(pdf_path) as pdf:
         metadata = pdf.metadata or {}
 
-    title = clean_metadata_text(metadata.get("title"))
-    authors = clean_metadata_text(metadata.get("author"))
+    title = clean_title_metadata_text(metadata.get("title"))
+    authors = clean_author_metadata_text(metadata.get("author"))
 
     if looks_like_bad_title(title):
         title = None
@@ -136,9 +129,9 @@ def extract_text_from_first_pages(
 
     with pymupdf.open(pdf_path) as pdf:
         for page in pdf[:max_pages]:
-            pieces.append(page.get_text())
+            pieces.append(sanitize_extracted_text(page.get_text()))
 
-    return "\n".join(pieces)
+    return sanitize_extracted_text("\n".join(pieces))
 
 
 def _clean_doi_candidate(candidate: str) -> str | None:
@@ -313,7 +306,7 @@ def guess_title_from_first_page(text: str) -> str | None:
         if len(line) < 8:
             continue
 
-        return line
+        return clean_title_metadata_text(line)
 
     return None
 
@@ -364,7 +357,7 @@ def guess_authors_from_first_page(
     if len(candidate) > 200:
         return None
 
-    return candidate
+    return clean_author_metadata_text(candidate)
 
 
 def guess_metadata_from_filename(pdf_path: str | Path) -> ExtractedMetadata:
@@ -386,7 +379,7 @@ def guess_metadata_from_filename(pdf_path: str | Path) -> ExtractedMetadata:
         title = re.sub(rf"\b{year}\b", "", title)
         title = " ".join(title.split())
 
-    title = clean_metadata_text(title)
+    title = clean_title_metadata_text(title)
 
     return ExtractedMetadata(
         title=title,
@@ -397,8 +390,8 @@ def guess_metadata_from_filename(pdf_path: str | Path) -> ExtractedMetadata:
 def _crossref_author_name(author: dict) -> str | None:
     """Convert one Crossref author object into a display name."""
 
-    given = clean_metadata_text(author.get("given"))
-    family = clean_metadata_text(author.get("family"))
+    given = clean_author_metadata_text(author.get("given"))
+    family = clean_author_metadata_text(author.get("family"))
 
     if given is not None and family is not None:
         return f"{given} {family}"
@@ -409,7 +402,7 @@ def _crossref_author_name(author: dict) -> str | None:
     if given is not None:
         return given
 
-    return clean_metadata_text(author.get("name"))
+    return clean_author_metadata_text(author.get("name"))
 
 
 def _crossref_year(work: dict) -> int | None:
@@ -455,7 +448,7 @@ def metadata_from_crossref_work(work: dict) -> ExtractedMetadata:
     """Normalize one Crossref work record into ExtractedMetadata."""
 
     titles = work.get("title") or []
-    title = clean_metadata_text(titles[0]) if titles else None
+    title = clean_title_metadata_text(titles[0]) if titles else None
 
     author_names = [
         name
@@ -466,7 +459,7 @@ def metadata_from_crossref_work(work: dict) -> ExtractedMetadata:
         if name is not None
     ]
 
-    authors = ", ".join(author_names) if author_names else None
+    authors = clean_author_metadata_text(", ".join(author_names)) if author_names else None
     doi = clean_metadata_text(work.get("DOI"))
 
     return ExtractedMetadata(
@@ -522,8 +515,8 @@ def merge_metadata(
     """Fill missing metadata fields in primary from fallback."""
 
     return ExtractedMetadata(
-        title=primary.title or fallback.title,
-        authors=primary.authors or fallback.authors,
+        title=clean_title_metadata_text(primary.title or fallback.title),
+        authors=clean_author_metadata_text(primary.authors or fallback.authors),
         year=primary.year or fallback.year,
         doi=primary.doi or fallback.doi,
     )
@@ -569,7 +562,12 @@ def extract_metadata(
     metadata = merge_metadata(metadata, text_guess)
     metadata = merge_metadata(metadata, filename_guess)
 
-    return metadata
+    return ExtractedMetadata(
+        title=clean_title_metadata_text(metadata.title),
+        authors=clean_author_metadata_text(metadata.authors),
+        year=metadata.year,
+        doi=metadata.doi,
+    )
 
 
 if __name__ == "__main__":

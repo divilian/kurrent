@@ -1101,3 +1101,14 @@ def test_boilerplate_filter_removes_acm_first_page_notice():
     assert [line.text for line in filtered] == [
         "prisoner’s dilemma on graphs continues"
     ]
+
+
+def test_normalize_extracted_text_drops_lone_surrogate_codepoints():
+    """Verify invalid Unicode surrogates cannot poison UTF-8 serialization."""
+
+    from kurrent.pdf_text_extractor import normalize_extracted_text
+
+    text = normalize_extracted_text("alpha \ud835 beta")
+
+    assert text == "alpha beta"
+    assert text.encode("utf-8") == b"alpha beta"

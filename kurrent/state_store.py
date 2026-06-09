@@ -4,6 +4,10 @@ from datetime import datetime, timezone
 import sqlite3
 
 from kurrent.file_utils import normalize_path
+from kurrent.metadata_cleaning import (
+    clean_author_metadata_text,
+    clean_title_metadata_text,
+)
 from kurrent.schema import (
     Document,
     Chunk,
@@ -112,8 +116,8 @@ class StateStore:
                     document.storage_mode,
                     str(document.pdf_path),   # note to SD: convert Path to str
                     document.ingested_at.isoformat(),
-                    document.title,
-                    document.authors,
+                    clean_title_metadata_text(document.title),
+                    clean_author_metadata_text(document.authors),
                     document.year,
                     document.doi,
                 )
@@ -215,10 +219,10 @@ class StateStore:
         updates = {}
 
         if title is not None:
-            updates["title"] = title
+            updates["title"] = clean_title_metadata_text(title)
 
         if authors is not None:
-            updates["authors"] = authors
+            updates["authors"] = clean_author_metadata_text(authors)
 
         if year is not None:
             updates["year"] = year
@@ -257,8 +261,8 @@ class StateStore:
             # note to SD: convert str to fully normalized Path
             pdf_path=normalize_path(row["pdf_path"]),
             ingested_at=datetime.fromisoformat(row["ingested_at"]),
-            title=row["title"],
-            authors=row["authors"],
+            title=clean_title_metadata_text(row["title"]),
+            authors=clean_author_metadata_text(row["authors"]),
             year=row["year"],
             doi=row["doi"],
         )
@@ -652,7 +656,7 @@ class StateStore:
                 distance=None,
                 text=row["text"],
                 path=normalize_path(row["pdf_path"]),
-                title=row["title"],
+                title=clean_title_metadata_text(row["title"]),
                 page_start=row["page_start"],
                 page_end=row["page_end"],
                 section_index=row["section_index"],

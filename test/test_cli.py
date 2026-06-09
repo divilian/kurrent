@@ -186,3 +186,58 @@ def test_sectioner_dedupe_preserving_order_is_case_insensitive():
         "Introduction",
         "Methods",
     ]
+
+
+
+def test_refresh_metadata_command_defaults_to_auto_method():
+    """Verify that refresh-metadata can inspect all documents by default."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["refresh-metadata", "--dry-run"])
+
+    assert args.command == "refresh-metadata"
+    assert args.query == []
+    assert args.method == "auto"
+    assert args.dry_run is True
+    assert args.assume_yes is False
+
+
+def test_refresh_metadata_command_accepts_query_and_yes_flag():
+    """Verify that refresh-metadata can target matching docs and apply updates."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "refresh-metadata",
+        "--method",
+        "llm",
+        "-y",
+        "design08",
+    ])
+
+    assert args.query == ["design08"]
+    assert args.method == "llm"
+    assert args.assume_yes is True
+
+
+def test_prompt_apply_metadata_refresh_accepts_yes_no_all_and_quit(monkeypatch):
+    """Verify metadata refresh prompts support per-update and batch choices."""
+
+    for typed, expected in [
+        ("", "no"),
+        ("n", "no"),
+        ("y", "yes"),
+        ("a", "all"),
+        ("q", "quit"),
+    ]:
+        monkeypatch.setattr("builtins.input", lambda _prompt, typed=typed: typed)
+        assert cli.prompt_apply_metadata_refresh() == expected
+
+
+def test_prompt_apply_metadata_refresh_reprompts_on_invalid_answer(monkeypatch, capsys):
+    """Verify invalid metadata refresh prompt responses are rejected cleanly."""
+
+    answers = iter(["wat", "a"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert cli.prompt_apply_metadata_refresh() == "all"
+    assert "Please enter y, n, a, or q." in capsys.readouterr().out

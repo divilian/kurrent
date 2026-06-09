@@ -3,7 +3,9 @@ from pathlib import Path
 import pymupdf
 
 from kurrent.metadata_extractor import (
+    clean_author_metadata_text,
     clean_metadata_text,
+    clean_title_metadata_text,
     extract_doi,
     extract_embedded_metadata,
     extract_metadata,
@@ -56,6 +58,56 @@ def test_clean_metadata_text_returns_none_for_empty_values():
     assert clean_metadata_text(None) is None
     assert clean_metadata_text("") is None
     assert clean_metadata_text("   \n\t  ") is None
+
+
+
+
+def test_clean_author_metadata_text_name_cases_all_caps_authors():
+    """Verify that obvious ALL-CAPS author metadata is made readable."""
+
+    assert clean_author_metadata_text(
+        "WILLIAM W. COHEN and YORAM SINGER"
+    ) == "William W. Cohen and Yoram Singer"
+
+
+def test_clean_author_metadata_text_leaves_mixed_case_authors_alone():
+    """Verify that mixed-case author metadata is not re-cased."""
+
+    assert clean_author_metadata_text(
+        "William W. Cohen and Yoram Singer"
+    ) == "William W. Cohen and Yoram Singer"
+
+def test_clean_title_metadata_text_title_cases_all_caps_titles():
+    """Verify that obvious ALL-CAPS titles are made readable."""
+
+    assert clean_title_metadata_text(
+        "THE EVOLUTION OF COOPERATION IN COMPLEX NETWORKS"
+    ) == "The Evolution of Cooperation in Complex Networks"
+
+
+def test_clean_title_metadata_text_leaves_mixed_case_titles_alone():
+    """Verify that mixed-case titles are not re-cased."""
+
+    assert clean_title_metadata_text(
+        "Still Building the Memex"
+    ) == "Still Building the Memex"
+
+
+def test_metadata_from_crossref_work_cleans_all_caps_metadata():
+    """Verify that Crossref ALL-CAPS titles and authors are normalized."""
+
+    metadata = metadata_from_crossref_work({
+        "title": ["THE EVOLUTION OF COOPERATION"],
+        "author": [
+            {"given": "MARTIN", "family": "NOWAK"},
+            {"given": "ROBERT", "family": "MAY"},
+        ],
+        "issued": {"date-parts": [[2006]]},
+        "DOI": "10.123/example",
+    })
+
+    assert metadata.title == "The Evolution of Cooperation"
+    assert metadata.authors == "Martin Nowak, Robert May"
 
 
 def test_looks_like_bad_title_rejects_common_pdf_metadata_junk():

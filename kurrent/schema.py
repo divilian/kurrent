@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Literal, Self
 from uuid import uuid4
 
+from kurrent.metadata_cleaning import (
+    clean_author_metadata_text,
+    clean_title_metadata_text,
+)
+
 __all__ = [
     "make_chunk_id",
     "parse_chunk_id",
@@ -67,8 +72,8 @@ class Document:
             storage_mode=storage_mode,
             pdf_path=pdf_path,
             ingested_at=datetime.now(timezone.utc),
-            title=metadata.title,
-            authors=metadata.authors,
+            title=clean_title_metadata_text(metadata.title),
+            authors=clean_author_metadata_text(metadata.authors),
             year=metadata.year,
             doi=metadata.doi,
         )
