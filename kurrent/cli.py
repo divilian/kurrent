@@ -835,6 +835,108 @@ def document_path_for_pipeline_message(document) -> Path | None:
     return path
 
 
+def pdf_path_display_value(document_or_hit) -> str | None:
+    """Return a user-facing PDF path, with a missing-file marker when needed."""
+
+    path = document_path_for_pipeline_message(document_or_hit)
+
+    if path is None:
+        return None
+
+    path = Path(path)
+    suffix = "" if path.exists() else " [MISSING]"
+    return f"{path}{suffix}"
+
+
+def print_pdf_path_field(document_or_hit) -> None:
+    """Print a PDF path field for document-management style output.
+
+    PDF paths are often long, but wrapping them makes tests and copy/paste
+    awkward because the label and value can end up on separate lines. Print
+    this one field directly so the path remains easy to copy.
+    """
+
+    value = pdf_path_display_value(document_or_hit)
+    if value is None:
+        return
+
+    print(f"  pdf: {value}")
+
+
+def full_document_for_detail(hit, state_store):
+    """Return the stored document record for a result, if available."""
+
+    if state_store is None:
+        return None
+
+    try:
+        return state_store.get_document(hit.doc_id)
+    except Exception:
+        return None
+
+
+def pipeline_state_for_detail(doc_id: str, state_store):
+    """Return stored text-pipeline state for details output, if available."""
+
+    if state_store is None:
+        return None
+
+    get_state = getattr(state_store, "get_document_pipeline_state", None)
+    if get_state is None:
+        return None
+
+    try:
+        return get_state(doc_id)
+    except Exception:
+        return None
+
+
+def _pipeline_state_value(state, key: str):
+    """Read a key from sqlite Row, dict, or small fake test object."""
+
+    if state is None:
+        return None
+
+    try:
+        return state[key]
+    except Exception:
+        return getattr(state, key, None)
+
+
+def print_document_management_fields(hit, state_store=None) -> None:
+    """Print internal document-management fields for result details."""
+
+    document = full_document_for_detail(hit, state_store)
+
+    print_field("doc_id", getattr(hit, "doc_id", None))
+
+    doi = getattr(document, "doi", None) if document is not None else None
+    if doi is not None:
+        print_field("doi", doi)
+
+    if getattr(hit, "score", None) is not None:
+        print_field("score", f"{hit.score:.4f}")
+
+    best_chunk_id = getattr(hit, "best_chunk_id", None)
+    if best_chunk_id is not None:
+        print_field("best chunk", best_chunk_id)
+
+    if document is not None:
+        print_field("storage", getattr(document, "storage_mode", None))
+        print_field("ingested", getattr(document, "ingested_at", None))
+        print_field("pdf sha256", getattr(document, "pdf_sha256", None))
+
+    state = pipeline_state_for_detail(getattr(hit, "doc_id", ""), state_store)
+    if state is not None:
+        print_field("pipeline status", _pipeline_state_value(state, "status"))
+        print_field("pipeline updated", _pipeline_state_value(state, "updated_at"))
+        print_field("pipeline message", _pipeline_state_value(state, "message"))
+        print_field(
+            "pipeline fingerprint",
+            _pipeline_state_value(state, "pipeline_fingerprint"),
+        )
+
+
 def document_has_stale_search_pipeline(document, state_store) -> bool:
     """Return whether a search-result document has stale derived artifacts.
 
@@ -1110,6 +1212,7 @@ def print_document_summary(
     print_wrapped(f"Document {index}/{total}: {title}")
     print_field("authors", authors)
     print_field("year", year)
+    print_pdf_path_field(hit)
 
     if hit.score is not None:
         print_field("score", f"{hit.score:.4f}")
@@ -1144,18 +1247,35 @@ def print_document_detail(
             search_text,
         ),
     )
-
-    if hit.score is not None:
-        print_field("score", f"{hit.score:.4f}")
+    print_pdf_path_field(hit)
+    print_document_management_fields(hit, state_store)
 
     print_stale_pipeline_warning(hit, state_store)
 
 
-def prompt_document_result_action() -> str:
+def pdf_exists_for_result(hit, state_store=None) -> bool:
+    """Return whether a document result has an existing PDF path."""
+
+    document = full_document_for_detail(hit, state_store)
+    source = document if document is not None else hit
+    path = document_path_for_pipeline_message(source)
+
+    return path is not None and Path(path).exists()
+
+
+def prompt_document_result_action(hit=None, state_store=None) -> str:
     """Prompt for the next interactive document-result action."""
 
+    parts = ["[Enter] next", "[d]etails"]
+
+    if hit is not None and pdf_exists_for_result(hit, state_store):
+        parts.append("[o]pen PDF")
+
+    parts.extend(["[e]dit metadata", "[q]uit"])
+    prompt = ", ".join(parts) + " > "
+
     try:
-        return input("[Enter] next, d details, e edit metadata, q quit > ").strip().lower()
+        return input(prompt).strip().lower()
     except EOFError:
         print()
         return "q"
@@ -1179,20 +1299,30 @@ def open_pdf_result_message(result, purpose: str = "PDF") -> str:
     return f"Opened {purpose}: {result.path}"
 
 
-def open_pdf_for_metadata_edit(document) -> None:
+def open_document_pdf(document_or_hit, *, purpose: str = "PDF") -> None:
     """Best-effort open of a document PDF in the user's default viewer."""
 
-    path = document_path_for_pipeline_message(document)
+    path = document_path_for_pipeline_message(document_or_hit)
 
     if path is None:
         print_wrapped("No PDF path is available for this document.")
         return
 
-    print_wrapped("Opening PDF so you can inspect title/authors/year/DOI.")
-    print_wrapped("When ready, return here and edit metadata.")
+    path = Path(path)
+    if not path.exists():
+        print_wrapped(f"PDF path does not exist: {path}")
+        return
 
     result = open_pdf(path)
-    print_wrapped(open_pdf_result_message(result, purpose="PDF"))
+    print(open_pdf_result_message(result, purpose=purpose))
+
+
+def open_pdf_for_metadata_edit(document) -> None:
+    """Open a document PDF before interactively editing its metadata."""
+
+    print_wrapped("Opening PDF so you can inspect title/authors/year/DOI.")
+    print_wrapped("When ready, return here and edit metadata.")
+    open_document_pdf(document, purpose="PDF")
 
 
 def document_hit_from_document(document, previous_hit):
@@ -1306,6 +1436,7 @@ def print_chunk_summary(
     semantic_query: str | None = None,
     embedder=None,
     show_distance: bool = False,
+    show_pdf_path: bool = False,
     state_store=None,
     explanation_buffer: RelevanceJudgmentBuffer | None = None,
     explanation: RelevanceJudgment | None = None,
@@ -1329,6 +1460,10 @@ def print_chunk_summary(
     if document is not None:
         print_field("authors", document.authors or "unknown author")
         print_field("year", document.year if document.year is not None else "n.d.")
+        if show_pdf_path:
+            print_pdf_path_field(document)
+    elif show_pdf_path:
+        print_pdf_path_field(hit)
 
     print_stale_pipeline_warning(document, state_store)
 
@@ -1361,6 +1496,7 @@ def print_chunk_detail(
     semantic_query: str | None = None,
     embedder=None,
     show_distance: bool = False,
+    show_pdf_path: bool = False,
     state_store=None,
     explanation_buffer: RelevanceJudgmentBuffer | None = None,
 ) -> None:
@@ -1387,6 +1523,9 @@ def print_chunk_detail(
     if source_name is not None:
         print_field("source", source_name)
 
+    if show_pdf_path:
+        print_pdf_path_field(document if document is not None else hit)
+
     print_stale_pipeline_warning(document, state_store)
 
     if explanation_buffer is not None:
@@ -1410,7 +1549,7 @@ def prompt_result_action() -> str:
     """Prompt for the next interactive search-result action."""
 
     try:
-        return input("[Enter] next, d details, q quit > ").strip().lower()
+        return input("[Enter] next, [d]etails, [q]uit > ").strip().lower()
     except EOFError:
         print()
         return "q"
@@ -1439,7 +1578,7 @@ def present_document_hits(
         )
 
         while True:
-            choice = prompt_document_result_action()
+            choice = prompt_document_result_action(hit, state_store)
 
             if choice == "":
                 break
@@ -1452,6 +1591,18 @@ def present_document_hits(
                     search_text=search_text,
                     state_store=state_store,
                 )
+                continue
+
+            if choice == "o":
+                if pdf_exists_for_result(hit, state_store):
+                    document = full_document_for_detail(hit, state_store)
+                    open_document_pdf(
+                        document if document is not None else hit,
+                        purpose="PDF",
+                    )
+                    continue
+
+                print("Please press Enter, or type d, e, or q.")
                 continue
 
             if choice == "e":
@@ -1468,7 +1619,10 @@ def present_document_hits(
             if is_quit_command(choice):
                 return
 
-            print("Please press Enter, or type d, e, or q.")
+            if pdf_exists_for_result(hit, state_store):
+                print("Please press Enter, or type d, o, e, or q.")
+            else:
+                print("Please press Enter, or type d, e, or q.")
 
 
 def present_chunk_hits(
@@ -1477,6 +1631,7 @@ def present_chunk_hits(
     semantic_query: str | None = None,
     embedder=None,
     show_distance: bool = False,
+    show_pdf_path: bool = False,
     state_store=None,
     explanation_buffer: RelevanceJudgmentBuffer | None = None,
     max_display: int | None = None,
@@ -1514,6 +1669,7 @@ def present_chunk_hits(
             semantic_query=semantic_query,
             embedder=embedder,
             show_distance=show_distance,
+            show_pdf_path=show_pdf_path,
             state_store=state_store,
             explanation_buffer=explanation_buffer,
             explanation=explanation,
@@ -1534,6 +1690,7 @@ def present_chunk_hits(
                     semantic_query=semantic_query,
                     embedder=embedder,
                     show_distance=show_distance,
+                    show_pdf_path=show_pdf_path,
                     state_store=state_store,
                     explanation_buffer=explanation_buffer,
                 )
@@ -1650,7 +1807,12 @@ def run_search(args: argparse.Namespace) -> int:
             hits = searcher.full_text_search(query, limit=args.limit)
             print_wrapped(f"Full-text search: {query!r}")
             print_wrapped(f"Chunks: {len(hits)}")
-            present_chunk_hits(hits, search_text=query, state_store=store)
+            present_chunk_hits(
+                hits,
+                search_text=query,
+                state_store=store,
+                show_pdf_path=True,
+            )
             return 0
 
         raise CliUsageError(f"Unknown search mode: {args.search_mode}")

@@ -241,3 +241,265 @@ def test_prompt_apply_metadata_refresh_reprompts_on_invalid_answer(monkeypatch, 
 
     assert cli.prompt_apply_metadata_refresh() == "all"
     assert "Please enter y, n, a, or q." in capsys.readouterr().out
+
+
+def test_metadata_document_summary_prints_pdf_path_and_missing_marker(capsys, tmp_path):
+    """Metadata search summaries should show where the PDF lives."""
+
+    from kurrent.schema import DocumentHit
+
+    missing_pdf = tmp_path / "missing.pdf"
+    hit = DocumentHit(
+        doc_id="doc-1",
+        path=missing_pdf,
+        title="Birds of a Feather",
+        authors="Miller McPherson",
+        year=2001,
+    )
+
+    cli.print_document_summary(hit, index=1, total=1)
+
+    output = capsys.readouterr().out
+    assert f"pdf: {missing_pdf}" in output
+    assert "[MISSING]" in output
+
+
+def test_metadata_document_detail_prints_pdf_path_without_missing_marker(capsys, tmp_path):
+    """Metadata search details should include the PDF path too."""
+
+    from kurrent.schema import DocumentHit
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    hit = DocumentHit(
+        doc_id="doc-1",
+        path=pdf_path,
+        title="Birds of a Feather",
+        authors="Miller McPherson",
+        year=2001,
+    )
+
+    cli.print_document_detail(hit, index=1, total=1)
+
+    output = capsys.readouterr().out
+    assert f"pdf: {pdf_path}" in output
+    assert "[MISSING]" not in output
+
+
+
+def test_metadata_document_detail_prints_management_fields(capsys, tmp_path):
+    """The metadata details view should expose document-management fields."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import DocumentHit
+    from test.factories import make_document
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    ingested_at = datetime(2026, 6, 9, 12, 30, tzinfo=timezone.utc)
+    document = make_document(
+        doc_id="doc-1",
+        pdf_sha256="abc123",
+        storage_mode="external",
+        pdf_path=pdf_path,
+        ingested_at=ingested_at,
+        title="Birds of a Feather",
+        authors="Miller McPherson",
+        year=2001,
+        doi="10.1146/annurev.soc.27.1.415",
+    )
+
+    class FakeStore:
+        def get_document(self, doc_id):
+            assert doc_id == "doc-1"
+            return document
+
+        def get_document_pipeline_state(self, doc_id):
+            assert doc_id == "doc-1"
+            return {
+                "pipeline_fingerprint": "pipeline-v1",
+                "status": "ok",
+                "message": None,
+                "updated_at": "2026-06-09T12:31:00+00:00",
+            }
+
+    hit = DocumentHit(
+        doc_id="doc-1",
+        path=pdf_path,
+        title="Birds of a Feather",
+        authors="Miller McPherson",
+        year=2001,
+        score=0.875,
+        best_chunk_id="doc-1:chunker:3",
+    )
+
+    cli.print_document_detail(
+        hit,
+        index=1,
+        total=1,
+        state_store=FakeStore(),
+    )
+
+    output = capsys.readouterr().out
+    assert "doc_id: doc-1" in output
+    assert "doi: 10.1146/annurev.soc.27.1.415" in output
+    assert "score: 0.8750" in output
+    assert "best chunk: doc-1:chunker:3" in output
+    assert "storage: external" in output
+    assert "ingested: 2026-06-09 12:30:00+00:00" in output
+    assert "pdf sha256: abc123" in output
+    assert "pipeline status: ok" in output
+    assert "pipeline updated: 2026-06-09T12:31:00+00:00" in output
+    assert "pipeline fingerprint: pipeline-v1" in output
+
+def test_full_text_chunk_summary_can_print_parent_pdf_path(capsys, tmp_path):
+    """Full-text chunk results should optionally show the parent PDF path."""
+
+    from kurrent.schema import ChunkHit
+    from test.factories import make_document
+
+    pdf_path = tmp_path / "article.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    document = make_document(
+        doc_id="doc-1",
+        pdf_path=pdf_path,
+        title="Example Article",
+        authors="Jane Author",
+        year=2024,
+    )
+
+    class FakeStore:
+        def get_document(self, doc_id):
+            assert doc_id == "doc-1"
+            return document
+
+    hit = ChunkHit(
+        chunk_id="doc-1:chunker:0",
+        distance=None,
+        text="homophily appears in this chunk",
+        path=pdf_path,
+        title="Example Article",
+    )
+
+    cli.print_chunk_summary(
+        hit,
+        index=1,
+        total=1,
+        search_text="homophily",
+        state_store=FakeStore(),
+        show_pdf_path=True,
+    )
+
+    output = capsys.readouterr().out
+    assert f"pdf: {pdf_path}" in output
+    assert "[MISSING]" not in output
+
+
+def test_document_result_prompt_includes_open_only_when_pdf_exists(monkeypatch, tmp_path):
+    """Document result prompts should offer open only for existing PDFs."""
+
+    from kurrent.schema import DocumentHit
+
+    existing_pdf = tmp_path / "exists.pdf"
+    existing_pdf.write_bytes(b"%PDF-1.4\n")
+    missing_pdf = tmp_path / "missing.pdf"
+    prompts = []
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    existing_hit = DocumentHit(
+        doc_id="doc-1",
+        path=existing_pdf,
+        title="Existing",
+        authors=None,
+        year=None,
+    )
+    missing_hit = DocumentHit(
+        doc_id="doc-2",
+        path=missing_pdf,
+        title="Missing",
+        authors=None,
+        year=None,
+    )
+
+    assert cli.prompt_document_result_action(existing_hit) == ""
+    assert cli.prompt_document_result_action(missing_hit) == ""
+
+    assert "[o]pen PDF" in prompts[0]
+    assert "[o]pen PDF" not in prompts[1]
+    assert "[d]etails" in prompts[0]
+    assert "[e]dit metadata" in prompts[0]
+    assert "[q]uit" in prompts[0]
+
+
+def test_present_document_hits_open_choice_opens_pdf(monkeypatch, tmp_path, capsys):
+    """The document-result menu should open PDFs without editing metadata."""
+
+    from types import SimpleNamespace
+
+    from kurrent.schema import DocumentHit
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    hit = DocumentHit(
+        doc_id="doc-1",
+        path=pdf_path,
+        title="Birds of a Feather",
+        authors="Miller McPherson",
+        year=2001,
+    )
+    opened = []
+    answers = iter(["o", "q"])
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    def fake_open_pdf(path, page=None):
+        opened.append((Path(path), page))
+        return SimpleNamespace(
+            success=True,
+            message=None,
+            path=Path(path),
+            page=page,
+            page_supported=False,
+        )
+
+    monkeypatch.setattr(cli, "open_pdf", fake_open_pdf)
+
+    cli.present_document_hits([hit])
+
+    assert opened == [(pdf_path, None)]
+    output = capsys.readouterr().out
+    assert f"Opened PDF: {pdf_path}" in output
+
+
+def test_present_document_hits_rejects_open_when_pdf_missing(monkeypatch, tmp_path, capsys):
+    """The open command should not run for a missing PDF path."""
+
+    from kurrent.schema import DocumentHit
+
+    missing_pdf = tmp_path / "missing.pdf"
+    hit = DocumentHit(
+        doc_id="doc-1",
+        path=missing_pdf,
+        title="Birds of a Feather",
+        authors="Miller McPherson",
+        year=2001,
+    )
+    answers = iter(["o", "q"])
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(
+        cli,
+        "open_pdf",
+        lambda *args, **kwargs: pytest.fail("open_pdf should not be called"),
+    )
+
+    cli.present_document_hits([hit])
+
+    output = capsys.readouterr().out
+    assert "Please press Enter, or type d, e, or q." in output
