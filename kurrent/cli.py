@@ -26,6 +26,7 @@ The default search mode is semantic chunk search.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -2220,6 +2221,105 @@ def print_converse_source_details(turn, source_number_text: str, state_store=Non
     )
 
 
+
+def _highlight_request_key(turn, passage) -> tuple | None:
+    """Return a stable cache key for one highlighted converse passage."""
+
+    if turn is None:
+        return None
+
+    pdf_path = getattr(passage, "pdf_path", None)
+    page_start = getattr(passage, "page_start", None)
+
+    if pdf_path is None or page_start is None:
+        return None
+
+    return (
+        str(pdf_path),
+        page_start,
+        getattr(passage, "page_end", None),
+        getattr(turn, "user_text", ""),
+        getattr(passage, "excerpt", None),
+    )
+
+
+class ConverseHighlightPrefetchCache:
+    """Background cache for highlighted source PDFs in converse mode."""
+
+    def __init__(
+        self,
+        ollama_model: str = DEFAULT_OLLAMA_MODEL,
+        ollama_url: str = DEFAULT_OLLAMA_URL,
+        ollama_timeout: float = 45.0,
+        max_workers: int = 2,
+    ):
+        self.ollama_model = ollama_model
+        self.ollama_url = ollama_url
+        self.ollama_timeout = ollama_timeout
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._futures: dict[tuple, Future] = {}
+
+    def submit(self, turn, passage) -> Future | None:
+        """Start warming one highlighted source passage, if possible."""
+
+        key = _highlight_request_key(turn, passage)
+
+        if key is None:
+            return None
+
+        future = self._futures.get(key)
+
+        if future is not None:
+            return future
+
+        future = self._executor.submit(
+            create_highlighted_pdf_for_research_interest,
+            pdf_path=passage.pdf_path,
+            page_start=passage.page_start,
+            research_interest=turn.user_text,
+            page_end=passage.page_end,
+            model=self.ollama_model,
+            ollama_url=self.ollama_url,
+            timeout_seconds=self.ollama_timeout,
+            fallback_excerpt=getattr(passage, "excerpt", None),
+        )
+        self._futures[key] = future
+        return future
+
+    def prefetch_turn(self, turn) -> None:
+        """Begin silently precomputing highlights for all source passages."""
+
+        for source in _latest_converse_sources(turn):
+            for passage in source.passages:
+                self.submit(turn, passage)
+
+    def result_for(self, turn, passage):
+        """Return a cached or newly computed highlight result for a passage."""
+
+        future = self.submit(turn, passage)
+
+        if future is None:
+            return None
+
+        try:
+            return future.result()
+        except Exception as exc:
+            class FailedHighlightResult:
+                success = False
+                highlighted_pdf_path = None
+                page = getattr(passage, "page_start", None)
+                message = f"Background highlight failed: {type(exc).__name__}: {exc}"
+
+            return FailedHighlightResult()
+
+    def shutdown(self) -> None:
+        """Stop accepting new prefetch work when the source browser exits."""
+
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self._executor.shutdown(wait=False)
+
 def edit_converse_source_metadata(turn, source_number_text: str, state_store=None):
     """Interactively edit metadata for one converse source and return updated turn."""
 
@@ -2268,6 +2368,7 @@ def open_converse_source(
     ollama_url: str = DEFAULT_OLLAMA_URL,
     ollama_timeout: float = 45.0,
     highlight: bool = True,
+    highlight_cache: ConverseHighlightPrefetchCache | None = None,
 ) -> None:
     """Open one source passage from the most recent converse turn."""
 
@@ -2316,16 +2417,27 @@ def open_converse_source(
                 f"  Finding relevant passage for source {shortcut}..."
             )
         )
-        highlight_result = create_highlighted_pdf_for_research_interest(
-            pdf_path=passage.pdf_path,
-            page_start=passage.page_start,
-            research_interest=turn.user_text,
-            page_end=passage.page_end,
-            model=ollama_model,
-            ollama_url=ollama_url,
-            timeout_seconds=ollama_timeout,
-            fallback_excerpt=passage.excerpt,
-        )
+        if highlight_cache is not None:
+            highlight_result = highlight_cache.result_for(turn, passage)
+        else:
+            highlight_result = create_highlighted_pdf_for_research_interest(
+                pdf_path=passage.pdf_path,
+                page_start=passage.page_start,
+                research_interest=turn.user_text,
+                page_end=passage.page_end,
+                model=ollama_model,
+                ollama_url=ollama_url,
+                timeout_seconds=ollama_timeout,
+                fallback_excerpt=getattr(passage, "excerpt", None),
+            )
+
+        if highlight_result is None:
+            highlight_result = SimpleNamespace(
+                success=False,
+                highlighted_pdf_path=None,
+                page=passage.page_start,
+                message="No highlight could be prepared for this passage.",
+            )
 
         if highlight_result.success and highlight_result.highlighted_pdf_path is not None:
             pdf_path = highlight_result.highlighted_pdf_path
@@ -2385,58 +2497,70 @@ def browse_converse_sources(
         print_wrapped("No sources are available yet. Ask a research question first.")
         return turn
 
-    while True:
-        print_converse_sources(turn)
-        print_wrapped(yellow_menu_text(CONVERSE_SOURCE_USAGE))
+    highlight_cache = ConverseHighlightPrefetchCache(
+        ollama_model=ollama_model,
+        ollama_url=ollama_url,
+        ollama_timeout=ollama_timeout,
+    )
 
-        choice = prompt_source_action()
+    try:
+        while True:
+            print_converse_sources(turn)
+            print_wrapped(yellow_menu_text(CONVERSE_SOURCE_USAGE))
+            highlight_cache.prefetch_turn(turn)
 
-        if is_source_browser_quit(choice):
-            return turn
+            choice = prompt_source_action()
 
-        if choice.startswith("/open"):
-            parts = choice.split(maxsplit=1)
+            if is_source_browser_quit(choice):
+                return turn
 
-            if len(parts) == 2:
-                open_converse_source(
-                    turn,
-                    parts[1],
-                    ollama_model=ollama_model,
-                    ollama_url=ollama_url,
-                    ollama_timeout=ollama_timeout,
-                )
-            else:
+            if choice.startswith("/open"):
+                parts = choice.split(maxsplit=1)
+
+                if len(parts) == 2:
+                    open_converse_source(
+                        turn,
+                        parts[1],
+                        ollama_model=ollama_model,
+                        ollama_url=ollama_url,
+                        ollama_timeout=ollama_timeout,
+                        highlight_cache=highlight_cache,
+                    )
+                else:
+                    print_wrapped(CONVERSE_SOURCE_USAGE)
+                continue
+
+            sources = _latest_converse_sources(turn)
+            parsed_command = _parse_source_browser_command(choice, len(sources))
+
+            if parsed_command is None:
                 print_wrapped(CONVERSE_SOURCE_USAGE)
-            continue
+                continue
 
-        sources = _latest_converse_sources(turn)
-        parsed_command = _parse_source_browser_command(choice, len(sources))
+            action, selection = parsed_command
 
-        if parsed_command is None:
-            print_wrapped(CONVERSE_SOURCE_USAGE)
-            continue
+            if action == "details":
+                print_converse_source_details(turn, selection, state_store=state_store)
+                continue
 
-        action, selection = parsed_command
+            if action == "edit":
+                turn = edit_converse_source_metadata(
+                    turn,
+                    selection,
+                    state_store=state_store,
+                )
+                continue
 
-        if action == "details":
-            print_converse_source_details(turn, selection, state_store=state_store)
-            continue
-
-        if action == "edit":
-            turn = edit_converse_source_metadata(
+            open_converse_source(
                 turn,
                 selection,
-                state_store=state_store,
+                ollama_model=ollama_model,
+                ollama_url=ollama_url,
+                ollama_timeout=ollama_timeout,
+                highlight_cache=highlight_cache,
             )
-            continue
-
-        open_converse_source(
-            turn,
-            selection,
-            ollama_model=ollama_model,
-            ollama_url=ollama_url,
-            ollama_timeout=ollama_timeout,
-        )
+    finally:
+        highlight_cache.shutdown()
 
 
 def handle_converse_command(

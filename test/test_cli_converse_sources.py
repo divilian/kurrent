@@ -472,40 +472,92 @@ def test_browse_converse_sources_accepts_edit_command(monkeypatch, tmp_path):
     assert calls == [("1", "store-x")]
 
 
-def test_open_converse_source_opens_highlighted_pdf_to_matched_page(monkeypatch, tmp_path):
-    """If highlighting finds a better page within a passage range, open that page."""
+def test_highlight_prefetch_cache_reuses_prepared_result(monkeypatch, tmp_path):
+    """Opening a source should reuse a background-highlight result when ready."""
 
     pdf_path = tmp_path / "paper.pdf"
     highlighted_path = tmp_path / "paper-highlighted.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
     highlighted_path.write_bytes(b"%PDF-1.4\n")
     turn = make_turn(pdf_path=pdf_path)
+    calls = []
     opened = []
 
     class FakeHighlightResult:
         success = True
         highlighted_pdf_path = highlighted_path
-        page = 4
+        page = 3
         message = None
 
     class FakeOpenResult:
         success = True
         path = highlighted_path
-        page = 4
+        page = 3
         page_supported = True
         message = None
 
-    monkeypatch.setattr(
-        cli,
-        "create_highlighted_pdf_for_research_interest",
-        lambda **kwargs: FakeHighlightResult(),
-    )
+    def fake_highlight(**kwargs):
+        calls.append(kwargs)
+        return FakeHighlightResult()
+
+    monkeypatch.setattr(cli, "create_highlighted_pdf_for_research_interest", fake_highlight)
     monkeypatch.setattr(
         cli,
         "open_pdf",
         lambda path, page=None: opened.append((path, page)) or FakeOpenResult(),
     )
 
-    cli.open_converse_source(turn, "1")
+    cache = cli.ConverseHighlightPrefetchCache()
+    try:
+        cache.prefetch_turn(turn)
+        cache.result_for(turn, cli._latest_converse_sources(turn)[0].passages[0])
 
-    assert opened == [(highlighted_path, 4)]
+        cli.open_converse_source(turn, "1", highlight_cache=cache)
+    finally:
+        cache.shutdown()
+
+    assert len(calls) == 1
+    assert opened == [(highlighted_path, 3)]
+
+
+def test_browse_converse_sources_prefetches_before_user_opens(monkeypatch, tmp_path):
+    """The source browser should start highlight warming when the menu is shown."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    highlighted_path = tmp_path / "paper-highlighted.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    highlighted_path.write_bytes(b"%PDF-1.4\n")
+    turn = make_turn(pdf_path=pdf_path)
+    calls = []
+    opened = []
+    choices = iter(["1", "q"])
+
+    class FakeHighlightResult:
+        success = True
+        highlighted_pdf_path = highlighted_path
+        page = 3
+        message = None
+
+    class FakeOpenResult:
+        success = True
+        path = highlighted_path
+        page = 3
+        page_supported = True
+        message = None
+
+    def fake_highlight(**kwargs):
+        calls.append(kwargs)
+        return FakeHighlightResult()
+
+    monkeypatch.setattr(cli, "create_highlighted_pdf_for_research_interest", fake_highlight)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(choices))
+    monkeypatch.setattr(
+        cli,
+        "open_pdf",
+        lambda path, page=None: opened.append((path, page)) or FakeOpenResult(),
+    )
+
+    cli.browse_converse_sources(turn)
+
+    assert len(calls) == 1
+    assert opened == [(highlighted_path, 3)]
