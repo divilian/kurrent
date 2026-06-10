@@ -7,8 +7,6 @@
 - [x] chunking
 - [x] embedding into Chroma
 - [x] smarter chunking (section-aware)
-- [ ] cascading chunking preferences: paragraph, sentence, word (chat called
-  this a "modest boundary-aware chunker")
 - [x] ingest and store metadata (authors, year, title)
 - [ ] document summaries via Ollama
 - [x] proximity alert detection
@@ -19,42 +17,44 @@
 - [x] basic RAG chat over a selected corpus
 - [x] boldface the parts of the chunks that semantically match
 - [x] manual ingest mode
-- [ ] zotero ingest mode
 - [x] two-column parsing
 - [x] pop up PDFs in user PDF reader
 - [x] pop up PDFs to correct page in user PDF reader
 - [x] pop up PDFs highlighting key text in user PDF reader
 
-this is now pushed to github repo, along with a couple message wording changes and a parameter tweak. use the github repo version as a basis for future work in this chat.
-
 ## Bugs
-
-## Leftover stuff
-
-- [x] Write `corpus_store.py` functions
-- [x] Write `ingester.py` functions
-- [x] Filter out unnecessary code from `llm_backend.py` and focus it
-- [x] Migrate from pypdf to PyMuPdf/fitz
-- [x] Be sure to enable SQLite foreign keys from Python
 
 ## Later
 
-- [ ] PDF annotation/highlighting
+- [ ] metadata quality check, and auto-Crossref if it looks sus (my prev question: "Why can't an LLM check metadata on ingestion like it does sections?")
+- [x] PDF annotation/highlighting
 - [ ] automatic source polling
 - [ ] Zotero write-back/import
 - [ ] integrations beyond Zotero
 - [x] advanced section-aware chunking
 - [ ] advanced relationship taxonomies
-- [ ] metadata quality check, and auto-Crossref if it looks sus
 - [ ] "-f" option to ingest.py, to overwrite previous data explicitly (like for
   refreshing data for a new chunker/sectioner pipeline)
 - [ ] Use citation count (or citation count divided by years since published)
   as a proxy for turning up in searches
 - [ ] Alternatives to local Ollama for the corpus-grounded assessment (an API
   key, etc)
+- [ ] OCR (see "Handling OCR Documents in Kurrent" chat)
+- [ ] cascading chunking preferences: paragraph, sentence, word (chat called
+  this a "modest boundary-aware chunker")
+- [ ] zotero ingest mode
+- [ ] external search (Be able to explicitly ask kurrent: "this chunk...what
+  else is out there (not currently in kurrent db) that resembles it?"
 
 
 # Design decisions
+
+## User interface concepts
+
+- User-facing focus should be on documents, not chunks. (They'll remember "thus
+  and such was explored by Smith 2009," not "paragraph 6 of p. 3 of Smith
+  2009.")
+- For PAs/CLs, also surface it primarily as docs, secondarily as chunks.
 
 ## Storage architecture
 
@@ -65,6 +65,8 @@ this is now pushed to github repo, along with a couple message wording changes a
       used primarily for semantic similarity search; SQLite stores durable
       relational application state.
 - Chroma should be rebuildable without losing kurrent's durable state.
+- We like SQLite even though DuckDB exists, because SQLite is good at OLTP as
+  opposed to OLAP. (kinda ret-con reasoning)
 
 ## Stable IDs
 
@@ -215,7 +217,6 @@ Types of search:
 - If the user ingests a raw PDF path, default to copying it into
   kurrent-managed storage.
 - Such documents use `storage_mode = managed`.
-- Later, optionally support in-place indexing with `storage_mode = external`.
 
 ## RAG corpus
 
@@ -235,11 +236,14 @@ Types of search:
 - Do not split the project into separate top-level executables.
 - Likely commands:
   - `kurrent ingest ...`
-  - `kurrent chat ...`
+  - `kurrent converse ...`
   - `kurrent search ...`
   - `kurrent links ...`
   - `kurrent sources ...`
 - Prefer source-specific ingestion routes, for example:
   - `kurrent ingest file paper.pdf`
   - `kurrent ingest zotero JSFWJ7G6`
+
+
+
 
