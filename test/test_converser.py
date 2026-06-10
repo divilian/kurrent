@@ -94,6 +94,7 @@ def test_build_evidence_packets_preserves_source_page_section_and_chunk_provenan
             pdf_path=Path("/tmp/adaptive-networks.pdf"),
             page_start=3,
             page_end=4,
+            doc_id="doc-1",
         ),
     )
 

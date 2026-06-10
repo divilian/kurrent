@@ -90,6 +90,7 @@ class EvidencePacket:
     pdf_path: Path | None = None
     page_start: int | None = None
     page_end: int | None = None
+    doc_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,7 @@ class EvidencePassage:
     page_start: int | None
     page_end: int | None
     excerpt: str | None = None
+    doc_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +118,7 @@ class EvidenceSource:
     page_end: int | None
     evidence_count: int
     excerpt: str | None = None
+    doc_id: str | None = None
     passages: tuple[EvidencePassage, ...] = ()
 
 
@@ -332,6 +335,7 @@ def build_evidence_packets(
                 pdf_path=getattr(hit, "path", None),
                 page_start=getattr(hit, "page_start", None),
                 page_end=getattr(hit, "page_end", None),
+                doc_id=getattr(hit, "doc_id", None),
                 pages=pages_label(hit),
                 section=section_label(hit),
                 distance=getattr(hit, "distance", None),
@@ -425,6 +429,7 @@ def evidence_sources(evidence: Iterable[EvidencePacket]) -> tuple[EvidenceSource
                     page_start=packet.page_start,
                     page_end=packet.page_end,
                     excerpt=packet.text,
+                    doc_id=packet.doc_id,
                 )
             )
 
@@ -462,6 +467,11 @@ def evidence_sources(evidence: Iterable[EvidencePacket]) -> tuple[EvidenceSource
                     first_passage.excerpt
                     if first_passage is not None
                     else first_packet.text
+                ),
+                doc_id=(
+                    first_passage.doc_id
+                    if first_passage is not None
+                    else first_packet.doc_id
                 ),
                 passages=tuple(passages),
             )

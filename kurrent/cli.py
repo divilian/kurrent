@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import time
 
@@ -2030,6 +2031,229 @@ def _parse_source_selection(selection: str, source_count: int) -> tuple[int, int
     return source_number - 1, passage_index - 1
 
 
+CONVERSE_SOURCE_USAGE = (
+    'Type a source like "1" or "1c", "edit 1", "details 1", or q to return.'
+)
+
+
+def _parse_source_number(selection: str, source_count: int) -> int | None:
+    """Parse a source number for source-level commands like edit/details."""
+
+    text = selection.strip()
+
+    if not text or not text.isdigit():
+        return None
+
+    source_number = int(text)
+
+    if not 1 <= source_number <= source_count:
+        return None
+
+    return source_number - 1
+
+
+def _parse_source_browser_command(command: str, source_count: int) -> tuple[str, str] | None:
+    """Parse source-browser commands.
+
+    Supported forms:
+      - 1 / 1c: open a source passage
+      - edit 1 / e1 / e 1: edit source metadata
+      - details 1 / d1 / d 1: show source metadata details
+    """
+
+    text = command.strip().lower()
+
+    if not text:
+        return None
+
+    for verb, action in (("edit", "edit"), ("details", "details")):
+        if text == verb:
+            return None
+
+        prefix = f"{verb} "
+        if text.startswith(prefix):
+            selection = text[len(prefix):].strip()
+            if _parse_source_number(selection, source_count) is None:
+                return None
+            return action, selection
+
+    if len(text) >= 2 and text[0] in {"e", "d"}:
+        action = "edit" if text[0] == "e" else "details"
+        selection = text[1:].strip()
+
+        if _parse_source_number(selection, source_count) is not None:
+            return action, selection
+
+    if _parse_source_selection(text, source_count) is None:
+        return None
+
+    return "open", text
+
+
+def _document_for_converse_source(source, state_store):
+    """Return the stored document for a converse source, if available."""
+
+    if state_store is None:
+        return None
+
+    doc_id = getattr(source, "doc_id", None)
+
+    if doc_id is None:
+        return None
+
+    try:
+        return state_store.get_document(doc_id)
+    except Exception:
+        return None
+
+
+def _source_label_for_document(document, fallback: str) -> str:
+    """Return a refreshed source label after metadata edits."""
+
+    authors = getattr(document, "authors", None)
+    year = getattr(document, "year", None)
+
+    if authors is not None and year is not None:
+        return f"{authors} {year}"
+
+    pdf_path = getattr(document, "pdf_path", None)
+    if pdf_path is not None:
+        from kurrent.converser import user_facing_pdf_name
+
+        source_name = user_facing_pdf_name(Path(pdf_path).name)
+        if source_name is not None:
+            return source_name
+
+    title = getattr(document, "title", None)
+    if title is not None:
+        return title
+
+    return fallback
+
+
+def _refresh_turn_metadata_for_document(turn, document):
+    """Return a turn whose evidence source labels reflect updated metadata."""
+
+    if turn is None or document is None:
+        return turn
+
+    from dataclasses import replace
+    from kurrent.converser import ConverseTurn
+
+    doc_id = getattr(document, "doc_id", None)
+
+    if doc_id is None:
+        return turn
+
+    refreshed_packets = []
+    changed = False
+
+    for packet in turn.evidence:
+        if getattr(packet, "doc_id", None) != doc_id:
+            refreshed_packets.append(packet)
+            continue
+
+        source_label = _source_label_for_document(document, packet.source_label or packet.citation)
+        citation = source_label
+
+        if packet.pages:
+            citation = f"{citation}, {packet.pages}"
+
+        refreshed_packets.append(
+            replace(
+                packet,
+                source_label=source_label,
+                citation=citation,
+                title=getattr(document, "title", None) or packet.title,
+                source_name=(
+                    Path(document.pdf_path).name
+                    if getattr(document, "pdf_path", None) is not None
+                    else packet.source_name
+                ),
+                pdf_path=getattr(document, "pdf_path", None) or packet.pdf_path,
+            )
+        )
+        changed = True
+
+    if not changed:
+        return turn
+
+    return ConverseTurn(
+        user_text=turn.user_text,
+        retrieval_query=turn.retrieval_query,
+        assistant_text=turn.assistant_text,
+        evidence=tuple(refreshed_packets),
+    )
+
+
+def print_converse_source_details(turn, source_number_text: str, state_store=None) -> None:
+    """Print metadata/details for one converse source."""
+
+    sources = _latest_converse_sources(turn)
+    source_index = _parse_source_number(source_number_text, len(sources))
+
+    if source_index is None:
+        print_wrapped(CONVERSE_SOURCE_USAGE)
+        return
+
+    source = sources[source_index]
+    document = _document_for_converse_source(source, state_store)
+
+    if document is None:
+        print_wrapped(f"No stored metadata is available for source {source_number_text}.")
+        return
+
+    hit = document_hit_from_document(document, SimpleNamespace(score=None, best_chunk_id=None))
+    print_document_detail(
+        hit,
+        index=source.source_number,
+        total=len(sources),
+        search_text=None,
+        state_store=state_store,
+    )
+
+
+def edit_converse_source_metadata(turn, source_number_text: str, state_store=None):
+    """Interactively edit metadata for one converse source and return updated turn."""
+
+    sources = _latest_converse_sources(turn)
+    source_index = _parse_source_number(source_number_text, len(sources))
+
+    if source_index is None:
+        print_wrapped(CONVERSE_SOURCE_USAGE)
+        return turn
+
+    source = sources[source_index]
+
+    if state_store is None:
+        print_wrapped("Metadata editing requires an open kurrent state store.")
+        return turn
+
+    document = _document_for_converse_source(source, state_store)
+
+    if document is None:
+        print_wrapped(f"Could not find metadata for source {source_number_text} in kurrent state.")
+        return turn
+
+    open_pdf_for_metadata_edit(document)
+    edited_metadata = review_metadata(metadata_from_document(document))
+    updates = metadata_changes(document, edited_metadata)
+
+    if not updates:
+        print_wrapped("Metadata unchanged.")
+        return turn
+
+    state_store.update_document_metadata(document.doc_id, **updates)
+    refreshed = state_store.get_document(document.doc_id)
+
+    if refreshed is None:
+        print_wrapped("Metadata updated, but the refreshed document could not be loaded.")
+        return turn
+
+    print_wrapped("Metadata updated.")
+    return _refresh_turn_metadata_for_document(turn, refreshed)
+
+
 def open_converse_source(
     turn,
     source_number_text: str,
@@ -2049,10 +2273,7 @@ def open_converse_source(
     parsed = _parse_source_selection(source_number_text, len(sources))
 
     if parsed is None:
-        print_wrapped(
-            "Type a source number like 1, or a passage like 1c, "
-            "or q to return to kurrent."
-        )
+        print_wrapped(CONVERSE_SOURCE_USAGE)
         return
 
     source_index, passage_index = parsed
@@ -2142,28 +2363,24 @@ def browse_converse_sources(
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     ollama_timeout: float = 45.0,
-) -> None:
+    state_store=None,
+):
     """Open an interactive source browser for the most recent converse turn."""
 
     sources = _latest_converse_sources(turn)
 
     if not sources:
         print_wrapped("No sources are available yet. Ask a research question first.")
-        return
+        return turn
 
     while True:
         print_converse_sources(turn)
-        print_wrapped(
-            yellow_menu_text(
-                "Type a source number like 1, or a passage like 1c, "
-                "or q to return to kurrent."
-            )
-        )
+        print_wrapped(yellow_menu_text(CONVERSE_SOURCE_USAGE))
 
         choice = prompt_source_action()
 
         if is_source_browser_quit(choice):
-            return
+            return turn
 
         if choice.startswith("/open"):
             parts = choice.split(maxsplit=1)
@@ -2177,15 +2394,33 @@ def browse_converse_sources(
                     ollama_timeout=ollama_timeout,
                 )
             else:
-                print_wrapped(
-                    "Type a source number like 1, or a passage like 1c, "
-                    "or q to return to kurrent."
-                )
+                print_wrapped(CONVERSE_SOURCE_USAGE)
+            continue
+
+        sources = _latest_converse_sources(turn)
+        parsed_command = _parse_source_browser_command(choice, len(sources))
+
+        if parsed_command is None:
+            print_wrapped(CONVERSE_SOURCE_USAGE)
+            continue
+
+        action, selection = parsed_command
+
+        if action == "details":
+            print_converse_source_details(turn, selection, state_store=state_store)
+            continue
+
+        if action == "edit":
+            turn = edit_converse_source_metadata(
+                turn,
+                selection,
+                state_store=state_store,
+            )
             continue
 
         open_converse_source(
             turn,
-            choice,
+            selection,
             ollama_model=ollama_model,
             ollama_url=ollama_url,
             ollama_timeout=ollama_timeout,
@@ -2366,11 +2601,12 @@ def run_converse(args: argparse.Namespace) -> int:
                 print_wrapped(turn.assistant_text)
                 print()
 
-            browse_converse_sources(
+            last_turn = browse_converse_sources(
                 last_turn,
                 ollama_model=args.ollama_model,
                 ollama_url=args.ollama_url,
                 ollama_timeout=args.ollama_timeout,
+                state_store=store,
             )
             print()
     finally:

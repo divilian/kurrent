@@ -2,6 +2,8 @@ from pathlib import Path
 
 import kurrent.cli as cli
 from kurrent.converser import ConverseTurn, EvidencePacket
+from kurrent.schema import ExtractedMetadata
+from test.factories import make_document
 
 
 def make_turn(pdf_path=Path("/tmp/paper.pdf")):
@@ -19,6 +21,7 @@ def make_turn(pdf_path=Path("/tmp/paper.pdf")):
         section=None,
         distance=0.123,
         text="Relevant excerpt.",
+        doc_id="doc-1",
     )
     return ConverseTurn(
         user_text="question",
@@ -208,7 +211,7 @@ def test_open_converse_source_rejects_bad_source_number(capsys):
     cli.open_converse_source(make_turn(), "bogus")
 
     captured = capsys.readouterr()
-    assert "source number like 1" in captured.out
+    assert "source like \"1\" or \"1c\"" in captured.out
 
 
 def test_handle_converse_command_reports_unknown_command(capsys):
@@ -329,3 +332,141 @@ def test_open_converse_source_prefers_highlighted_pdf_when_available(monkeypatch
     assert highlight_calls[0]["model"] == "model-x"
     assert highlight_calls[0]["ollama_url"] == "http://ollama"
     assert highlight_calls[0]["fallback_excerpt"] == "Relevant excerpt."
+
+
+def test_source_browser_usage_advertises_edit_and_details(capsys):
+    """The source browser should advertise readable edit/details commands."""
+
+    print(cli.CONVERSE_SOURCE_USAGE)
+
+    captured = capsys.readouterr()
+    assert 'source like "1" or "1c"' in captured.out
+    assert '"edit 1"' in captured.out
+    assert '"details 1"' in captured.out
+
+
+def test_parse_source_browser_command_accepts_long_and_short_forms():
+    """Power-user and readable source commands should parse the same way."""
+
+    assert cli._parse_source_browser_command("1c", 3) == ("open", "1c")
+    assert cli._parse_source_browser_command("edit 1", 3) == ("edit", "1")
+    assert cli._parse_source_browser_command("e1", 3) == ("edit", "1")
+    assert cli._parse_source_browser_command("e 1", 3) == ("edit", "1")
+    assert cli._parse_source_browser_command("details 1", 3) == ("details", "1")
+    assert cli._parse_source_browser_command("d1", 3) == ("details", "1")
+    assert cli._parse_source_browser_command("d 1", 3) == ("details", "1")
+    assert cli._parse_source_browser_command("edit 9", 3) is None
+
+
+def test_print_converse_source_details_uses_state_store(capsys, tmp_path):
+    """details 1 should show stored document metadata for a source."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    document = make_document(
+        doc_id="doc-1",
+        pdf_path=pdf_path,
+        title="Corrected Title",
+        authors="Correct Author",
+        year=2026,
+    )
+
+    class FakeStore:
+        def get_document(self, doc_id):
+            assert doc_id == "doc-1"
+            return document
+
+    cli.print_converse_source_details(make_turn(pdf_path=pdf_path), "1", state_store=FakeStore())
+
+    captured = capsys.readouterr()
+    assert "Details for document 1/1" in captured.out
+    assert "Corrected Title" in captured.out
+    assert "Correct Author" in captured.out
+    assert "doc_id: doc-1" in captured.out
+
+
+def test_edit_converse_source_metadata_updates_source_label(monkeypatch, capsys, tmp_path):
+    """edit 1 should reuse metadata editing and refresh the source menu label."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    original = make_document(
+        doc_id="doc-1",
+        pdf_path=pdf_path,
+        title="Bad Title",
+        authors="Bad Author",
+        year=2001,
+    )
+    updated = make_document(
+        doc_id="doc-1",
+        pdf_path=pdf_path,
+        title="Good Title",
+        authors="Good Author",
+        year=2026,
+    )
+    documents = {"doc-1": original}
+    updates = []
+
+    class FakeStore:
+        def get_document(self, doc_id):
+            return documents[doc_id]
+
+        def update_document_metadata(self, doc_id, **kwargs):
+            updates.append((doc_id, kwargs))
+            documents[doc_id] = updated
+
+    monkeypatch.setattr(cli, "open_pdf_for_metadata_edit", lambda document: None)
+    monkeypatch.setattr(
+        cli,
+        "review_metadata",
+        lambda metadata: ExtractedMetadata(
+            title="Good Title",
+            authors="Good Author",
+            year=2026,
+            doi=metadata.doi,
+        ),
+    )
+
+    new_turn = cli.edit_converse_source_metadata(
+        make_turn(pdf_path=pdf_path),
+        "1",
+        state_store=FakeStore(),
+    )
+
+    assert updates == [(
+        "doc-1",
+        {"title": "Good Title", "authors": "Good Author", "year": 2026},
+    )]
+
+    cli.print_converse_sources(new_turn)
+    captured = capsys.readouterr()
+    assert "Good Author 2026" in captured.out
+    assert "Bad Author 2001" not in captured.out
+
+
+def test_browse_converse_sources_accepts_edit_command(monkeypatch, tmp_path):
+    """The interactive source browser should route edit 1 to metadata editing."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    turn = make_turn(pdf_path=pdf_path)
+    edited_turn = ConverseTurn(
+        user_text=turn.user_text,
+        retrieval_query=turn.retrieval_query,
+        assistant_text=turn.assistant_text,
+        evidence=turn.evidence,
+    )
+    choices = iter(["edit 1", "q"])
+    calls = []
+
+    monkeypatch.setattr("builtins.input", lambda prompt: next(choices))
+    monkeypatch.setattr(
+        cli,
+        "edit_converse_source_metadata",
+        lambda turn_arg, selection, state_store=None: calls.append((selection, state_store)) or edited_turn,
+    )
+
+    result = cli.browse_converse_sources(turn, state_store="store-x")
+
+    assert result is edited_turn
+    assert calls == [("1", "store-x")]
