@@ -59,15 +59,22 @@ def test_semantic_index_fingerprint_ignores_reviewed_heading_choices():
     assert "reviewed_headings" not in current_a
 
 
-def test_semantic_refresh_documents_flags_stale_and_unindexed_docs():
+def test_semantic_refresh_documents_flags_stale_and_unindexed_docs(tmp_path):
     """Verify semantic search maintenance catches stale and missing-index docs."""
 
     current = current_text_pipeline_fingerprint()
     stale = current_text_pipeline_fingerprint(extractor_version="old-extractor")
 
-    fresh_indexed = FakeDocument("fresh-indexed", Path("fresh-indexed.pdf"))
-    fresh_unindexed = FakeDocument("fresh-unindexed", Path("fresh-unindexed.pdf"))
-    stale_indexed = FakeDocument("stale-indexed", Path("stale-indexed.pdf"))
+    fresh_indexed_pdf = tmp_path / "fresh-indexed.pdf"
+    fresh_unindexed_pdf = tmp_path / "fresh-unindexed.pdf"
+    stale_indexed_pdf = tmp_path / "stale-indexed.pdf"
+    fresh_indexed_pdf.write_text("fresh indexed")
+    fresh_unindexed_pdf.write_text("fresh unindexed")
+    stale_indexed_pdf.write_text("stale indexed")
+
+    fresh_indexed = FakeDocument("fresh-indexed", fresh_indexed_pdf)
+    fresh_unindexed = FakeDocument("fresh-unindexed", fresh_unindexed_pdf)
+    stale_indexed = FakeDocument("stale-indexed", stale_indexed_pdf)
 
     store = FakeStore(
         [fresh_indexed, fresh_unindexed, stale_indexed],
@@ -85,6 +92,70 @@ def test_semantic_refresh_documents_flags_stale_and_unindexed_docs():
         fresh_unindexed.doc_id,
         stale_indexed.doc_id,
     ]
+
+
+def test_semantic_refresh_documents_skips_missing_pdf(tmp_path):
+    """Verify missing external PDFs are not repeatedly offered for refresh."""
+
+    current = current_text_pipeline_fingerprint()
+    missing = FakeDocument("missing", tmp_path / "missing.pdf")
+
+    store = FakeStore([missing], {missing.doc_id: current})
+    embedder = FakeEmbedder(set())
+
+    assert cli.semantic_refresh_documents(store, embedder) == []
+
+
+
+def test_semantic_refresh_documents_reports_progress_phases(tmp_path):
+    """Verify semantic refresh checks can narrate their expensive phases."""
+
+    current = current_text_pipeline_fingerprint()
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_text("pdf placeholder")
+    document = FakeDocument("doc-1", pdf_path)
+
+    store = FakeStore([document], {document.doc_id: current})
+    embedder = FakeEmbedder(set())
+    messages = []
+
+    docs = cli.semantic_refresh_documents(
+        store,
+        embedder,
+        progress_callback=messages.append,
+    )
+
+    assert docs == [document]
+    assert messages == [
+        "Listing ingested documents...",
+        "Checking stored PDF paths and pipeline fingerprints for 1 documents...",
+        "Checking current semantic index coverage...",
+        "Semantic refresh check found 1 document needing refresh.",
+    ]
+
+
+def test_print_gray_status_indents_startup_lines(capsys):
+    """Verify converse startup status lines are visually indented."""
+
+    cli.print_gray_status("Checking startup work...")
+
+    output = capsys.readouterr().out
+    assert output == " Checking startup work...\n"
+
+def test_refresh_documents_for_semantic_search_skips_missing_pdf(capsys, tmp_path):
+    """Verify direct refresh skips missing PDFs without marking them failed."""
+
+    missing = FakeDocument("missing", tmp_path / "missing.pdf")
+
+    refreshed, failed = cli.refresh_documents_for_semantic_search(
+        [missing],
+        store=object(),
+        embedder=object(),
+    )
+
+    output = capsys.readouterr().out
+    assert (refreshed, failed) == (0, 0)
+    assert "Skipping refresh: PDF path does not exist." in output
 
 
 def test_prompt_refresh_semantic_documents_accepts_default_yes(monkeypatch):
@@ -107,7 +178,7 @@ def test_prompt_refresh_semantic_documents_allows_no(monkeypatch):
     assert cli.prompt_refresh_semantic_documents(docs) is False
 
 
-def test_refresh_documents_for_semantic_search_reingests_with_existing_metadata(monkeypatch):
+def test_refresh_documents_for_semantic_search_reingests_with_existing_metadata(monkeypatch, tmp_path):
     """Verify semantic refresh reuses stored document metadata without review."""
 
     calls = []
@@ -118,9 +189,12 @@ def test_refresh_documents_for_semantic_search_reingests_with_existing_metadata(
 
     monkeypatch.setattr(cli, "ingest_pdf_with_metadata", fake_ingest_pdf_with_metadata)
 
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_text("pdf placeholder")
+
     document = FakeDocument(
         doc_id="doc-1",
-        pdf_path=Path("paper.pdf"),
+        pdf_path=pdf_path,
         storage_mode="external",
         title="Stored Title",
         authors="A. Author",

@@ -1,6 +1,9 @@
 # Functions/classes to compute embeddings for chunks of text and index them in
 # Chroma.
 from __future__ import annotations
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import io
+import os
 from pathlib import Path
 import re
 from typing import Sequence
@@ -20,6 +23,45 @@ __all__ = [
 ]
 
 DEFAULT_EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+@contextmanager
+def suppress_tqdm_for_model_loading():
+    """Temporarily suppress dependency progress bars during model loading.
+
+    SentenceTransformer/model-loading dependencies sometimes emit noisy tqdm
+    bars such as "Loading weights" during CLI startup. Some of those bars do
+    not honor TQDM_DISABLE reliably, so also silence stdout/stderr locally
+    while the model object is constructed. This keeps kurrent's own
+    user-facing tqdm progress bars during ingest/sectioning visible.
+
+    Set KURRENT_SHOW_MODEL_LOAD_PROGRESS=1 to restore dependency model-load
+    chatter for debugging.
+    """
+
+    previous = os.environ.get("TQDM_DISABLE")
+    os.environ["TQDM_DISABLE"] = "1"
+
+    show_progress = os.environ.get("KURRENT_SHOW_MODEL_LOAD_PROGRESS") in {
+        "1",
+        "true",
+        "TRUE",
+        "yes",
+        "YES",
+    }
+
+    try:
+        if show_progress:
+            yield
+        else:
+            sink = io.StringIO()
+            with redirect_stdout(sink), redirect_stderr(sink):
+                yield
+    finally:
+        if previous is None:
+            os.environ.pop("TQDM_DISABLE", None)
+        else:
+            os.environ["TQDM_DISABLE"] = previous
 
 
 class Embedder:
@@ -46,7 +88,8 @@ class Embedder:
             name=self.collection_name,
         )
 
-        self.model = SentenceTransformer(model_name)
+        with suppress_tqdm_for_model_loading():
+            self.model = SentenceTransformer(model_name)
 
     def index_chunks(self, doc_id: str, store: StateStore) -> None:
         """

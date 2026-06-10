@@ -114,6 +114,30 @@ def gray_status_text(text: str) -> str:
     return colored_cli_text(text, ANSI_GRAY)
 
 
+def print_gray_status(message: str) -> None:
+    """Print a low-priority startup/progress message immediately."""
+
+    # Use plain print instead of print_wrapped() so the visual one-space
+    # indentation is preserved. print_wrapped() intentionally normalizes
+    # leading whitespace away for prose paragraphs.
+    print(gray_status_text(f" {message}"))
+    sys.stdout.flush()
+
+
+def document_pdf_exists(document) -> bool:
+    """Return whether a stored document still has an available PDF path."""
+
+    pdf_path = getattr(document, "pdf_path", None)
+
+    if pdf_path is None:
+        return False
+
+    try:
+        return Path(pdf_path).exists()
+    except OSError:
+        return False
+
+
 class StreamingWrappedPrinter:
     """Incrementally print streamed text with terminal-width wrapping.
 
@@ -1018,6 +1042,9 @@ def document_needs_semantic_refresh(document, store, embedder) -> bool:
     if document is None:
         return False
 
+    if not document_pdf_exists(document):
+        return False
+
     try:
         from kurrent.pipeline import is_current_text_pipeline_fingerprint
 
@@ -1041,14 +1068,77 @@ def document_needs_semantic_refresh(document, store, embedder) -> bool:
     return False
 
 
-def semantic_refresh_documents(store, embedder) -> list:
-    """Return documents needing refresh before trustworthy semantic search."""
+def semantic_refresh_documents(store, embedder, progress_callback=None) -> list:
+    """Return documents needing refresh before trustworthy semantic search.
 
-    return [
-        document
-        for document in all_documents_for_semantic_maintenance(store)
-        if document_needs_semantic_refresh(document, store, embedder)
-    ]
+    The check is intentionally split into coarse phases so interactive commands
+    such as ``kurrent converse`` can narrate startup work while still keeping
+    missing external PDFs out of the repeated refresh prompt.
+    """
+
+    def report(message: str) -> None:
+        if progress_callback is not None:
+            progress_callback(message)
+
+    report("Listing ingested documents...")
+    documents = all_documents_for_semantic_maintenance(store)
+
+    if not documents:
+        report("No ingested documents found for semantic refresh check.")
+        return []
+
+    report(f"Checking stored PDF paths and pipeline fingerprints for {len(documents)} documents...")
+
+    stale_documents = []
+    current_pipeline_documents = []
+
+    for document in documents:
+        if document is None:
+            continue
+
+        if not document_pdf_exists(document):
+            continue
+
+        try:
+            from kurrent.pipeline import is_current_text_pipeline_fingerprint
+
+            pipeline_fingerprint = store.get_document_pipeline_fingerprint(
+                document.doc_id,
+            )
+            if (
+                hasattr(store, "document_has_no_extractable_text")
+                and store.document_has_no_extractable_text(document.doc_id)
+            ):
+                continue
+
+            if is_current_text_pipeline_fingerprint(pipeline_fingerprint):
+                current_pipeline_documents.append(document)
+            else:
+                stale_documents.append(document)
+        except Exception:
+            continue
+
+    report("Checking current semantic index coverage...")
+
+    unindexed_documents = []
+    if hasattr(embedder, "has_document"):
+        for document in current_pipeline_documents:
+            try:
+                if not embedder.has_document(document.doc_id):
+                    unindexed_documents.append(document)
+            except Exception:
+                continue
+
+    documents_needing_refresh = unindexed_documents + stale_documents
+
+    if documents_needing_refresh:
+        count = len(documents_needing_refresh)
+        noun = "document" if count == 1 else "documents"
+        report(f"Semantic refresh check found {count} {noun} needing refresh.")
+    else:
+        report("Semantic refresh check found no documents needing refresh.")
+
+    return documents_needing_refresh
 
 
 def prompt_refresh_semantic_documents(documents: list) -> bool:
@@ -1126,6 +1216,15 @@ def refresh_documents_for_semantic_search(
         print()
         print(f"[{i}/{len(documents)}] {document.pdf_path}", flush=True)
 
+        if not document_pdf_exists(document):
+            print_wrapped(
+                gray_status_text(
+                    "Skipping refresh: PDF path does not exist. "
+                    "Use metadata search details to inspect or clean up this record."
+                )
+            )
+            continue
+
         try:
             ingest_pdf_with_metadata(
                 pdf_path=document.pdf_path,
@@ -1169,10 +1268,14 @@ def refresh_documents_for_semantic_search(
     return refreshed, failed
 
 
-def offer_semantic_refresh_if_needed(store, embedder) -> None:
+def offer_semantic_refresh_if_needed(store, embedder, progress_callback=None) -> None:
     """Offer to refresh stale/missing semantic-search documents before search."""
 
-    documents = semantic_refresh_documents(store, embedder)
+    documents = semantic_refresh_documents(
+        store,
+        embedder,
+        progress_callback=progress_callback,
+    )
 
     if not documents:
         return
@@ -2167,14 +2270,24 @@ def run_converse(args: argparse.Namespace) -> int:
             f"Expected Chroma directory: {state_paths.chroma_path}"
         )
 
+    print_gray_status("Opening Kurrent state database...")
     store = StateStore(state_paths.sqlite_path)
 
     try:
+        print_gray_status("Loading semantic index and embedding model...")
         embedder = Embedder(chroma_path=state_paths.chroma_path)
+
+        print_gray_status("Preparing semantic searcher...")
         searcher = Searcher(state_store=store, embedder=embedder)
 
-        offer_semantic_refresh_if_needed(store, embedder)
+        print_gray_status("Checking whether semantic index refresh is needed...")
+        offer_semantic_refresh_if_needed(
+            store,
+            embedder,
+            progress_callback=print_gray_status,
+        )
 
+        print_gray_status("Starting conversational search engine...")
         engine = ConverseEngine(
             searcher=searcher,
             model=args.ollama_model,
