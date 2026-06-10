@@ -67,6 +67,62 @@ def suppress_tqdm_for_model_loading():
 class Embedder:
     """
     Coordinates embedding and indexing kurrent chunks into a Chroma collection.
+
+    Note on the Chroma collection naming (and semantic index fingerprint):
+    
+    Kurrent uses a deliberately long Chroma collection name so that semantic
+    search never mixes vectors produced by incompatible indexing pipelines.
+    The name is a readable serialization of the exact pipeline that produced
+    the chunk embeddings.
+    
+    Example:
+    
+      kurrent_chunks__index_semantic-index-fingerprint-v1_extractor_layout-aware-pymupdf-v2_sectioner_sectioner-v4_llm_sectioner_ollama-section-headings-v2_chunker_section-aware-fixed-char-v2_target_chars_2000__sentence-transformers_all-MiniLM-L6-v2
+    
+    Components:
+    
+    - kurrent_chunks__
+      Fixed prefix. This collection stores Kurrent chunk embeddings.
+    
+    - index_semantic-index-fingerprint-v1
+      Version of the semantic-index fingerprint scheme itself. If the recipe
+      for deciding which pipeline components affect semantic compatibility
+      changes, this version should change too.
+    
+    - extractor_layout-aware-pymupdf-v2
+      PDF text extraction pipeline and version. Extraction changes can alter
+      text order, page text, headings, and therefore downstream chunks.
+    
+    - sectioner_sectioner-v4
+      Rules-based section detection pipeline and version. Section boundaries
+      affect chunk boundaries and chunk metadata.
+    
+    - llm_sectioner_ollama-section-headings-v2
+      LLM-assisted section heading detector and version. LLM heading choices
+      can affect section boundaries, so they are part of the fingerprint.
+    
+    - chunker_section-aware-fixed-char-v2
+      Chunking algorithm and version. If chunk construction, overlap, section
+      handling, page provenance, or reference-section treatment changes, this
+      should change.
+    
+    - target_chars_2000
+      Chunker parameter. A different target chunk size produces different
+      chunks and therefore different vectors.
+    
+    - sentence-transformers_all-MiniLM-L6-v2
+      Embedding model used to generate vectors. Embeddings from different
+      models are not comparable, so each model needs a distinct collection.
+    
+    In plain English, the full name means:
+    
+      "This collection contains Kurrent chunk vectors built from PDFs
+      extracted with this extractor, sectioned with this sectioner, chunked
+      with these chunking settings, and embedded with this embedding model."
+    
+    The name is ugly, but useful: if any semantically relevant part of the
+    pipeline changes, Kurrent naturally uses a different Chroma collection
+    rather than silently mixing stale and current vectors.
     """
 
     def __init__(
