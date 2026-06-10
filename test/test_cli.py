@@ -503,3 +503,40 @@ def test_present_document_hits_rejects_open_when_pdf_missing(monkeypatch, tmp_pa
 
     output = capsys.readouterr().out
     assert "Please press Enter, or type d, e, or q." in output
+
+
+def test_converse_accepts_initial_research_question_arguments():
+    """Verify converse can take the first research question from argv."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "converse",
+        "agents",
+        "rewiring",
+        "local",
+        "networks",
+    ])
+
+    assert args.command == "converse"
+    assert args.research_question == [
+        "agents",
+        "rewiring",
+        "local",
+        "networks",
+    ]
+
+
+def test_converse_initial_research_question_can_follow_options():
+    """Verify converse options still parse before an initial research question."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "converse",
+        "--limit",
+        "4",
+        "network",
+        "rewiring",
+    ])
+
+    assert args.limit == 4
+    assert args.research_question == ["network", "rewiring"]

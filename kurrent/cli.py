@@ -1123,7 +1123,14 @@ def semantic_refresh_documents(store, embedder, progress_callback=None) -> list:
 
     unindexed_documents = []
     if hasattr(embedder, "has_document"):
-        for document in current_pipeline_documents:
+        ANSI_GRAY = "\033[90m"
+        ANSI_RESET = "\033[0m"
+
+        for document in tqdm(
+            current_pipeline_documents,
+            desc=" Refreshing",
+            bar_format=ANSI_GRAY + "{l_bar}{bar}{r_bar}" + ANSI_RESET,
+        ):
             try:
                 if not embedder.has_document(document.doc_id):
                     unindexed_documents.append(document)
@@ -2533,20 +2540,30 @@ def run_converse(args: argparse.Namespace) -> int:
             include_reference_sections=args.include_reference_sections,
         )
 
-        print()
-        print_wrapped(red_prompt("Hi, what research question are you interested in today?"))
+        initial_research_question = " ".join(
+            getattr(args, "research_question", []) or []
+        ).strip()
+
+        if not initial_research_question:
+            print()
+            print_wrapped(red_prompt("Hi, what research question are you interested in today?"))
 
         def report_progress(message: str) -> None:
             print_wrapped(gray_status_text(f"  {message}"))
 
         last_turn = None
+        pending_user_text = initial_research_question or None
 
         while True:
-            try:
-                user_text = input(red_prompt("kurrent> ")).strip()
-            except EOFError:
-                print()
-                return 0
+            if pending_user_text is not None:
+                user_text = pending_user_text
+                pending_user_text = None
+            else:
+                try:
+                    user_text = input(red_prompt("kurrent> ")).strip()
+                except EOFError:
+                    print()
+                    return 0
 
             if is_quit_command(user_text):
                 return 0
@@ -3358,6 +3375,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=120.0,
         help="seconds before one Ollama RAG answer request times out.",
+    )
+    converse_parser.add_argument(
+        "research_question",
+        nargs="*",
+        help="optional first research question to answer before entering interactive mode.",
     )
     converse_parser.set_defaults(func=run_converse)
 
