@@ -224,8 +224,10 @@ class Embedder:
     ) -> list[VectorChunkMatch]:
         """Query Chroma for chunks semantically close to search_text."""
 
+        query_embedding = self.generate_embeddings([search_text])[0]
+
         results = self.collection.query(
-            query_texts=[search_text],
+            query_embeddings=[query_embedding],
             n_results=n_results,
             include=["documents", "metadatas", "distances"],
         )
