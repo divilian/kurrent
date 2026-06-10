@@ -540,3 +540,103 @@ def test_converse_initial_research_question_can_follow_options():
 
     assert args.limit == 4
     assert args.research_question == ["network", "rewiring"]
+
+
+def test_converse_debug_options_parse_before_initial_question():
+    """Verify converse accepts semantic retrieval debug flags."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "converse",
+        "--debug",
+        "--debug-candidates",
+        "12",
+        "--debug-grep",
+        "memex|PKB",
+        "personal",
+        "knowledge",
+        "base",
+    ])
+
+    assert args.command == "converse"
+    assert args.debug is True
+    assert args.debug_candidates == 12
+    assert args.debug_grep == ["memex|PKB"]
+    assert args.research_question == ["personal", "knowledge", "base"]
+
+
+def test_search_debug_options_parse():
+    """Verify semantic search accepts retrieval debug flags."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "search",
+        "--debug",
+        "--debug-candidates",
+        "25",
+        "--debug-grep",
+        "Vannevar",
+        "personal",
+        "knowledge",
+        "base",
+    ])
+
+    assert args.command == "search"
+    assert args.debug is True
+    assert args.debug_candidates == 25
+    assert args.debug_grep == ["Vannevar"]
+    assert args.query == ["personal", "knowledge", "base"]
+
+
+def test_print_semantic_debug_report_prints_semantic_and_grep_sections(capsys, tmp_path):
+    """Verify retrieval debug output includes semantic, lexical, and grep info."""
+
+    from kurrent.searcher import Searcher
+    from kurrent.schema import VectorChunkMatch
+    from test.factories import make_chunk, make_document
+
+    document = make_document(
+        doc_id="doc-debug",
+        pdf_path=tmp_path / "memex.pdf",
+        title="Still Building the Memex",
+        authors="Stephen Davies",
+        year=2011,
+    )
+    chunk = make_chunk(
+        document.doc_id,
+        0,
+        "A personal knowledge base stores a person's memories for later query.",
+        page_start=1,
+        page_end=2,
+    )
+    from kurrent.state_store import StateStore
+
+    store = StateStore(tmp_path / "kurrent.db")
+    store.insert_document(document)
+    store.insert_chunks([chunk])
+
+    class FakeEmbedder:
+        model_name = "fake-model"
+        collection_name = "fake-collection"
+
+        def query_chunks(self, search_text, n_results=10, max_distance=None, exclude_doc_ids=None):
+            return [VectorChunkMatch(chunk_id=chunk.chunk_id, distance=0.1234)]
+
+    searcher = Searcher(state_store=store, embedder=FakeEmbedder())
+
+    cli.print_semantic_debug_report(
+        searcher,
+        "personal knowledge base",
+        n_results=5,
+        grep_patterns=["memex|PKB"],
+    )
+
+    output = capsys.readouterr().out
+    store.close()
+    assert "Semantic debug report" in output
+    assert "Embedding model: fake-model" in output
+    assert "Semantic chunks returned: 1" in output
+    assert "Exact chunk-text search hits for full query: 1" in output
+    assert "Metadata search hits for full query" in output
+    assert "Grep diagnostics for /memex|PKB/i" in output
+    assert "Still Building the Memex" in output

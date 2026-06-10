@@ -26,6 +26,7 @@ The default search mode is semantic chunk search.
 from __future__ import annotations
 
 import argparse
+import re
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,7 @@ SEMANTIC_OVERFETCH_FACTOR = 5
 ANSI_RED = "\033[31m"
 ANSI_YELLOW = "\033[93m"
 ANSI_GRAY = "\033[90m"
+ANSI_WHITE = "\033[97m"
 
 
 class CliUsageError(Exception):
@@ -114,6 +116,21 @@ def gray_status_text(text: str) -> str:
     """Return low-priority progress/status text colored gray when possible."""
 
     return colored_cli_text(text, ANSI_GRAY)
+
+
+def debug_status_text(text: str) -> str:
+    """Return semantic debug text colored white when possible."""
+
+    return colored_cli_text(text, ANSI_WHITE)
+
+
+def print_debug_status(message: str) -> None:
+    """Print semantic retrieval debug output immediately."""
+
+    # Keep the same one-space indentation convention as status output,
+    # but use white instead of gray so debug diagnostics are easier to read.
+    print(debug_status_text(f" {message}"))
+    sys.stdout.flush()
 
 
 def print_gray_status(message: str) -> None:
@@ -1816,6 +1833,220 @@ def present_chunk_hits(
     if displayed == 0 and skipped:
         print("No chunks survived the Ollama relevance review.")
 
+
+def _debug_source_label(hit) -> str:
+    """Return a compact document label for semantic debug output."""
+
+    label = source_name_for_hit(hit)
+
+    if label:
+        return label
+
+    path = getattr(hit, "path", None)
+
+    if path is not None:
+        return Path(path).name
+
+    return getattr(hit, "doc_id", "unknown document")
+
+
+def _debug_excerpt(text: str, max_chars: int = 180) -> str:
+    """Return a short one-line excerpt for semantic debug output."""
+
+    text = collapse_whitespace(text)
+
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars].rstrip() + " [...]"
+
+
+def _debug_chunk_line(index: int, hit) -> str:
+    """Format one chunk hit for semantic debug output."""
+
+    pages = pages_label(hit)
+    section = section_label(hit)
+    parts = [
+        f"{index}. {_debug_source_label(hit)}",
+        f"chunk {getattr(hit, 'chunk_index', '?')}",
+    ]
+
+    if pages:
+        parts.append(pages)
+
+    if section:
+        parts.append(section)
+
+    distance = getattr(hit, "distance", None)
+
+    if distance is not None:
+        parts.append(f"distance {distance:.4f}")
+
+    return " | ".join(parts)
+
+
+def _metadata_debug_label(document) -> str:
+    """Return a compact document metadata label for debug output."""
+
+    title = getattr(document, "title", None) or getattr(document, "path", None)
+    authors = getattr(document, "authors", None)
+    year = getattr(document, "year", None)
+
+    label = str(title) if title else "(untitled)"
+
+    if authors:
+        label = f"{authors}: {label}"
+
+    if year is not None:
+        label = f"{label} ({year})"
+
+    return label
+
+
+def _grep_current_chunks(state_store, pattern: str, limit: int = 10) -> tuple[list, list]:
+    """Return documents and chunks whose metadata/current chunk text match pattern."""
+
+    from kurrent.chunker import chunker_version
+
+    regex = re.compile(pattern, re.IGNORECASE)
+    matching_documents = []
+    matching_chunks = []
+
+    for document in state_store.list_documents():
+        metadata_text = "\n".join(
+            str(value)
+            for value in (
+                document.title,
+                document.authors,
+                document.year,
+                document.doi,
+                document.pdf_path,
+            )
+            if value is not None
+        )
+
+        if regex.search(metadata_text):
+            matching_documents.append(document)
+
+        if len(matching_chunks) >= limit:
+            continue
+
+        chunks = state_store.get_chunks_for_document(
+            doc_id=document.doc_id,
+            chunker_version=chunker_version(),
+        )
+
+        for chunk in chunks:
+            if regex.search(chunk.text):
+                matching_chunks.append((document, chunk))
+
+                if len(matching_chunks) >= limit:
+                    break
+
+    return matching_documents[:limit], matching_chunks
+
+
+def print_semantic_debug_report(
+    searcher,
+    search_text: str,
+    n_results: int = 30,
+    max_distance: float | None = None,
+    include_reference_sections: bool = False,
+    grep_patterns: list[str] | None = None,
+) -> None:
+    """Print retrieval diagnostics without changing the normal search workflow."""
+
+    n_results = max(1, n_results)
+    print()
+    print_debug_status("Semantic debug report")
+    print_debug_status(f"Query: {search_text!r}")
+    print_debug_status(f"Semantic candidates requested: {n_results}")
+
+    embedder = getattr(searcher, "embedder", None)
+
+    if embedder is not None:
+        model_name = getattr(embedder, "model_name", None)
+        collection_name = getattr(embedder, "collection_name", None)
+
+        if model_name:
+            print_debug_status(f"Embedding model: {model_name}")
+
+        if collection_name:
+            print_debug_status(f"Chroma collection: {collection_name}")
+
+    try:
+        semantic_hits = searcher.semantic_chunk_search(
+            search_text,
+            n_results=n_results,
+            max_distance=max_distance,
+            include_reference_sections=include_reference_sections,
+        )
+    except Exception as exc:
+        print_debug_status(f"Semantic debug search failed: {exc}")
+        semantic_hits = []
+
+    print_debug_status(f"Semantic chunks returned: {len(semantic_hits)}")
+
+    for i, hit in enumerate(semantic_hits[:n_results], start=1):
+        print_debug_status(_debug_chunk_line(i, hit))
+        print_debug_status(f"  excerpt: {_debug_excerpt(hit.text)}")
+
+    if hasattr(searcher, "full_text_search"):
+        exact_hits = searcher.full_text_search(search_text, limit=10)
+        print_debug_status(f"Exact chunk-text search hits for full query: {len(exact_hits)}")
+
+        for i, hit in enumerate(exact_hits[:10], start=1):
+            print_debug_status(_debug_chunk_line(i, hit))
+            print_debug_status(f"  excerpt: {_debug_excerpt(hit.text)}")
+
+    if hasattr(searcher, "metadata_search"):
+        metadata_hits = searcher.metadata_search(search_text, limit=10)
+        print_debug_status(f"Metadata search hits for full query: {len(metadata_hits)}")
+
+        for i, hit in enumerate(metadata_hits[:10], start=1):
+            print_debug_status(f"{i}. {_metadata_debug_label(hit)}")
+
+    state_store = getattr(searcher, "state_store", None)
+
+    if grep_patterns and state_store is not None:
+        for pattern in grep_patterns:
+            print_debug_status(f"Grep diagnostics for /{pattern}/i")
+            try:
+                document_matches, chunk_matches = _grep_current_chunks(
+                    state_store,
+                    pattern,
+                    limit=10,
+                )
+            except re.error as exc:
+                print_debug_status(f"Invalid grep pattern {pattern!r}: {exc}")
+                continue
+
+            print_debug_status(f"Metadata documents matched: {len(document_matches)}")
+            for i, document in enumerate(document_matches[:10], start=1):
+                print_debug_status(f"{i}. {_metadata_debug_label(document)}")
+
+            print_debug_status(f"Current chunks matched: {len(chunk_matches)}")
+            for i, (document, chunk) in enumerate(chunk_matches[:10], start=1):
+                pages = pages_label(chunk)
+                section = section_label(chunk)
+                bits = [
+                    f"{i}. {document.title or document.pdf_path.name}",
+                    f"chunk {chunk.chunk_index}",
+                ]
+
+                if pages:
+                    bits.append(pages)
+
+                if section:
+                    bits.append(section)
+
+                print_debug_status(" | ".join(bits))
+                print_debug_status(f"  excerpt: {_debug_excerpt(chunk.text)}")
+
+    print_debug_status("End semantic debug report")
+    print()
+
+
 def run_search(args: argparse.Namespace) -> int:
     """Run the kurrent search command."""
 
@@ -1855,6 +2086,16 @@ def run_search(args: argparse.Namespace) -> int:
             searcher = Searcher(state_store=store, embedder=embedder)
 
             offer_semantic_refresh_if_needed(store, embedder)
+
+            if args.debug:
+                print_semantic_debug_report(
+                    searcher,
+                    query,
+                    n_results=args.debug_candidates,
+                    max_distance=args.max_distance,
+                    include_reference_sections=args.include_reference_sections,
+                    grep_patterns=args.debug_grep,
+                )
 
             candidate_limit = args.limit
 
@@ -2619,7 +2860,7 @@ def run_converse(args: argparse.Namespace) -> int:
     """Run the kurrent converse command."""
 
     from kurrent.config import get_kurrent_state_paths
-    from kurrent.converser import ConverseEngine, ConverseError
+    from kurrent.converser import ConverseEngine, ConverseError, build_retrieval_query
     from kurrent.embedder import Embedder
     from kurrent.searcher import Searcher
     from kurrent.state_store import StateStore
@@ -2710,6 +2951,17 @@ def run_converse(args: argparse.Namespace) -> int:
                 ):
                     return 0
                 continue
+
+            if args.debug:
+                retrieval_query = build_retrieval_query(user_text, engine.state)
+                print_semantic_debug_report(
+                    searcher,
+                    retrieval_query,
+                    n_results=args.debug_candidates,
+                    max_distance=args.max_distance,
+                    include_reference_sections=args.include_reference_sections,
+                    grep_patterns=args.debug_grep,
+                )
 
             streamed_answer = False
             answer_printer = StreamingWrappedPrinter()
@@ -3327,6 +3579,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="include reference/bibliography chunks in semantic results.",
     )
     search_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="print semantic-retrieval diagnostics before normal results.",
+    )
+    search_parser.add_argument(
+        "--debug-candidates",
+        type=int,
+        default=30,
+        help="number of semantic candidates to print with --debug (default: 30).",
+    )
+    search_parser.add_argument(
+        "--debug-grep",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="with --debug, scan document metadata and current chunks for REGEX; repeatable.",
+    )
+    search_parser.add_argument(
         "--no-explain",
         action="store_true",
         help="disable background Ollama relevance judging for semantic search hits.",
@@ -3488,6 +3758,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-reference-sections",
         action="store_true",
         help="include reference/bibliography chunks in RAG evidence.",
+    )
+    converse_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="print semantic-retrieval diagnostics before each answer.",
+    )
+    converse_parser.add_argument(
+        "--debug-candidates",
+        type=int,
+        default=30,
+        help="number of semantic candidates to print with --debug (default: 30).",
+    )
+    converse_parser.add_argument(
+        "--debug-grep",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="with --debug, scan document metadata and current chunks for REGEX; repeatable.",
     )
     converse_parser.add_argument(
         "--ollama-model",
