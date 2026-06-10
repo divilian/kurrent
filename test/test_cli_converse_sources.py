@@ -470,3 +470,42 @@ def test_browse_converse_sources_accepts_edit_command(monkeypatch, tmp_path):
 
     assert result is edited_turn
     assert calls == [("1", "store-x")]
+
+
+def test_open_converse_source_opens_highlighted_pdf_to_matched_page(monkeypatch, tmp_path):
+    """If highlighting finds a better page within a passage range, open that page."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    highlighted_path = tmp_path / "paper-highlighted.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    highlighted_path.write_bytes(b"%PDF-1.4\n")
+    turn = make_turn(pdf_path=pdf_path)
+    opened = []
+
+    class FakeHighlightResult:
+        success = True
+        highlighted_pdf_path = highlighted_path
+        page = 4
+        message = None
+
+    class FakeOpenResult:
+        success = True
+        path = highlighted_path
+        page = 4
+        page_supported = True
+        message = None
+
+    monkeypatch.setattr(
+        cli,
+        "create_highlighted_pdf_for_research_interest",
+        lambda **kwargs: FakeHighlightResult(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "open_pdf",
+        lambda path, page=None: opened.append((path, page)) or FakeOpenResult(),
+    )
+
+    cli.open_converse_source(turn, "1")
+
+    assert opened == [(highlighted_path, 4)]

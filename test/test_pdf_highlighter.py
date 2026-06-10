@@ -92,3 +92,44 @@ def test_create_highlighted_pdf_fails_gracefully_when_excerpt_cannot_be_found(tm
     assert result.success is False
     assert result.highlighted_pdf_path is None
     assert "could not be located" in result.message
+
+
+def test_long_fallback_excerpt_is_not_highlighted_directly_when_selector_fails(tmp_path):
+    """Whole-chunk fallback text should not highlight page headers/title wholesale."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    make_pdf_with_text(
+        pdf_path,
+        "review articles journal header Article Title By Author. "
+        "This relevant paragraph is the passage that should be highlighted.",
+    )
+
+    long_fallback = " ".join(["review articles journal header Article Title By Author"] * 30)
+
+    result = pdf_highlighter.create_highlighted_pdf_for_research_interest(
+        pdf_path=pdf_path,
+        page_start=1,
+        research_interest="knowledge bases",
+        fallback_excerpt=long_fallback,
+        excerpt_selector=lambda page_text, query: None,
+        output_dir=tmp_path / "highlights",
+    )
+
+    assert result.success is False
+    assert result.highlighted_pdf_path is None
+    assert "No relevant excerpt" in result.message
+
+
+def test_ollama_prompt_anchors_highlight_to_specific_evidence_excerpt():
+    """The default LLM selector should receive the specific source evidence."""
+
+    messages = pdf_highlighter._ollama_excerpt_messages(
+        page_text="Page paragraph one. Page paragraph two.",
+        research_interest="personal knowledge bases",
+        evidence_excerpt="Specific evidence chunk for passage 1b.",
+    )
+
+    prompt = messages[1]["content"]
+    assert "Retrieved evidence excerpt for this specific source item" in prompt
+    assert "Specific evidence chunk for passage 1b" in prompt
+    assert "best corresponds to the retrieved evidence excerpt" in prompt

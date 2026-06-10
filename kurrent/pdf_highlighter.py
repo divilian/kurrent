@@ -28,6 +28,7 @@ DEFAULT_MAX_PAGE_TEXT_CHARS = 12_000
 DEFAULT_MIN_MATCH_SCORE = 0.72
 DEFAULT_MIN_EXCERPT_WORDS = 12
 DEFAULT_MAX_EXCERPT_WORDS = 120
+DEFAULT_MAX_HIGHLIGHT_PAGE_RANGE = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,12 +171,79 @@ def _truncate_word_count(text: str, min_words: int, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
+def _ollama_excerpt_messages(
+    page_text: str,
+    research_interest: str,
+    evidence_excerpt: str | None = None,
+) -> list[dict[str, str]]:
+    """Build messages for selecting a short page excerpt to highlight."""
+
+    page_text = collapse_whitespace(page_text)
+    research_interest = collapse_whitespace(research_interest)
+    evidence_excerpt = collapse_whitespace(evidence_excerpt or "")
+
+    if len(page_text) > DEFAULT_MAX_PAGE_TEXT_CHARS:
+        page_text = page_text[:DEFAULT_MAX_PAGE_TEXT_CHARS].rstrip() + " [...]"
+
+    evidence_block = ""
+    evidence_instruction = (
+        "Select the shortest contiguous excerpt from the page text that is most "
+        "relevant to the research interest."
+    )
+
+    if evidence_excerpt:
+        if len(evidence_excerpt) > DEFAULT_MAX_PAGE_TEXT_CHARS:
+            evidence_excerpt = evidence_excerpt[:DEFAULT_MAX_PAGE_TEXT_CHARS].rstrip() + " [...]"
+
+        evidence_block = f"""
+Retrieved evidence excerpt for this specific source item:
+{evidence_excerpt}
+""".strip()
+        evidence_instruction = (
+            "Select the shortest contiguous excerpt from the page text that best "
+            "corresponds to the retrieved evidence excerpt for this specific source "
+            "item, while still being relevant to the research interest."
+        )
+
+    system_message = (
+        "You select exact text spans from academic PDF pages. Return only JSON. "
+        "Do not paraphrase."
+    )
+    user_parts = [
+        f"Research interest:\n{research_interest}",
+    ]
+
+    if evidence_block:
+        user_parts.append(evidence_block)
+
+    user_parts.append(f"Page text:\n{page_text}")
+    user_parts.append(
+        f"""
+Task:
+{evidence_instruction} The excerpt must be copied verbatim from the page text,
+except that whitespace may be collapsed. Prefer 25-120 words. Do not select page
+headers, journal labels, title text, bylines, or boilerplate unless they are the
+only text that corresponds to the evidence. If no passage is meaningfully
+relevant, return an empty excerpt.
+
+Return exactly this JSON shape:
+{{"excerpt": "..."}}
+""".strip()
+    )
+
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
 def select_relevant_excerpt_with_ollama(
     page_text: str,
     research_interest: str,
     model: str = DEFAULT_OLLAMA_MODEL,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     timeout_seconds: float = DEFAULT_HIGHLIGHT_TIMEOUT_SECONDS,
+    evidence_excerpt: str | None = None,
 ) -> str | None:
     """Ask Ollama for an exact relevant excerpt copied from page_text."""
 
@@ -185,39 +253,16 @@ def select_relevant_excerpt_with_ollama(
     if not page_text or not research_interest:
         return None
 
-    if len(page_text) > DEFAULT_MAX_PAGE_TEXT_CHARS:
-        page_text = page_text[:DEFAULT_MAX_PAGE_TEXT_CHARS].rstrip() + " [...]"
-
-    system_message = (
-        "You select exact text spans from academic PDF pages. Return only JSON. "
-        "Do not paraphrase."
-    )
-    user_message = f"""
-Research interest:
-{research_interest}
-
-Page text:
-{page_text}
-
-Task:
-Select the shortest contiguous excerpt from the page text that is most relevant
-to the research interest. The excerpt must be copied verbatim from the page text,
-except that whitespace may be collapsed. Prefer 25-120 words. If no passage is
-meaningfully relevant, return an empty excerpt.
-
-Return exactly this JSON shape:
-{{"excerpt": "..."}}
-""".strip()
-
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-        ],
+        "messages": _ollama_excerpt_messages(
+            page_text,
+            research_interest,
+            evidence_excerpt=evidence_excerpt,
+        ),
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0},
+        "options": {"temperature": 0, "num_predict": 300},
     }
     api_url = f"{ollama_url.rstrip('/')}/api/chat"
     request = Request(
@@ -253,7 +298,6 @@ Return exactly this JSON shape:
         min_words=DEFAULT_MIN_EXCERPT_WORDS,
         max_words=DEFAULT_MAX_EXCERPT_WORDS,
     )
-
 
 def _exact_token_match(page_tokens: list[str], excerpt_tokens: list[str]) -> WordSpanMatch | None:
     """Return an exact contiguous token match, if available."""
@@ -321,6 +365,76 @@ def fuzzy_match_excerpt_to_words(
     return best
 
 
+
+def _fallback_excerpt_is_safe_direct_match(excerpt: str | None) -> bool:
+    """Return whether fallback text is short enough to match directly.
+
+    Evidence packets are often whole chunks. Directly matching a long chunk tends
+    to highlight the beginning of the chunk, including page headers and titles,
+    rather than the specific paragraph the user selected. Long evidence should be
+    used as context for the selector, not highlighted wholesale.
+    """
+
+    if not excerpt:
+        return False
+
+    token_count = len(normalized_tokens(excerpt))
+    return 0 < token_count <= DEFAULT_MAX_EXCERPT_WORDS
+
+
+def _candidate_pages(page_start: int, page_end: int | None, page_count: int) -> list[int]:
+    """Return 1-based candidate pages to inspect for a source passage."""
+
+    if page_end is None or page_end < page_start:
+        page_end = page_start
+
+    page_start = max(1, page_start)
+    page_end = min(page_end, page_count)
+
+    if page_start > page_end:
+        return []
+
+    if page_end - page_start + 1 > DEFAULT_MAX_HIGHLIGHT_PAGE_RANGE:
+        page_end = page_start + DEFAULT_MAX_HIGHLIGHT_PAGE_RANGE - 1
+
+    return list(range(page_start, page_end + 1))
+
+
+def _select_excerpt_for_page(
+    page_text: str,
+    research_interest: str,
+    fallback_excerpt: str | None,
+    excerpt_selector: ExcerptSelector | None,
+    model: str,
+    ollama_url: str,
+    timeout_seconds: float,
+) -> str | None:
+    """Select a short excerpt to highlight on one page."""
+
+    if excerpt_selector is not None:
+        excerpt = excerpt_selector(page_text, research_interest)
+    else:
+        excerpt = select_relevant_excerpt_with_ollama(
+            page_text,
+            research_interest,
+            model=model,
+            ollama_url=ollama_url,
+            timeout_seconds=timeout_seconds,
+            evidence_excerpt=fallback_excerpt,
+        )
+
+    if excerpt is not None and excerpt.strip():
+        return excerpt
+
+    if _fallback_excerpt_is_safe_direct_match(fallback_excerpt):
+        return _truncate_word_count(
+            fallback_excerpt or "",
+            min_words=DEFAULT_MIN_EXCERPT_WORDS,
+            max_words=DEFAULT_MAX_EXCERPT_WORDS,
+        )
+
+    return None
+
 def _line_rects_for_match(page_words: list[PageWord], match: WordSpanMatch):
     """Return one union rectangle per matched visual line."""
 
@@ -382,6 +496,7 @@ def create_highlighted_pdf_for_research_interest(
     pdf_path: str | Path,
     page_start: int | None,
     research_interest: str,
+    page_end: int | None = None,
     model: str = DEFAULT_OLLAMA_MODEL,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     timeout_seconds: float = DEFAULT_HIGHLIGHT_TIMEOUT_SECONDS,
@@ -441,9 +556,9 @@ def create_highlighted_pdf_for_research_interest(
         )
 
     try:
-        page_index = page - 1
+        candidate_pages = _candidate_pages(page, page_end, document.page_count)
 
-        if page_index < 0 or page_index >= document.page_count:
+        if not candidate_pages:
             return HighlightResult(
                 original_pdf_path=pdf_path,
                 highlighted_pdf_path=None,
@@ -452,83 +567,92 @@ def create_highlighted_pdf_for_research_interest(
                 message=f"Page {page} is outside the PDF page range.",
             )
 
-        pdf_page = document[page_index]
-        page_words = _page_words(pdf_page)
+        last_failure: HighlightResult | None = None
 
-        if not page_words:
-            return HighlightResult(
-                original_pdf_path=pdf_path,
-                highlighted_pdf_path=None,
-                page=page,
-                success=False,
-                message="No extractable words were found on this PDF page.",
-            )
+        for candidate_page in candidate_pages:
+            pdf_page = document[candidate_page - 1]
+            page_words = _page_words(pdf_page)
 
-        page_text = clean_page_text_from_words(page_words)
+            if not page_words:
+                last_failure = HighlightResult(
+                    original_pdf_path=pdf_path,
+                    highlighted_pdf_path=None,
+                    page=candidate_page,
+                    success=False,
+                    message="No extractable words were found on this PDF page.",
+                )
+                continue
 
-        if excerpt_selector is None:
-            excerpt_selector = lambda clean_text, interest: select_relevant_excerpt_with_ollama(
-                clean_text,
-                interest,
+            page_text = clean_page_text_from_words(page_words)
+            excerpt = _select_excerpt_for_page(
+                page_text=page_text,
+                research_interest=research_interest,
+                fallback_excerpt=fallback_excerpt,
+                excerpt_selector=excerpt_selector,
                 model=model,
                 ollama_url=ollama_url,
                 timeout_seconds=timeout_seconds,
             )
 
-        excerpt = excerpt_selector(page_text, research_interest)
+            if excerpt is None or not excerpt.strip():
+                last_failure = HighlightResult(
+                    original_pdf_path=pdf_path,
+                    highlighted_pdf_path=None,
+                    page=candidate_page,
+                    success=False,
+                    message="No relevant excerpt was selected for highlighting.",
+                )
+                continue
 
-        if excerpt is None and fallback_excerpt is not None:
-            excerpt = _truncate_word_count(
-                fallback_excerpt,
-                min_words=DEFAULT_MIN_EXCERPT_WORDS,
-                max_words=DEFAULT_MAX_EXCERPT_WORDS,
-            )
+            match = fuzzy_match_excerpt_to_words(page_words, excerpt)
 
-        if excerpt is None or not excerpt.strip():
+            if match is None:
+                last_failure = HighlightResult(
+                    original_pdf_path=pdf_path,
+                    highlighted_pdf_path=None,
+                    page=candidate_page,
+                    success=False,
+                    matched_excerpt=excerpt,
+                    message="Selected excerpt could not be located on the PDF page.",
+                )
+                continue
+
+            rects = _line_rects_for_match(page_words, match)
+
+            if not rects:
+                last_failure = HighlightResult(
+                    original_pdf_path=pdf_path,
+                    highlighted_pdf_path=None,
+                    page=candidate_page,
+                    success=False,
+                    matched_excerpt=excerpt,
+                    method=match.method,
+                    message="Matched excerpt had no highlightable rectangles.",
+                )
+                continue
+
+            _highlight_rects(pdf_page, rects)
+            output_path = _highlight_output_path(pdf_path, output_dir=output_dir)
+            document.save(output_path, garbage=4, deflate=True)
+
             return HighlightResult(
                 original_pdf_path=pdf_path,
-                highlighted_pdf_path=None,
-                page=page,
-                success=False,
-                message="No relevant excerpt was selected for highlighting.",
-            )
-
-        match = fuzzy_match_excerpt_to_words(page_words, excerpt)
-
-        if match is None:
-            return HighlightResult(
-                original_pdf_path=pdf_path,
-                highlighted_pdf_path=None,
-                page=page,
-                success=False,
-                matched_excerpt=excerpt,
-                message="Selected excerpt could not be located on the PDF page.",
-            )
-
-        rects = _line_rects_for_match(page_words, match)
-
-        if not rects:
-            return HighlightResult(
-                original_pdf_path=pdf_path,
-                highlighted_pdf_path=None,
-                page=page,
-                success=False,
+                highlighted_pdf_path=output_path,
+                page=candidate_page,
+                success=True,
                 matched_excerpt=excerpt,
                 method=match.method,
-                message="Matched excerpt had no highlightable rectangles.",
             )
 
-        _highlight_rects(pdf_page, rects)
-        output_path = _highlight_output_path(pdf_path, output_dir=output_dir)
-        document.save(output_path, garbage=4, deflate=True)
+        if last_failure is not None:
+            return last_failure
 
         return HighlightResult(
             original_pdf_path=pdf_path,
-            highlighted_pdf_path=output_path,
+            highlighted_pdf_path=None,
             page=page,
-            success=True,
-            matched_excerpt=excerpt,
-            method=match.method,
+            success=False,
+            message="No relevant excerpt was selected for highlighting.",
         )
     except Exception as exc:
         return HighlightResult(

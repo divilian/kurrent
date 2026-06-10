@@ -2307,6 +2307,7 @@ def open_converse_source(
         return
 
     pdf_path = passage.pdf_path
+    passage_page = passage.page_start
     purpose = f"source {shortcut}"
 
     if highlight and passage.page_start is not None and turn is not None:
@@ -2319,6 +2320,7 @@ def open_converse_source(
             pdf_path=passage.pdf_path,
             page_start=passage.page_start,
             research_interest=turn.user_text,
+            page_end=passage.page_end,
             model=ollama_model,
             ollama_url=ollama_url,
             timeout_seconds=ollama_timeout,
@@ -2327,6 +2329,9 @@ def open_converse_source(
 
         if highlight_result.success and highlight_result.highlighted_pdf_path is not None:
             pdf_path = highlight_result.highlighted_pdf_path
+            matched_page = getattr(highlight_result, "page", None)
+            if matched_page is not None:
+                passage_page = matched_page
             purpose = f"highlighted source {shortcut}"
         elif highlight_result.message:
             print_wrapped(
@@ -2336,7 +2341,7 @@ def open_converse_source(
                 )
             )
 
-    result = open_pdf(pdf_path, page=passage.page_start)
+    result = open_pdf(pdf_path, page=passage_page)
     print_wrapped(yellow_menu_text(open_pdf_result_message(result, purpose=purpose)))
 
 
