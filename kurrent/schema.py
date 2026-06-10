@@ -309,7 +309,13 @@ class VectorChunkMatch(ChunkIdProperties):
 
 @dataclass(frozen=True, slots=True)
 class ChunkHit(ChunkIdProperties):
-    """A chunk-level search result enriched with kurrent state."""
+    """A chunk-level search result enriched with kurrent state.
+
+    distance is the raw vector-search distance when the hit came from Chroma.
+    score is Kurrent's optional higher-is-better retrieval score, used by
+    hybrid search to rank semantic, lexical, and metadata-rescued candidates
+    together without overwriting the original vector distance.
+    """
 
     chunk_id: str
     distance: float | None
@@ -321,6 +327,8 @@ class ChunkHit(ChunkIdProperties):
     section_index: int | None = None
     section_number: str | None = None
     section_title: str | None = None
+    score: float | None = None
+    match_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

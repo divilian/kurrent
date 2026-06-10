@@ -68,7 +68,7 @@ def test_semantic_chunk_search_queries_embedder_with_expected_arguments(store):
     assert embedder.query_calls == [
         {
             "search_text": "bounded confidence models",
-            "n_results": 7,
+            "n_results": 40,
             "max_distance": 0.25,
             "exclude_doc_ids": ["doc-to-exclude"],
         }
@@ -128,29 +128,24 @@ def test_semantic_chunk_search_returns_enriched_chunk_hits(store):
 
     hits = searcher.semantic_chunk_search("semantic search", n_results=2)
 
-    assert hits == [
-        ChunkHit(
-            chunk_id=chunk_b.chunk_id,
-            distance=0.11,
-            text="Embeddings support semantic chunk search.",
-            path=Path("/tmp/doc-b.pdf"),
-            title="Document B",
-            page_start=8,
-            page_end=9,
-        ),
-        ChunkHit(
-            chunk_id=chunk_a.chunk_id,
-            distance=0.22,
-            text="SQLite stores durable kurrent state.",
-            path=Path("/tmp/doc-a.pdf"),
-            title="Document A",
-            page_start=3,
-            page_end=4,
-        ),
+    assert [hit.chunk_id for hit in hits] == [chunk_b.chunk_id, chunk_a.chunk_id]
+    assert [hit.distance for hit in hits] == [0.11, 0.22]
+    assert [hit.text for hit in hits] == [
+        "Embeddings support semantic chunk search.",
+        "SQLite stores durable kurrent state.",
     ]
+    assert [hit.path for hit in hits] == [
+        Path("/tmp/doc-b.pdf"),
+        Path("/tmp/doc-a.pdf"),
+    ]
+    assert [hit.title for hit in hits] == ["Document B", "Document A"]
+    assert [hit.page_start for hit in hits] == [8, 3]
+    assert [hit.page_end for hit in hits] == [9, 4]
+    assert hits[0].score is not None
+    assert "semantic" in hits[0].match_reasons
 
 
-def test_semantic_chunk_search_preserves_vector_match_order(store):
+def test_semantic_chunk_search_ranks_semantic_candidates_by_similarity(store):
     doc = make_document(doc_id="doc-a")
     store.insert_document(doc)
 
@@ -176,9 +171,9 @@ def test_semantic_chunk_search_preserves_vector_match_order(store):
     hits = searcher.semantic_chunk_search("some query", n_results=3)
 
     assert [hit.chunk_id for hit in hits] == [
-        chunks[2].chunk_id,
         chunks[0].chunk_id,
         chunks[1].chunk_id,
+        chunks[2].chunk_id,
     ]
 
 
@@ -280,7 +275,7 @@ def test_semantic_document_search_groups_chunks_by_document(store):
             title="Document A",
             authors="Alice A.",
             year=2020,
-            score=0.10,
+            score=0.90,
             best_chunk_id=chunk_a1.chunk_id,
         ),
         DocumentHit(
@@ -289,7 +284,7 @@ def test_semantic_document_search_groups_chunks_by_document(store):
             title="Document B",
             authors="Bob B.",
             year=2021,
-            score=0.20,
+            score=0.80,
             best_chunk_id=chunk_b0.chunk_id,
         ),
     ]
@@ -334,7 +329,7 @@ def test_semantic_document_search_ranks_by_best_chunk_distance(store):
         doc_b.doc_id,
         doc_c.doc_id,
     ]
-    assert [hit.score for hit in hits] == [0.10, 0.20, 0.40]
+    assert [hit.score for hit in hits] == [0.90, 0.80, 0.60]
     assert [hit.best_chunk_id for hit in hits] == [
         chunk_a1.chunk_id,
         chunk_b0.chunk_id,
@@ -397,7 +392,7 @@ def test_semantic_document_search_passes_arguments_to_chunk_search(store):
     assert embedder.query_calls == [
         {
             "search_text": "bounded confidence",
-            "n_results": 25,
+            "n_results": 125,
             "max_distance": 0.25,
             "exclude_doc_ids": None,
         }
@@ -438,3 +433,71 @@ def test_semantic_document_search_raises_for_missing_chunk(store):
             "orphaned vector result",
             max_documents=10,
         )
+
+
+def test_semantic_chunk_search_lexically_rescues_chunk_missing_from_vector_results(store):
+    doc_semantic = make_document(doc_id="doc-semantic", title="Semantic")
+    doc_lexical = make_document(doc_id="doc-lexical", title="Lexical")
+    store.insert_document(doc_semantic)
+    store.insert_document(doc_lexical)
+
+    semantic_chunk = make_chunk(
+        doc_semantic.doc_id,
+        0,
+        "A generic discussion of database systems.",
+    )
+    lexical_chunk = make_chunk(
+        doc_lexical.doc_id,
+        0,
+        "This article defines a personal knowledge base for scholars.",
+    )
+    store.insert_chunks([semantic_chunk, lexical_chunk])
+
+    embedder = FakeEmbedder(
+        matches=[VectorChunkMatch(chunk_id=semantic_chunk.chunk_id, distance=0.20)]
+    )
+    searcher = Searcher(state_store=store, embedder=embedder)
+
+    hits = searcher.semantic_chunk_search("personal knowledge base", n_results=2)
+
+    assert [hit.chunk_id for hit in hits] == [
+        lexical_chunk.chunk_id,
+        semantic_chunk.chunk_id,
+    ]
+    assert hits[0].distance is None
+    assert "lexical" in hits[0].match_reasons
+
+
+def test_semantic_chunk_search_metadata_rescues_document_missing_from_vector_results(store):
+    doc_semantic = make_document(doc_id="doc-semantic", title="Semantic")
+    doc_metadata = make_document(
+        doc_id="doc-metadata",
+        title="Still Building the Memex",
+        authors="Stephen Davies",
+        year=2011,
+    )
+    store.insert_document(doc_semantic)
+    store.insert_document(doc_metadata)
+
+    semantic_chunk = make_chunk(
+        doc_semantic.doc_id,
+        0,
+        "A generic discussion of memories and databases.",
+    )
+    metadata_chunk = make_chunk(
+        doc_metadata.doc_id,
+        0,
+        "This introduction motivates personal research tools.",
+    )
+    store.insert_chunks([semantic_chunk, metadata_chunk])
+
+    embedder = FakeEmbedder(
+        matches=[VectorChunkMatch(chunk_id=semantic_chunk.chunk_id, distance=0.20)]
+    )
+    searcher = Searcher(state_store=store, embedder=embedder)
+
+    hits = searcher.semantic_chunk_search("Still Building the Memex", n_results=2)
+
+    assert hits[0].chunk_id == metadata_chunk.chunk_id
+    assert hits[0].distance is None
+    assert "metadata" in hits[0].match_reasons

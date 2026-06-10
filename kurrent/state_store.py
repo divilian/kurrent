@@ -666,6 +666,214 @@ class StateStore:
             for row in rows
         ]
 
+    def search_chunks_by_any_terms(
+        self,
+        terms: list[str],
+        limit: int = 100,
+        chunker_version: str | None = None,
+    ) -> list[ChunkHit]:
+        """Return chunk hits containing at least one query term.
+
+        This is a broad lexical candidate-generation helper for hybrid search.
+        Ranking is intentionally left to Searcher, where semantic, lexical,
+        and metadata signals can be combined.
+        """
+
+        cleaned_terms = [term.strip() for term in terms if term.strip()]
+
+        if not cleaned_terms:
+            return []
+
+        where_clauses = []
+        values: list[object] = []
+
+        for term in cleaned_terms:
+            where_clauses.append("chunks.text LIKE ? ESCAPE '\\'")
+            values.append(self._like_search_pattern(term))
+
+        where_sql = " OR ".join(where_clauses)
+
+        if chunker_version is not None:
+            where_sql = f"({where_sql}) AND chunks.chunker_version = ?"
+            values.append(chunker_version)
+
+        values.append(limit)
+
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                chunks.doc_id,
+                chunks.chunker_version,
+                chunks.chunk_index,
+                chunks.text,
+                chunks.page_start,
+                chunks.page_end,
+                chunks.section_index,
+                chunks.section_number,
+                chunks.section_title,
+                documents.pdf_path,
+                documents.title
+            FROM chunks
+            JOIN documents
+              ON chunks.doc_id = documents.doc_id
+            WHERE {where_sql}
+            ORDER BY
+                documents.title IS NULL,
+                documents.title COLLATE NOCASE,
+                documents.pdf_path COLLATE NOCASE,
+                chunks.chunker_version,
+                chunks.chunk_index
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+
+        return [
+            ChunkHit(
+                chunk_id=make_chunk_id(
+                    row["doc_id"],
+                    row["chunker_version"],
+                    row["chunk_index"],
+                ),
+                distance=None,
+                text=row["text"],
+                path=normalize_path(row["pdf_path"]),
+                title=clean_title_metadata_text(row["title"]),
+                page_start=row["page_start"],
+                page_end=row["page_end"],
+                section_index=row["section_index"],
+                section_number=row["section_number"],
+                section_title=row["section_title"],
+            )
+            for row in rows
+        ]
+
+    def search_documents_by_metadata_terms(
+        self,
+        terms: list[str],
+        limit: int = 20,
+    ) -> list[Document]:
+        """Return documents whose metadata contains at least one query term.
+
+        This is a broad metadata candidate-generation helper for hybrid search.
+        Ranking is intentionally left to Searcher.
+        """
+
+        cleaned_terms = [term.strip() for term in terms if term.strip()]
+
+        if not cleaned_terms:
+            return []
+
+        term_clauses = []
+        values: list[object] = []
+
+        for term in cleaned_terms:
+            pattern = self._like_search_pattern(term)
+            term_clauses.append(
+                """
+                title LIKE ? ESCAPE '\\'
+                OR authors LIKE ? ESCAPE '\\'
+                OR CAST(year AS TEXT) LIKE ? ESCAPE '\\'
+                OR doi LIKE ? ESCAPE '\\'
+                OR pdf_path LIKE ? ESCAPE '\\'
+                """
+            )
+            values.extend([pattern, pattern, pattern, pattern, pattern])
+
+        where_sql = " OR ".join(f"({clause})" for clause in term_clauses)
+        values.append(limit)
+
+        rows = self.conn.execute(
+            f"""
+            SELECT *
+            FROM documents
+            WHERE {where_sql}
+            ORDER BY
+                year IS NULL,
+                year,
+                title IS NULL,
+                title COLLATE NOCASE,
+                pdf_path COLLATE NOCASE
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+
+        return [self._row_to_document(row) for row in rows]
+
+    def get_initial_chunks_for_documents(
+        self,
+        doc_ids: list[str],
+        chunker_version: str,
+        chunks_per_document: int = 2,
+    ) -> list[ChunkHit]:
+        """Return early chunks for a set of documents, enriched for display.
+
+        Metadata-only hits need representative chunk-level evidence before they
+        can participate in chunk-based RAG. Early chunks usually include title,
+        abstract, and introduction text, making them useful metadata rescue
+        candidates without flooding the candidate pool with entire documents.
+        """
+
+        if not doc_ids or chunks_per_document <= 0:
+            return []
+
+        placeholders = ", ".join("?" for _ in doc_ids)
+        values: list[object] = [*doc_ids, chunker_version, chunks_per_document]
+
+        rows = self.conn.execute(
+            f"""
+            WITH ranked_chunks AS (
+                SELECT
+                    chunks.doc_id,
+                    chunks.chunker_version,
+                    chunks.chunk_index,
+                    chunks.text,
+                    chunks.page_start,
+                    chunks.page_end,
+                    chunks.section_index,
+                    chunks.section_number,
+                    chunks.section_title,
+                    documents.pdf_path,
+                    documents.title,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY chunks.doc_id
+                        ORDER BY chunks.chunk_index
+                    ) AS chunk_rank
+                FROM chunks
+                JOIN documents
+                  ON chunks.doc_id = documents.doc_id
+                WHERE chunks.doc_id IN ({placeholders})
+                  AND chunks.chunker_version = ?
+            )
+            SELECT *
+            FROM ranked_chunks
+            WHERE chunk_rank <= ?
+            ORDER BY doc_id, chunk_index
+            """,
+            values,
+        ).fetchall()
+
+        return [
+            ChunkHit(
+                chunk_id=make_chunk_id(
+                    row["doc_id"],
+                    row["chunker_version"],
+                    row["chunk_index"],
+                ),
+                distance=None,
+                text=row["text"],
+                path=normalize_path(row["pdf_path"]),
+                title=clean_title_metadata_text(row["title"]),
+                page_start=row["page_start"],
+                page_end=row["page_end"],
+                section_index=row["section_index"],
+                section_number=row["section_number"],
+                section_title=row["section_title"],
+            )
+            for row in rows
+        ]
+
     def insert_proximity_alert(self, pa: ProximityAlertRecord) -> None:
         """
         Idempotent. If this PA has already been recorded in the DB, don't add
