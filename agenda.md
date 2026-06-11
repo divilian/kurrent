@@ -64,6 +64,15 @@
     - Note: We do _not_ use Chroma as the only database. Reason: Chroma is
       used primarily for semantic similarity search; SQLite stores durable
       relational application state.
+- Chunk text is stored in both SQLite and Chroma.
+    - SQLite remains the canonical home for clean chunk text, source browsing,
+    highlighting, provenance, and durable application state.
+    - Chroma stores a duplicate copy of the clean chunk text as a retrieval
+    convenience, so vector hits can return usable passage text directly.
+    - This duplication is acceptable for now: for a personal PDF corpus, the
+    extra text storage is small enough compared with the convenience win.
+    - Metadata-enriched embedding input is not stored as canonical chunk text.
+    It is constructed temporarily for embedding and discarded.
 - Chroma should be rebuildable without losing kurrent's durable state.
 - We like SQLite even though DuckDB exists, because SQLite is good at OLTP as
   opposed to OLAP. (kinda ret-con reasoning)
@@ -77,9 +86,9 @@
   Chroma, Zotero, the filesystem, PDF metadata, or DOI metadata.
 - SQLite stores durable kurrent state.
 - ChromaDB stores embeddings, retrieval metadata, and supports semantic
-  retrieval. (Note: it does _not_ store the chunk text itself. Instead, it
-  returns chunk IDs from similarity searches, and the chunk text is retrieved
-  from SQLite.)
+  retrieval. (It also stores a duplicate copy of the clean chunk text for
+  retrieval convenience. SQLite remains the canonical source of chunk text and
+  durable kurrent state, however.)
 
 ### Document and Chunk ID scheme
 

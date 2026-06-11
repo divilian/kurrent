@@ -13,8 +13,11 @@ from sentence_transformers import SentenceTransformer
 
 from kurrent.chunker import chunker_version
 from kurrent.file_utils import normalize_path
-from kurrent.pipeline import current_semantic_index_fingerprint
-from kurrent.schema import Chunk, VectorChunkMatch
+from kurrent.pipeline import (
+    SEMANTIC_EMBEDDING_INPUT_VERSION,
+    current_semantic_index_fingerprint,
+)
+from kurrent.schema import Chunk, Document, VectorChunkMatch
 from kurrent.state_store import StateStore
 
 __all__ = [
@@ -109,6 +112,12 @@ class Embedder:
     - target_chars_2000
       Chunker parameter. A different target chunk size produces different
       chunks and therefore different vectors.
+
+    - embedding_input_metadata-enriched-embedding-input-v1
+      Embedding-input construction and version. This records whether vectors
+      were produced from raw chunk text alone or from temporary text enriched
+      with document metadata such as title, authors, year, DOI, filename,
+      and section.
     
     - sentence-transformers_all-MiniLM-L6-v2
       Embedding model used to generate vectors. Embeddings from different
@@ -118,7 +127,8 @@ class Embedder:
     
       "This collection contains Kurrent chunk vectors built from PDFs
       extracted with this extractor, sectioned with this sectioner, chunked
-      with these chunking settings, and embedded with this embedding model."
+      with these chunking settings, prepared with this embedding-input recipe,
+      and embedded with this embedding model."
     
     The name is ugly, but useful: if any semantically relevant part of the
     pipeline changes, Kurrent naturally uses a different Chroma collection
@@ -163,9 +173,17 @@ class Embedder:
         if not chunks:
             raise ValueError(f"No chunks found for document: {doc_id}")
 
+        document = store.get_document(doc_id)
+        if document is None:
+            raise ValueError(f"Document metadata not found for document: {doc_id}")
+
         pipeline_fingerprint = store.get_document_pipeline_fingerprint(doc_id)
         texts = [chunk.text for chunk in chunks]
-        embeddings = self.generate_embeddings(texts)
+        embedding_texts = [
+            self.embedding_text_for_chunk(chunk, document)
+            for chunk in chunks
+        ]
+        embeddings = self.generate_embeddings(embedding_texts)
 
         self.collection.upsert(
             ids=[chunk.chunk_id for chunk in chunks],
@@ -206,6 +224,46 @@ class Embedder:
         """
         embeddings = self.model.encode(texts, convert_to_numpy=True)
         return embeddings.tolist()
+
+    @staticmethod
+    def embedding_text_for_chunk(chunk: Chunk, document: Document) -> str:
+        """Return the temporary metadata-enriched text used for embeddings.
+
+        The canonical chunk text stored in SQLite and shown to users remains
+        unchanged. This method builds the text that the embedding model sees so
+        every chunk vector can reflect document-level context such as title,
+        authors, year, DOI, filename, and section heading.
+        """
+
+        metadata_lines: list[str] = []
+
+        if document.title:
+            metadata_lines.append(f"Document title: {document.title}")
+
+        if document.authors:
+            metadata_lines.append(f"Authors: {document.authors}")
+
+        if document.year is not None:
+            metadata_lines.append(f"Year: {document.year}")
+
+        if document.doi:
+            metadata_lines.append(f"DOI: {document.doi}")
+
+        if document.pdf_path:
+            metadata_lines.append(f"PDF filename: {document.pdf_path.name}")
+
+        section_parts = [
+            part
+            for part in (chunk.section_number, chunk.section_title)
+            if part
+        ]
+        if section_parts:
+            metadata_lines.append(f"Section: {' '.join(section_parts)}")
+
+        if not metadata_lines:
+            return chunk.text
+
+        return "\n".join(metadata_lines) + "\n\n" + chunk.text
 
     @staticmethod
     def _make_collection_name(
@@ -255,6 +313,7 @@ class Embedder:
                 "model_name",
                 DEFAULT_EMBED_MODEL_NAME,
             ),
+            "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
         }
 
         if pipeline_fingerprint is not None:

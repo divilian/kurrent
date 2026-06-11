@@ -203,11 +203,23 @@ def test_ingest_pdf_with_embedder_indexes_chunks(
     assert metadata["chunk_index"] == 0
     assert metadata["text_sha256"] == chunks[0].text_sha256
     assert metadata["embedding_model"] == "fake-model"
+    assert metadata["embedding_input_version"] == (
+        "metadata-enriched-embedding-input-v1"
+    )
     assert metadata["page_start"] == 1
     assert metadata["page_end"] == 1
 
+    document = store.get_document(doc_id)
+    assert document is not None
+    expected_embedding_text = embedder.embedding_text_for_chunk(
+        chunks[0],
+        document,
+    )
+    assert expected_embedding_text != chunks[0].text
+    assert expected_embedding_text.endswith(chunks[0].text)
+
     assert list(results["embeddings"][0][:3]) == pytest.approx(
-        [17.0, 0.0, 1.0]
+        [float(len(expected_embedding_text)), 0.0, 1.0]
     )
 
 

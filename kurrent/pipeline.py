@@ -18,6 +18,7 @@ __all__ = [
     "PDF_TEXT_EXTRACTOR_VERSION",
     "PIPELINE_FINGERPRINT_VERSION",
     "SEMANTIC_INDEX_FINGERPRINT_VERSION",
+    "SEMANTIC_EMBEDDING_INPUT_VERSION",
     "SECTIONER_VERSION",
     "current_semantic_index_fingerprint",
     "current_text_pipeline_fingerprint",
@@ -31,6 +32,7 @@ LLM_SECTIONER_VERSION = "ollama-section-headings-v2"
 CHUNKER_ALGORITHM_VERSION = "section-aware-fixed-char-v2"
 PIPELINE_FINGERPRINT_VERSION = "text-pipeline-fingerprint-v1"
 SEMANTIC_INDEX_FINGERPRINT_VERSION = "semantic-index-fingerprint-v1"
+SEMANTIC_EMBEDDING_INPUT_VERSION = "metadata-enriched-embedding-input-v1"
 
 
 def _normalized_reviewed_headings_fingerprint(
@@ -106,6 +108,7 @@ def current_semantic_index_fingerprint(
     sectioner_version: str = SECTIONER_VERSION,
     llm_sectioner_version: str = LLM_SECTIONER_VERSION,
     chunker_algorithm_version: str = CHUNKER_ALGORITHM_VERSION,
+    embedding_input_version: str = SEMANTIC_EMBEDDING_INPUT_VERSION,
 ) -> str:
     """Return the fingerprint for the current semantic-search index namespace.
 
@@ -122,6 +125,7 @@ def current_semantic_index_fingerprint(
         f"llm_sectioner={llm_sectioner_version}",
         f"chunker={chunker_algorithm_version}",
         f"target_chars={target_chars}",
+        f"embedding_input={embedding_input_version}",
     ]
 
     return ";".join(parts)
