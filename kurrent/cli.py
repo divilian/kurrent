@@ -267,6 +267,7 @@ class ExistingDocumentStatus:
     document: object
     has_chunks: bool
     has_current_pipeline: bool
+    has_current_semantic_index: bool = True
     has_no_extractable_text: bool = False
 
 
@@ -476,6 +477,7 @@ def existing_document_status(
     pdf_path: Path,
     store,
     use_llm_sectioning: bool = True,
+    embedder=None,
 ) -> ExistingDocumentStatus | None:
     """Return existing-document status for this PDF content, if any."""
 
@@ -501,21 +503,38 @@ def existing_document_status(
         hasattr(store, "document_has_no_extractable_text")
         and store.document_has_no_extractable_text(existing.doc_id)
     )
+    has_current_pipeline = (
+        has_no_extractable_text
+        or (
+            bool(existing_chunks)
+            and store.document_has_current_pipeline(
+                existing.doc_id,
+                pipeline_fingerprint,
+            )
+        )
+    )
+
+    has_current_semantic_index = True
+    if (
+        has_current_pipeline
+        and bool(existing_chunks)
+        and embedder is not None
+        and hasattr(embedder, "has_document")
+    ):
+        try:
+            has_current_semantic_index = embedder.has_document(existing.doc_id)
+        except Exception:
+            # If Chroma cannot be checked here, keep ingest conservative: do
+            # not force a re-index attempt solely because the coverage check
+            # failed. Search/converse startup still performs its own check.
+            has_current_semantic_index = True
 
     return ExistingDocumentStatus(
         pdf_sha256=pdf_sha256,
         document=existing,
         has_chunks=bool(existing_chunks),
-        has_current_pipeline=(
-            has_no_extractable_text
-            or (
-                bool(existing_chunks)
-                and store.document_has_current_pipeline(
-                    existing.doc_id,
-                    pipeline_fingerprint,
-                )
-            )
-        ),
+        has_current_pipeline=has_current_pipeline,
+        has_current_semantic_index=has_current_semantic_index,
         has_no_extractable_text=has_no_extractable_text,
     )
 
@@ -553,6 +572,25 @@ def print_existing_document_needs_current_chunks_message(
     print_field("stored PDF", existing_document.pdf_path)
     print_wrapped(
         "Refreshing derived artifacts using the existing document record.",
+    )
+
+
+def print_existing_document_needs_semantic_index_message(
+    source_pdf_path: Path,
+    existing_document,
+) -> None:
+    """Explain that an existing document needs current semantic indexing."""
+
+    print()
+    print(f"Existing document: {source_pdf_path}", flush=True)
+    print_wrapped(
+        "Found existing current chunks for this PDF, but they are missing "
+        "from the current semantic search index.",
+    )
+    print_field("stored PDF", existing_document.pdf_path)
+    print_wrapped(
+        "Updating the current Chroma semantic index without re-extracting "
+        "or re-chunking the PDF.",
     )
 
 
@@ -686,9 +724,21 @@ def ingest_one_pdf(
         pdf_path,
         store,
         use_llm_sectioning=use_llm_sectioning,
+        embedder=embedder,
     )
 
     if existing_status is not None and existing_status.has_current_pipeline:
+        if not existing_status.has_current_semantic_index:
+            print_existing_document_needs_semantic_index_message(
+                source_pdf_path=pdf_path,
+                existing_document=existing_status.document,
+            )
+            embedder.index_chunks(existing_status.document.doc_id, store)
+            return IngestOutcome(
+                doc_id=existing_status.document.doc_id,
+                already_existed=True,
+            )
+
         print_already_ingested_message(
             source_pdf_path=pdf_path,
             existing_document=existing_status.document,

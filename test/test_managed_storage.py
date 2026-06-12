@@ -324,3 +324,106 @@ def test_missing_current_chunks_message_mentions_stale_pipeline(
         "has not been processed with the current "
         "extraction/sectioning/chunking pipeline" in output
     )
+
+
+def test_existing_document_status_reports_missing_current_semantic_index(tmp_path):
+    """Verify existing current chunks can still need Chroma indexing."""
+
+    from kurrent.chunker import chunker_version
+    from kurrent.pipeline import current_text_pipeline_fingerprint
+
+    source_pdf = write_fake_pdf(tmp_path / "paper.pdf", b"semantic gap\n")
+    pdf_sha256 = sha256_file(source_pdf)
+    document = Document.for_pdf(
+        pdf_path=source_pdf,
+        pdf_sha256=pdf_sha256,
+        storage_mode="external",
+        metadata=ExtractedMetadata(title="Existing Paper"),
+    )
+
+    class CurrentChunkStore(FakeStore):
+        def document_has_current_pipeline(self, doc_id, pipeline_fingerprint):
+            assert doc_id == document.doc_id
+            assert pipeline_fingerprint == current_text_pipeline_fingerprint()
+            return True
+
+    class MissingIndexEmbedder:
+        def has_document(self, doc_id):
+            assert doc_id == document.doc_id
+            return False
+
+    store = CurrentChunkStore()
+    store.insert_document(document)
+    store.current_chunks[(document.doc_id, chunker_version())] = [object()]
+
+    status = cli.existing_document_status(
+        source_pdf,
+        store,
+        embedder=MissingIndexEmbedder(),
+    )
+
+    assert status is not None
+    assert status.has_current_pipeline is True
+    assert status.has_current_semantic_index is False
+
+
+def test_ingest_one_pdf_reindexes_existing_current_chunks_when_semantic_index_missing(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """Verify ingest closes the SQLite/Chroma gap converse would otherwise catch."""
+
+    from kurrent.chunker import chunker_version
+
+    source_pdf = write_fake_pdf(tmp_path / "paper.pdf", b"semantic reindex\n")
+    pdf_sha256 = sha256_file(source_pdf)
+    document = Document.for_pdf(
+        pdf_path=source_pdf,
+        pdf_sha256=pdf_sha256,
+        storage_mode="external",
+        metadata=ExtractedMetadata(title="Existing Paper"),
+    )
+
+    class CurrentChunkStore(FakeStore):
+        def document_has_current_pipeline(self, doc_id, pipeline_fingerprint):
+            assert doc_id == document.doc_id
+            return True
+
+    class MissingIndexEmbedder(FakeEmbedder):
+        def has_document(self, doc_id):
+            assert doc_id == document.doc_id
+            return False
+
+    store = CurrentChunkStore()
+    store.insert_document(document)
+    store.current_chunks[(document.doc_id, chunker_version())] = [object()]
+    embedder = MissingIndexEmbedder()
+
+    def fail_extract_metadata(*args, **kwargs):
+        raise AssertionError("current reindex should not re-extract metadata")
+
+    monkeypatch.setattr(
+        "kurrent.metadata_extractor.extract_metadata",
+        fail_extract_metadata,
+    )
+
+    outcome = cli.ingest_one_pdf(
+        pdf_path=source_pdf,
+        store=store,
+        embedder=embedder,
+        doi_lookup=False,
+        crossref_mailto=None,
+        assume_yes=True,
+        use_llm_sectioning=True,
+        storage_mode="external",
+        managed_pdf_dir=None,
+    )
+
+    assert outcome.doc_id == document.doc_id
+    assert outcome.already_existed is True
+    assert embedder.indexed_doc_ids == [document.doc_id]
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert "missing from the current semantic search index" in output
+    assert "without re-extracting or re-chunking" in output
