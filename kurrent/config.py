@@ -13,6 +13,12 @@ __all__ = [
     "KURRENT_CHROMA_DIRNAME",
     "KURRENT_PDFS_DIRNAME",
     "CROSSREF_REQUEST_INTERVAL_SECONDS",
+    "DEFAULT_OLLAMA_URL",
+    "DEFAULT_RAG_LLM",
+    "DEFAULT_RELEVANCE_LLM",
+    "DEFAULT_METADATA_LLM",
+    "DEFAULT_PDF_EXCERPT_LLM",
+    "DEFAULT_SECTION_RECOGNITION_LLM",
     "KurrentStatePaths",
     "get_crossref_mailto",
     "get_default_kurrent_state_dir",
@@ -23,6 +29,40 @@ KURRENT_DB_FILENAME = "kurrent.db"
 KURRENT_CHROMA_DIRNAME = "chroma"
 KURRENT_PDFS_DIRNAME = "pdfs"
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
+
+# Ollama defaults by Kurrent LLM role.
+#
+# KURRENT_OLLAMA_MODEL remains a backward-compatible global fallback, but
+# role-specific environment variables are preferred when different local models
+# make sense for different jobs. RAG answer generation is the most user-visible
+# role and can be made heavier without forcing slower models onto smaller
+# classification/extraction tasks.
+DEFAULT_OLLAMA_URL = os.environ.get("KURRENT_OLLAMA_URL", "http://127.0.0.1:11434")
+_GLOBAL_OLLAMA_MODEL = os.environ.get("KURRENT_OLLAMA_MODEL")
+
+DEFAULT_RAG_LLM = os.environ.get(
+    "KURRENT_RAG_LLM",
+    os.environ.get(
+        "KURRENT_CONVERSE_LLM",
+        _GLOBAL_OLLAMA_MODEL or "qwen3:8b",
+    ),
+)
+DEFAULT_RELEVANCE_LLM = os.environ.get(
+    "KURRENT_RELEVANCE_LLM",
+    _GLOBAL_OLLAMA_MODEL or "llama3.1:8b-instruct-q4_K_M",
+)
+DEFAULT_METADATA_LLM = os.environ.get(
+    "KURRENT_METADATA_LLM",
+    _GLOBAL_OLLAMA_MODEL or "llama3.1:8b-instruct-q4_K_M",
+)
+DEFAULT_PDF_EXCERPT_LLM = os.environ.get(
+    "KURRENT_PDF_EXCERPT_LLM",
+    _GLOBAL_OLLAMA_MODEL or "llama3.1:8b-instruct-q4_K_M",
+)
+DEFAULT_SECTION_RECOGNITION_LLM = os.environ.get(
+    "KURRENT_SECTION_RECOGNITION_LLM",
+    _GLOBAL_OLLAMA_MODEL or "llama3.1:8b",
+)
 
 
 @dataclass(frozen=True, slots=True)

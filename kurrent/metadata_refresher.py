@@ -34,7 +34,7 @@ from kurrent.metadata_extractor import (
     lookup_crossref_metadata,
     looks_like_bad_title,
 )
-from kurrent.relevance_judge import DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
+from kurrent.config import DEFAULT_METADATA_LLM, DEFAULT_OLLAMA_URL
 from kurrent.schema import Document, ExtractedMetadata
 
 __all__ = [
@@ -54,6 +54,8 @@ __all__ = [
 RefreshMethod = Literal["auto", "crossref", "llm"]
 MetadataSource = Literal["crossref", "llm", "none"]
 ProgressCallback = Callable[[str], None]
+
+DEFAULT_OLLAMA_MODEL = DEFAULT_METADATA_LLM
 
 CURRENT_YEAR_CEILING = 2100
 BAD_AUTHOR_VALUES = {

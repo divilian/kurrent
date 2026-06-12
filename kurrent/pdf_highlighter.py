@@ -21,8 +21,9 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from kurrent.cli_display import collapse_whitespace
-from kurrent.relevance_judge import DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
+from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_PDF_EXCERPT_LLM
 
+DEFAULT_OLLAMA_MODEL = DEFAULT_PDF_EXCERPT_LLM
 DEFAULT_HIGHLIGHT_TIMEOUT_SECONDS = 45.0
 DEFAULT_MAX_PAGE_TEXT_CHARS = 12_000
 DEFAULT_MIN_MATCH_SCORE = 0.72

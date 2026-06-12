@@ -22,7 +22,7 @@ from kurrent.cli_display import (
     section_label,
     source_name_for_hit,
 )
-from kurrent.relevance_judge import DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL
+from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_RAG_LLM
 
 __all__ = [
     "DEFAULT_CONVERSE_TOP_K",
@@ -665,7 +665,7 @@ def _call_ollama_chat_streaming(
 
 def call_ollama_chat(
     messages: list[dict[str, str]],
-    model: str = DEFAULT_OLLAMA_MODEL,
+    model: str = DEFAULT_RAG_LLM,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     timeout_seconds: float = 120.0,
     token_callback: TokenCallback | None = None,
@@ -707,7 +707,7 @@ class ConverseEngine:
     def __init__(
         self,
         searcher: SearcherLike,
-        model: str = DEFAULT_OLLAMA_MODEL,
+        model: str = DEFAULT_RAG_LLM,
         ollama_url: str = DEFAULT_OLLAMA_URL,
         timeout_seconds: float = 120.0,
         top_k: int = DEFAULT_CONVERSE_TOP_K,

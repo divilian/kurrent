@@ -5,7 +5,6 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 import json
-import os
 import re
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -16,6 +15,7 @@ from kurrent.cli_display import (
     section_label,
     source_name_for_hit,
 )
+from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_RELEVANCE_LLM
 
 __all__ = [
     "DEFAULT_OLLAMA_URL",
@@ -25,11 +25,7 @@ __all__ = [
     "RelevanceJudgmentBuffer",
 ]
 
-DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_MODEL = os.environ.get(
-    "KURRENT_OLLAMA_MODEL",
-    "llama3.1:8b-instruct-q4_K_M",
-)
+DEFAULT_OLLAMA_MODEL = DEFAULT_RELEVANCE_LLM
 
 
 @dataclass(frozen=True, slots=True)

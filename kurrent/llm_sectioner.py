@@ -38,6 +38,7 @@ import sys
 from typing import Any
 from urllib import error, request
 
+from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_SECTION_RECOGNITION_LLM
 from kurrent.sectioner import HeadingCandidate, parse_section_heading
 
 __all__ = [
@@ -54,8 +55,7 @@ __all__ = [
     "select_section_headings_with_ollama",
 ]
 
-DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
+DEFAULT_OLLAMA_MODEL = DEFAULT_SECTION_RECOGNITION_LLM
 DEFAULT_OLLAMA_TIMEOUT_SECONDS = 120
 DEFAULT_OLLAMA_SINGLETON_TIMEOUT_SECONDS = 30
 DEFAULT_OLLAMA_NUM_PREDICT = 512
@@ -1596,11 +1596,8 @@ def select_section_headings_with_ollama(
     if not candidates:
         return []
 
-    model = model or os.environ.get("KURRENT_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
-    ollama_url = ollama_url or os.environ.get(
-        "KURRENT_OLLAMA_URL",
-        DEFAULT_OLLAMA_URL,
-    )
+    model = model or DEFAULT_OLLAMA_MODEL
+    ollama_url = ollama_url or DEFAULT_OLLAMA_URL
 
     if batch_size is None:
         batch_size = int(

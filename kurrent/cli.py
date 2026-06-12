@@ -53,9 +53,13 @@ from kurrent.cli_display import (
     separator_line,
     source_name_for_hit,
 )
-from kurrent.relevance_judge import (
-    DEFAULT_OLLAMA_MODEL,
+from kurrent.config import (
+    DEFAULT_METADATA_LLM,
     DEFAULT_OLLAMA_URL,
+    DEFAULT_RAG_LLM,
+    DEFAULT_RELEVANCE_LLM,
+)
+from kurrent.relevance_judge import (
     RelevanceJudgment,
     RelevanceJudgmentBuffer,
 )
@@ -2489,7 +2493,7 @@ class ConverseHighlightPrefetchCache:
 
     def __init__(
         self,
-        ollama_model: str = DEFAULT_OLLAMA_MODEL,
+        ollama_model: str = DEFAULT_RAG_LLM,
         ollama_url: str = DEFAULT_OLLAMA_URL,
         ollama_timeout: float = 45.0,
         max_workers: int = 2,
@@ -2605,7 +2609,7 @@ def edit_converse_source_metadata(turn, source_number_text: str, state_store=Non
 def open_converse_source(
     turn,
     source_number_text: str,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_model: str = DEFAULT_RAG_LLM,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     ollama_timeout: float = 45.0,
     highlight: bool = True,
@@ -2725,7 +2729,7 @@ def is_source_browser_quit(command: str) -> bool:
 
 def browse_converse_sources(
     turn,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_model: str = DEFAULT_RAG_LLM,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     ollama_timeout: float = 45.0,
     state_store=None,
@@ -2807,7 +2811,7 @@ def browse_converse_sources(
 def handle_converse_command(
     command: str,
     last_turn,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_model: str = DEFAULT_RAG_LLM,
     ollama_url: str = DEFAULT_OLLAMA_URL,
     ollama_timeout: float = 45.0,
 ) -> bool:
@@ -3603,10 +3607,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search_parser.add_argument(
         "--ollama-model",
-        default=DEFAULT_OLLAMA_MODEL,
+        default=DEFAULT_RELEVANCE_LLM,
         help=(
             "Ollama model used for semantic-hit relevance judging "
-            f"(default: {DEFAULT_OLLAMA_MODEL})."
+            f"(default: {DEFAULT_RELEVANCE_LLM})."
         ),
     )
     search_parser.add_argument(
@@ -3699,8 +3703,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh_metadata_parser.add_argument(
         "--ollama-model",
-        default=DEFAULT_OLLAMA_MODEL,
-        help=f"Ollama model used for fallback metadata extraction (default: {DEFAULT_OLLAMA_MODEL}).",
+        default=DEFAULT_METADATA_LLM,
+        help=f"Ollama model used for fallback metadata extraction (default: {DEFAULT_METADATA_LLM}).",
     )
     refresh_metadata_parser.add_argument(
         "--ollama-url",
@@ -3778,20 +3782,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --debug, scan document metadata and current chunks for REGEX; repeatable.",
     )
     converse_parser.add_argument(
-        "--ollama-model",
-        default=DEFAULT_OLLAMA_MODEL,
-        help=f"Ollama model used for RAG answers (default: {DEFAULT_OLLAMA_MODEL}).",
+        "--ollama-RAG-model",
+        dest="ollama_model",
+        default=DEFAULT_RAG_LLM,
+        help=(
+            "Ollama model used for RAG answers "
+            f"(default: {DEFAULT_RAG_LLM}). This affects only Kurrent's "
+            "RAG interface; see config.py to change which Ollama model is "
+            "used for Kurrent's non-RAG LLM functions."
+        ),
     )
     converse_parser.add_argument(
-        "--ollama-url",
+        "--ollama-model",
+        dest="ollama_model",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    converse_parser.add_argument(
+        "--ollama-RAG-url",
+        dest="ollama_url",
         default=DEFAULT_OLLAMA_URL,
         help=f"Ollama base URL for RAG answers (default: {DEFAULT_OLLAMA_URL}).",
     )
     converse_parser.add_argument(
-        "--ollama-timeout",
+        "--ollama-url",
+        dest="ollama_url",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    converse_parser.add_argument(
+        "--ollama-RAG-timeout",
+        dest="ollama_timeout",
         type=float,
         default=120.0,
         help="seconds before one Ollama RAG answer request times out.",
+    )
+    converse_parser.add_argument(
+        "--ollama-timeout",
+        dest="ollama_timeout",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     converse_parser.add_argument(
         "research_question",
