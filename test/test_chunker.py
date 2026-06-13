@@ -351,3 +351,59 @@ def test_huge_pdf_guard_can_be_disabled_with_zero_cutoff(monkeypatch, tmp_path):
     assert should_skip is False
     assert page_count == 1
     assert cutoff == 0
+
+
+def test_make_section_spans_with_llm_falls_back_after_repeated_ollama_failures(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """Verify repeated section-LLM failures fall back to rules-based sections."""
+
+    from kurrent.llm_sectioner import LLMSectioningUnavailableError
+    from kurrent.sectioner import HeadingCandidate
+    import kurrent.chunker as chunker
+
+    pdf_path = write_pdf(
+        tmp_path / "paper.pdf",
+        ["I. INTRODUCTION\nThis is body text.\nII. MODEL\nMore body text."],
+    )
+
+    candidates = [
+        HeadingCandidate(
+            candidate_id=0,
+            line_index=0,
+            page=1,
+            line_text="I. INTRODUCTION",
+            previous_lines=[],
+            next_lines=["This is body text."],
+            features={},
+            candidate_text="I. INTRODUCTION",
+        ),
+    ]
+
+    monkeypatch.setattr(
+        chunker,
+        "detect_heading_candidates_with_context",
+        lambda **_kwargs: candidates,
+    )
+
+    def fail_section_llm(*_args, **_kwargs):
+        raise LLMSectioningUnavailableError(
+            "Ollama failed on repeated section-heading candidates; "
+            "falling back to rules-based sectioning for this document."
+        )
+
+    monkeypatch.setattr(
+        "kurrent.llm_sectioner.select_section_headings_with_ollama",
+        fail_section_llm,
+    )
+
+    sections = chunker.make_section_spans_with_llm(
+        pdf_path=pdf_path,
+        doc_id="doc-1",
+    )
+
+    assert sections
+    assert any(section.section_title == "INTRODUCTION" for section in sections)
+    assert "falling back to rules-based sectioning" in capsys.readouterr().err

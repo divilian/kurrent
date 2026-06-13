@@ -49,6 +49,7 @@ __all__ = [
     "DEFAULT_OLLAMA_NUM_PREDICT",
     "DEFAULT_OLLAMA_BATCH_SIZE",
     "OllamaTimeoutError",
+    "LLMSectioningUnavailableError",
     "SectionHeadingDecision",
     "candidate_to_prompt_dict",
     "filtered_candidates",
@@ -60,6 +61,7 @@ DEFAULT_OLLAMA_TIMEOUT_SECONDS = 120
 DEFAULT_OLLAMA_SINGLETON_TIMEOUT_SECONDS = 30
 DEFAULT_OLLAMA_NUM_PREDICT = 512
 DEFAULT_OLLAMA_BATCH_SIZE = 1
+DEFAULT_OLLAMA_MAX_CONSECUTIVE_FAILURES = 2
 
 
 COMMON_HEADING_TITLES = {
@@ -173,6 +175,14 @@ MODEL_OR_LEGEND_WORDS = {
 
 class OllamaTimeoutError(RuntimeError):
     """Raised when Ollama does not answer before the request timeout."""
+
+
+class LLMSectioningUnavailableError(RuntimeError):
+    """Raised when Ollama failures make LLM sectioning impractical."""
+
+
+class _HeadingCandidateFailedError(RuntimeError):
+    """Raised internally when one candidate cannot be classified by Ollama."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1478,7 +1488,10 @@ def _select_heading_batch_with_timeout_fallback(
             f"{_candidate_text_for_filtering(candidate)!r}",
             file=sys.stderr,
         )
-        return []
+        raise _HeadingCandidateFailedError(
+            "Ollama could not classify heading candidate "
+            f"candidate_id={candidate.candidate_id} on page {candidate.page}."
+        )
 
     midpoint = len(candidates) // 2
     left = candidates[:midpoint]
@@ -1572,6 +1585,7 @@ def select_section_headings_with_ollama(
     timeout_seconds: int | None = None,
     singleton_timeout_seconds: int | None = None,
     num_predict: int | None = None,
+    max_consecutive_failures: int | None = None,
     progress_total_callback: Callable[[int], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
 ) -> list[SectionHeadingDecision]:
@@ -1631,11 +1645,20 @@ def select_section_headings_with_ollama(
             )
         )
 
+    if max_consecutive_failures is None:
+        max_consecutive_failures = int(
+            os.environ.get(
+                "KURRENT_OLLAMA_MAX_CONSECUTIVE_SECTION_FAILURES",
+                DEFAULT_OLLAMA_MAX_CONSECUTIVE_FAILURES,
+            )
+        )
+
     decisions: list[SectionHeadingDecision] = []
+    consecutive_failures = 0
 
     for batch in _chunked_candidates(candidates, batch_size):
-        decisions.extend(
-            _select_heading_batch_with_timeout_fallback(
+        try:
+            batch_decisions = _select_heading_batch_with_timeout_fallback(
                 candidates=batch,
                 model=model,
                 ollama_url=ollama_url,
@@ -1644,7 +1667,28 @@ def select_section_headings_with_ollama(
                 singleton_timeout_seconds=singleton_timeout_seconds,
                 num_predict=num_predict,
             )
-        )
+        except _HeadingCandidateFailedError as exc:
+            consecutive_failures += 1
+
+            if progress_callback is not None:
+                progress_callback(len(batch))
+
+            if max_consecutive_failures <= 0 or consecutive_failures < max_consecutive_failures:
+                continue
+
+            raise LLMSectioningUnavailableError(
+                "Ollama failed on "
+                f"{consecutive_failures} consecutive section-heading candidate(s); "
+                "falling back to rules-based sectioning for this document."
+            ) from exc
+        except RuntimeError as exc:
+            raise LLMSectioningUnavailableError(
+                "Ollama was unavailable while selecting section headings; "
+                "falling back to rules-based sectioning for this document."
+            ) from exc
+
+        consecutive_failures = 0
+        decisions.extend(batch_decisions)
 
         if progress_callback is not None:
             progress_callback(len(batch))

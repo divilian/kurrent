@@ -770,6 +770,7 @@ def ingest_one_pdf(
             use_llm_sectioning=use_llm_sectioning,
         )
     else:
+        open_pdf_for_metadata_review(pdf_path)
         metadata = review_metadata(metadata)
         metadata_was_reviewed = True
         reviewed_headings = review_section_headings(
@@ -1507,6 +1508,17 @@ def open_document_pdf(document_or_hit, *, purpose: str = "PDF") -> None:
 
     result = open_pdf(path)
     print(open_pdf_result_message(result, purpose=purpose))
+
+
+def open_pdf_for_metadata_review(pdf_path: Path) -> None:
+    """Best-effort open of a PDF before ingest metadata review."""
+
+    print()
+    print("(Opening PDF so you can inspect title/authors/year/DOI.)")
+
+    result = open_pdf(pdf_path)
+    if not result.success:
+        print_wrapped(result.message or f"Could not open PDF: {pdf_path}")
 
 
 def open_pdf_for_metadata_edit(document) -> None:

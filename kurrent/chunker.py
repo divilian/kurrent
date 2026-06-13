@@ -235,17 +235,32 @@ def make_section_spans_with_llm(
 ) -> list[SectionSpan]:
     """Detect sections with the LLM-assisted HeadingCandidate pipeline."""
 
-    from kurrent.llm_sectioner import select_section_headings_with_ollama
+    from kurrent.llm_sectioner import (
+        LLMSectioningUnavailableError,
+        select_section_headings_with_ollama,
+    )
 
     candidates = detect_heading_candidates_with_context(
         pdf_path=pdf_path,
         max_pages=max_pages,
     )
-    decisions = select_section_headings_with_ollama(
-        candidates,
-        progress_total_callback=progress_total_callback,
-        progress_callback=progress_callback,
-    )
+    try:
+        decisions = select_section_headings_with_ollama(
+            candidates,
+            progress_total_callback=progress_total_callback,
+            progress_callback=progress_callback,
+        )
+    except LLMSectioningUnavailableError as exc:
+        print(
+            f"Warning: {exc}",
+            file=sys.stderr,
+        )
+        headings = detect_heading_candidates(pdf_path)
+        return make_section_spans_from_headings(
+            pdf_path=pdf_path,
+            doc_id=doc_id,
+            headings=headings,
+        )
 
     return make_section_spans_from_llm_decisions(
         pdf_path=pdf_path,

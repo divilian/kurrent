@@ -502,6 +502,55 @@ def test_present_document_hits_open_choice_opens_pdf(monkeypatch, tmp_path, caps
     assert f"Opened PDF: {pdf_path}" in output
 
 
+def test_ingest_metadata_review_opens_pdf_without_repeating_path(monkeypatch, tmp_path, capsys):
+    """Ingest metadata review should open the PDF quietly before metadata prompts."""
+
+    from types import SimpleNamespace
+
+    from kurrent.schema import ExtractedMetadata
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    opened = []
+    answers = iter(["", "", "", ""])
+
+    def fake_input(prompt):
+        print(prompt, end="")
+        return next(answers)
+
+    def fake_open_pdf(path, page=None):
+        opened.append((Path(path), page))
+        return SimpleNamespace(
+            success=True,
+            message=None,
+            path=Path(path),
+            page=page,
+            page_supported=False,
+        )
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(cli, "open_pdf", fake_open_pdf)
+
+    metadata = ExtractedMetadata(
+        title="Cooperation, social networks",
+        authors="Martín G. Zimmermann, Víctor M. Eguíluz",
+        year=2005,
+        doi="10.1103/physreve.72.056118",
+    )
+
+    cli.open_pdf_for_metadata_review(pdf_path)
+    reviewed = cli.review_metadata(metadata)
+
+    assert reviewed == metadata
+    assert opened == [(pdf_path, None)]
+
+    output = capsys.readouterr().out
+    assert "(Opening PDF so you can inspect title/authors/year/DOI.)" in output
+    assert f"Opened PDF: {pdf_path}" not in output
+    assert output.index("(Opening PDF") < output.index("Metadata")
+    assert output.index("Type corrected values where needed.") < output.index("title [")
+
+
 def test_present_document_hits_rejects_open_when_pdf_missing(monkeypatch, tmp_path, capsys):
     """The open command should not run for a missing PDF path."""
 

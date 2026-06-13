@@ -61,7 +61,7 @@ DEFAULT_PDF_EXCERPT_LLM = os.environ.get(
 )
 DEFAULT_SECTION_RECOGNITION_LLM = os.environ.get(
     "KURRENT_SECTION_RECOGNITION_LLM",
-    _GLOBAL_OLLAMA_MODEL or "llama3.1:8b",
+    _GLOBAL_OLLAMA_MODEL or "llama3.2:3b",
 )
 
 
