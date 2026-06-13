@@ -5,8 +5,8 @@ Currently supported:
     kurrent ingest file.pdf
     kurrent ingest --in-place file.pdf
     kurrent ingest --local-metadata file.pdf
-    kurrent ingest -r directoryOfPdfs
-    kurrent ingest -y -r directoryOfPdfs
+    kurrent ingest directoryOfPdfs
+    kurrent ingest -y directoryOfPdfs
     kurrent search QUERY...
     kurrent search --metadata QUERY...
     kurrent search --text QUERY...
@@ -140,10 +140,11 @@ def print_debug_status(message: str) -> None:
 def print_gray_status(message: str) -> None:
     """Print a low-priority startup/progress message immediately."""
 
-    # Use plain print instead of print_wrapped() so the visual one-space
-    # indentation is preserved. print_wrapped() intentionally normalizes
+    # Keep the visual indentation outside the ANSI-colored span so tests, logs,
+    # and terminals all see the line as starting with one plain space.
+    # print_wrapped() is intentionally not used here because it normalizes
     # leading whitespace away for prose paragraphs.
-    print(gray_status_text(f" {message}"))
+    print(f" {gray_status_text(message)}")
     sys.stdout.flush()
 
 
@@ -754,9 +755,6 @@ def ingest_one_pdf(
             existing_document=existing_status.document,
         )
 
-    print()
-    print(f"PDF: {pdf_path}", flush=True)
-
     metadata = extract_metadata(
         pdf_path,
         doi_lookup=doi_lookup,
@@ -838,50 +836,33 @@ def ingest_one_pdf(
     return outcome
 
 
-def ingest_targets(path: Path, recursive: bool) -> list[Path]:
-    """Return PDF paths selected by CLI arguments."""
+def ingest_targets(path: Path) -> list[Path]:
+    """Return PDF paths selected by CLI arguments.
+
+    A file path selects that one PDF. A directory path automatically selects all
+    PDFs below it recursively.
+    """
 
     from kurrent.file_utils import is_pdf, normalize_path
 
     path = normalize_path(path)
 
-    if recursive:
-        if path.is_file():
-            raise CliUsageError(
-                "Recursive ingest requires a directory. "
-                f"Got a file instead: {path}"
-            )
+    if not path.exists():
+        raise CliUsageError(f"No such path: {path}")
 
-        if not path.exists():
-            raise CliUsageError(
-                "Recursive ingest requires a directory. "
-                f"No such path exists: {path}"
-            )
-
-        if not path.is_dir():
-            raise CliUsageError(
-                "Recursive ingest requires a directory. "
-                f"Got a non-directory path instead: {path}"
-            )
-
+    if path.is_dir():
         return sorted(
             candidate
             for candidate in path.rglob("*")
             if candidate.is_file() and candidate.suffix.lower() == ".pdf"
         )
 
-    if path.is_dir():
-        raise CliUsageError(
-            "Directory ingest requires -r/--recursive. "
-            f"Got a directory: {path}"
-        )
-
-    if not path.exists():
-        raise CliUsageError(f"No such PDF file: {path}")
+    if not path.is_file():
+        raise CliUsageError(f"Ingest requires a PDF file or directory. Got: {path}")
 
     if not is_pdf(path):
         raise CliUsageError(
-            "Ingest requires a PDF file. "
+            "Ingest requires a PDF file or directory. "
             f"Got a non-PDF path: {path}"
         )
 
@@ -3317,7 +3298,7 @@ def run_refresh_metadata(args: argparse.Namespace) -> int:
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""
 
-    print("Starting kurrent ingest...", flush=True)
+    print_gray_status("Starting kurrent ingest...")
 
     from kurrent.config import get_crossref_mailto, get_kurrent_state_paths
 
@@ -3325,19 +3306,18 @@ def run_ingest(args: argparse.Namespace) -> int:
     storage_mode = "external" if args.in_place else "managed"
 
     if state_paths.state_dir.exists():
-        print(f"kurrent state directory: {state_paths.state_dir}", flush=True)
+        print_gray_status(f"kurrent state directory: {state_paths.state_dir}")
     else:
-        print(
+        print_gray_status(
             "kurrent state directory does not exist; creating it now: "
-            f"{state_paths.state_dir}",
-            flush=True,
+            f"{state_paths.state_dir}"
         )
         state_paths.state_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Finding PDFs...", flush=True)
+    print_gray_status("Finding PDFs...")
 
     try:
-        pdf_paths = ingest_targets(args.path, recursive=args.recursive)
+        pdf_paths = ingest_targets(args.path)
     except CliUsageError as exc:
         print()
         print_usage_error(str(exc))
@@ -3350,48 +3330,45 @@ def run_ingest(args: argparse.Namespace) -> int:
     doi_lookup = args.metadata_mode == "crossref"
     crossref_mailto = get_crossref_mailto()
 
-    print(f"PDFs selected:           {len(pdf_paths)}", flush=True)
+    print_gray_status(f"PDFs selected:           {len(pdf_paths)}")
 
     if state_paths.sqlite_path.exists():
-        print(f"SQLite database:         {state_paths.sqlite_path}", flush=True)
+        print_gray_status(f"SQLite database:         {state_paths.sqlite_path}")
     else:
-        print(
+        print_gray_status(
             "SQLite database does not exist; it will be created: "
-            f"{state_paths.sqlite_path}",
-            flush=True,
+            f"{state_paths.sqlite_path}"
         )
 
     if state_paths.chroma_path.exists():
-        print(f"Chroma directory:        {state_paths.chroma_path}", flush=True)
+        print_gray_status(f"Chroma directory:        {state_paths.chroma_path}")
     else:
-        print(
+        print_gray_status(
             "Chroma directory does not exist; it will be created: "
-            f"{state_paths.chroma_path}",
-            flush=True,
+            f"{state_paths.chroma_path}"
         )
 
     if storage_mode == "managed":
         if state_paths.pdfs_path.exists():
-            print(f"Managed PDF directory:   {state_paths.pdfs_path}", flush=True)
+            print_gray_status(f"Managed PDF directory:   {state_paths.pdfs_path}")
         else:
-            print(
+            print_gray_status(
                 "Managed PDF directory does not exist; it will be created: "
-                f"{state_paths.pdfs_path}",
-                flush=True,
+                f"{state_paths.pdfs_path}"
             )
 
-    print(
+    print_gray_status(
         "PDF storage mode:        "
-        + ("managed" if storage_mode == "managed" else "in-place"),
+        + ("managed" if storage_mode == "managed" else "in-place")
     )
-    print(f"Metadata mode:           {args.metadata_mode}", flush=True)
-    print(
+    print_gray_status(f"Metadata mode:           {args.metadata_mode}")
+    print_gray_status(
         "Sectioning mode:         "
         + (
             "rules-based"
             if args.rules_based_sections
             else "LLM-assisted"
-        ),
+        )
     )
 
     if doi_lookup and crossref_mailto is None:
@@ -3403,16 +3380,16 @@ def run_ingest(args: argparse.Namespace) -> int:
         )
 
     print()
-    print("Loading kurrent state store...", flush=True)
+    print_gray_status("Loading kurrent state store...")
     from kurrent.state_store import StateStore
 
-    print("Loading embedding model / Chroma index...", flush=True)
+    print_gray_status("Loading embedding model / Chroma index...")
     from kurrent.embedder import Embedder
 
     store = StateStore(state_paths.sqlite_path)
     embedder = Embedder(chroma_path=state_paths.chroma_path)
 
-    print("Ready. Beginning PDF ingest.", flush=True)
+    print_gray_status("Ready. Beginning PDF ingest.")
 
     results: list[IngestResult] = []
 
@@ -3530,13 +3507,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "path",
         type=Path,
-        help="PDF file, or directory when -r/--recursive is supplied.",
-    )
-    ingest_parser.add_argument(
-        "-r",
-        "--recursive",
-        action="store_true",
-        help="recursively ingest PDFs under a directory.",
+        help="PDF file, or directory of PDFs to ingest recursively.",
     )
     ingest_parser.add_argument(
         "-y",

@@ -15,7 +15,6 @@ def test_ingest_defaults_to_crossref_metadata():
     assert args.command == "ingest"
     assert args.path == Path("paper.pdf")
     assert args.metadata_mode == "crossref"
-    assert args.recursive is False
     assert args.assume_yes is False
 
 
@@ -53,14 +52,13 @@ def test_metadata_flags_are_mutually_exclusive():
         )
 
 
-def test_recursive_and_yes_flags_parse_together():
-    """Verify that -y and -r can be combined for noninteractive batch ingest."""
+def test_yes_flag_parses_for_batch_ingest():
+    """Verify that -y can be combined with directory ingest."""
 
     parser = cli.build_parser()
-    args = parser.parse_args(["ingest", "-y", "-r", "pdfs"])
+    args = parser.parse_args(["ingest", "-y", "pdfs"])
 
     assert args.path == Path("pdfs")
-    assert args.recursive is True
     assert args.assume_yes is True
 
 
@@ -87,32 +85,29 @@ def test_ingest_targets_accepts_single_pdf(tmp_path):
     pdf_path = tmp_path / "paper.pdf"
     pdf_path.write_bytes(b"%PDF- fake test pdf")
 
-    targets = cli.ingest_targets(pdf_path, recursive=False)
+    targets = cli.ingest_targets(pdf_path)
 
     assert targets == [pdf_path.resolve()]
 
 
-def test_ingest_targets_rejects_directory_without_recursive(tmp_path):
-    """Verify that directory ingest requires -r/--recursive."""
-
-    with pytest.raises(cli.CliUsageError) as excinfo:
-        cli.ingest_targets(tmp_path, recursive=False)
-
-    assert "Directory ingest requires -r/--recursive" in str(excinfo.value)
-    assert str(tmp_path) in str(excinfo.value)
-
-
-def test_recursive_ingest_rejects_file(tmp_path):
-    """Verify that recursive ingest requires a directory, not a file."""
+def test_ingest_targets_accepts_directory_recursively(tmp_path):
+    """Verify that a directory path automatically selects PDFs recursively."""
 
     pdf_path = tmp_path / "paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
 
-    with pytest.raises(cli.CliUsageError) as excinfo:
-        cli.ingest_targets(pdf_path, recursive=True)
+    targets = cli.ingest_targets(tmp_path)
 
-    assert "Recursive ingest requires a directory" in str(excinfo.value)
-    assert "Got a file instead" in str(excinfo.value)
+    assert targets == [pdf_path.resolve()]
+
+
+def test_ingest_parser_rejects_removed_recursive_flag():
+    """Verify that the old -r flag is no longer part of the ingest interface."""
+
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ingest", "-r", "pdfs"])
 
 
 def test_ingest_targets_recursively_finds_pdfs(tmp_path):
@@ -127,7 +122,7 @@ def test_ingest_targets_recursively_finds_pdfs(tmp_path):
     second_pdf.write_bytes(b"%PDF- second")
     non_pdf.write_text("not a PDF", encoding="utf-8")
 
-    targets = cli.ingest_targets(tmp_path, recursive=True)
+    targets = cli.ingest_targets(tmp_path)
 
     assert targets == sorted([first_pdf.resolve(), second_pdf.resolve()])
 
@@ -640,3 +635,83 @@ def test_print_semantic_debug_report_prints_semantic_and_grep_sections(capsys, t
     assert "Metadata search hits for full query" in output
     assert "Grep diagnostics for /memex|PKB/i" in output
     assert "Still Building the Memex" in output
+
+
+def test_ingest_startup_status_lines_are_indented_like_converse(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """Verify ingest's startup narrative uses the muted one-space status style."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    state_dir = tmp_path / "state"
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.path = path
+
+        def close(self):
+            pass
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+    def fake_ingest_one_pdf(**kwargs):
+        return cli.IngestOutcome(doc_id="doc-1", already_existed=False)
+
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.state_store",
+        types.SimpleNamespace(StateStore=FakeStateStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.embedder",
+        types.SimpleNamespace(Embedder=FakeEmbedder),
+    )
+    monkeypatch.setattr(cli, "ingest_one_pdf", fake_ingest_one_pdf)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--state-dir",
+            str(state_dir),
+            "ingest",
+            "--local-metadata",
+            str(pdf_path),
+        ]
+    )
+
+    assert cli.run_ingest(args) == 0
+
+    output_lines = capsys.readouterr().out.splitlines()
+    startup_lines = [
+        line
+        for line in output_lines
+        if line.lstrip().startswith(
+            (
+                "Starting kurrent ingest...",
+                "kurrent state directory",
+                "Finding PDFs...",
+                "PDFs selected:           ",
+                "SQLite database",
+                "Chroma directory",
+                "Managed PDF directory",
+                "PDF storage mode:",
+                "Metadata mode:",
+                "Sectioning mode:",
+                "Loading kurrent state store...",
+                "Loading embedding model / Chroma index...",
+                "Ready. Beginning PDF ingest.",
+            )
+        )
+    ]
+
+    assert startup_lines
+    assert all(line.startswith(" ") for line in startup_lines)
