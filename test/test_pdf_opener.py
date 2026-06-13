@@ -84,3 +84,42 @@ def test_open_pdf_uses_macos_open(monkeypatch, tmp_path):
     assert result.page_supported is False
     assert result.command == ("open", str(pdf_path))
     assert popen_calls[0][0][0] == ["open", str(pdf_path)]
+
+
+def test_open_pdf_can_prefer_managed_okular_process(monkeypatch, tmp_path):
+    """Metadata review can request a directly launched viewer process to close later."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    class FakeProcess:
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    fake_process = FakeProcess()
+    popen_calls = []
+
+    monkeypatch.setattr(pdf_opener.sys, "platform", "linux")
+    monkeypatch.setattr(pdf_opener.shutil, "which", lambda name: "/usr/bin/okular")
+
+    def fake_popen(*args, **kwargs):
+        popen_calls.append((args, kwargs))
+        return fake_process
+
+    monkeypatch.setattr(pdf_opener.subprocess, "Popen", fake_popen)
+
+    result = pdf_opener.open_pdf(pdf_path, prefer_managed_process=True)
+
+    assert result.success is True
+    assert result.command == ("okular", str(pdf_path))
+    assert result.process is fake_process
+    assert popen_calls[0][0][0] == ["okular", str(pdf_path)]
+
+    assert pdf_opener.close_open_pdf(result) is True
+    assert fake_process.terminated is True

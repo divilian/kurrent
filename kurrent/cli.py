@@ -69,8 +69,11 @@ from kurrent.semantic_highlighter import (
     semantically_highlighted_text,
 )
 from kurrent.terminal import QUIT_COMMANDS, is_quit_command
-from kurrent.pdf_opener import open_pdf
-from kurrent.pdf_highlighter import create_highlighted_pdf_for_research_interest
+from kurrent.pdf_opener import close_open_pdf, open_pdf
+from kurrent.pdf_highlighter import (
+    create_highlighted_pdf_for_research_interest,
+    create_metadata_highlighted_pdf,
+)
 
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 SEMANTIC_OVERFETCH_FACTOR = 5
@@ -78,6 +81,9 @@ ANSI_RED = "\033[31m"
 ANSI_YELLOW = "\033[93m"
 ANSI_GRAY = "\033[90m"
 ANSI_WHITE = "\033[97m"
+ANSI_ORANGE = "\033[38;5;208m"
+ANSI_BLUE = "\033[34m"
+ANSI_PINK = "\033[38;5;205m"
 
 
 class CliUsageError(Exception):
@@ -409,22 +415,67 @@ def wait_for_sectioning_prefetch(task: _SectioningPrefetchTask | None):
 
 
 
-def print_metadata(metadata) -> None:
+def metadata_field_color(label: str) -> str | None:
+    """Return the ANSI color used for a metadata field highlight."""
+
+    return {
+        "title": ANSI_RED,
+        "authors": ANSI_ORANGE,
+        "year": ANSI_BLUE,
+        "doi": ANSI_PINK,
+    }.get(label)
+
+
+def color_metadata_value(label: str, value: object | None) -> object | None:
+    """Return a metadata value colored to match the highlighted PDF copy."""
+
+    if value is None:
+        return None
+
+    color = metadata_field_color(label)
+
+    if color is None:
+        return value
+
+    return colored_cli_text(str(value), color)
+
+
+def print_metadata(metadata, *, color_values: bool = False) -> None:
     """Print extracted metadata in a compact review format."""
+
+    title = metadata.title
+    authors = metadata.authors
+    year = metadata.year
+    doi = metadata.doi
+
+    if color_values:
+        title = color_metadata_value("title", title)
+        authors = color_metadata_value("authors", authors)
+        year = color_metadata_value("year", year)
+        doi = color_metadata_value("doi", doi)
 
     print()
     print("Metadata")
     print("--------")
-    print(f"title:   {metadata.title}")
-    print(f"authors: {metadata.authors}")
-    print(f"year:    {metadata.year}")
-    print(f"doi:     {metadata.doi}")
+    print(f"title:   {title}")
+    print(f"authors: {authors}")
+    print(f"year:    {year}")
+    print(f"doi:     {doi}")
 
 
-def prompt_text_field(label: str, current: str | None) -> str | None:
+def prompt_text_field(
+    label: str,
+    current: str | None,
+    *,
+    color_value: bool = False,
+) -> str | None:
     """Prompt for one optional text metadata field."""
 
     shown = "" if current is None else current
+
+    if color_value and shown:
+        shown = str(color_metadata_value(label, shown))
+
     value = input(f"{label} [{shown}]: ").strip()
 
     if not value:
@@ -433,10 +484,17 @@ def prompt_text_field(label: str, current: str | None) -> str | None:
     return value
 
 
-def prompt_year_field(current: int | None) -> int | None:
+def prompt_year_field(
+    current: int | None,
+    *,
+    color_value: bool = False,
+) -> int | None:
     """Prompt for an optional integer year field."""
 
     shown = "" if current is None else str(current)
+
+    if color_value and shown:
+        shown = str(color_metadata_value("year", shown))
 
     while True:
         value = input(f"year [{shown}]: ").strip()
@@ -450,21 +508,21 @@ def prompt_year_field(current: int | None) -> int | None:
             print("Please enter a four-digit year, or press Enter to keep it.")
 
 
-def review_metadata(metadata):
+def review_metadata(metadata, *, color_values: bool = False):
     """Let the user accept or correct extracted metadata."""
 
     from kurrent.schema import ExtractedMetadata
 
-    print_metadata(metadata)
+    print_metadata(metadata, color_values=color_values)
     print()
     print("Press Enter to keep a field unchanged.")
     print("Type corrected values where needed.")
 
     return ExtractedMetadata(
-        title=prompt_text_field("title", metadata.title),
-        authors=prompt_text_field("authors", metadata.authors),
-        year=prompt_year_field(metadata.year),
-        doi=prompt_text_field("doi", metadata.doi),
+        title=prompt_text_field("title", metadata.title, color_value=color_values),
+        authors=prompt_text_field("authors", metadata.authors, color_value=color_values),
+        year=prompt_year_field(metadata.year, color_value=color_values),
+        doi=prompt_text_field("doi", metadata.doi, color_value=color_values),
     )
 
 
@@ -909,8 +967,11 @@ def ingest_one_pdf(
             use_llm_sectioning=use_llm_sectioning,
         )
     else:
-        open_pdf_for_metadata_review(pdf_path)
-        metadata = review_metadata(metadata)
+        opened_metadata_pdf = open_pdf_for_metadata_review(pdf_path, metadata)
+        try:
+            metadata = review_metadata(metadata, color_values=True)
+        finally:
+            close_open_pdf(opened_metadata_pdf)
         metadata_was_reviewed = True
         reviewed_headings = review_section_headings(
             pdf_path,
@@ -1664,15 +1725,34 @@ def open_document_pdf(document_or_hit, *, purpose: str = "PDF") -> None:
     print(open_pdf_result_message(result, purpose=purpose))
 
 
-def open_pdf_for_metadata_review(pdf_path: Path) -> None:
-    """Best-effort open of a PDF before ingest metadata review."""
+def open_pdf_for_metadata_review(pdf_path: Path, metadata=None):
+    """Best-effort open of a metadata-highlighted PDF before review."""
 
     print()
-    print("(Opening PDF so you can inspect title/authors/year/DOI.)")
+    print(
+        "(Opening PDF with proposed metadata highlighted: "
+        "title red, authors orange, year blue, DOI pink.)"
+    )
 
-    result = open_pdf(pdf_path)
+    path_to_open = pdf_path
+
+    if metadata is not None:
+        highlight_result = create_metadata_highlighted_pdf(pdf_path, metadata)
+
+        if highlight_result.success and highlight_result.highlighted_pdf_path is not None:
+            path_to_open = highlight_result.highlighted_pdf_path
+        elif highlight_result.message:
+            print_wrapped(
+                "Could not create metadata highlights; "
+                "opening the original PDF instead. "
+                f"{highlight_result.message}"
+            )
+
+    result = open_pdf(path_to_open, prefer_managed_process=True)
     if not result.success:
-        print_wrapped(result.message or f"Could not open PDF: {pdf_path}")
+        print_wrapped(result.message or f"Could not open PDF: {path_to_open}")
+
+    return result
 
 
 def open_pdf_for_metadata_edit(document) -> None:

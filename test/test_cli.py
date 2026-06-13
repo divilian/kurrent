@@ -483,8 +483,8 @@ def test_present_document_hits_open_choice_opens_pdf(monkeypatch, tmp_path, caps
 
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
-    def fake_open_pdf(path, page=None):
-        opened.append((Path(path), page))
+    def fake_open_pdf(path, page=None, **kwargs):
+        opened.append((Path(path), page, kwargs))
         return SimpleNamespace(
             success=True,
             message=None,
@@ -497,7 +497,7 @@ def test_present_document_hits_open_choice_opens_pdf(monkeypatch, tmp_path, caps
 
     cli.present_document_hits([hit])
 
-    assert opened == [(pdf_path, None)]
+    assert opened == [(pdf_path, None, {})]
     output = capsys.readouterr().out
     assert f"Opened PDF: {pdf_path}" in output
 
@@ -518,8 +518,8 @@ def test_ingest_metadata_review_opens_pdf_without_repeating_path(monkeypatch, tm
         print(prompt, end="")
         return next(answers)
 
-    def fake_open_pdf(path, page=None):
-        opened.append((Path(path), page))
+    def fake_open_pdf(path, page=None, **kwargs):
+        opened.append((Path(path), page, kwargs))
         return SimpleNamespace(
             success=True,
             message=None,
@@ -538,14 +538,14 @@ def test_ingest_metadata_review_opens_pdf_without_repeating_path(monkeypatch, tm
         doi="10.1103/physreve.72.056118",
     )
 
-    cli.open_pdf_for_metadata_review(pdf_path)
+    cli.open_pdf_for_metadata_review(pdf_path, metadata)
     reviewed = cli.review_metadata(metadata)
 
     assert reviewed == metadata
-    assert opened == [(pdf_path, None)]
+    assert opened == [(pdf_path, None, {"prefer_managed_process": True})]
 
     output = capsys.readouterr().out
-    assert "(Opening PDF so you can inspect title/authors/year/DOI.)" in output
+    assert "(Opening PDF with proposed metadata highlighted:" in output
     assert f"Opened PDF: {pdf_path}" not in output
     assert output.index("(Opening PDF") < output.index("Metadata")
     assert output.index("Type corrected values where needed.") < output.index("title [")

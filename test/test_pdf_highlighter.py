@@ -133,3 +133,54 @@ def test_ollama_prompt_anchors_highlight_to_specific_evidence_excerpt():
     assert "Retrieved evidence excerpt for this specific source item" in prompt
     assert "Specific evidence chunk for passage 1b" in prompt
     assert "best corresponds to the retrieved evidence excerpt" in prompt
+
+
+def test_create_metadata_highlighted_pdf_colors_proposed_fields(tmp_path):
+    """Metadata review highlighting should annotate a temp copy, not the source."""
+
+    from kurrent.schema import ExtractedMetadata
+
+    pdf_path = tmp_path / "metadata.pdf"
+    make_pdf_with_text(
+        pdf_path,
+        "Natural-Language Multi-Agent Simulations of\n"
+        "Argumentative Opinion Dynamics\n"
+        "Gregor Betz\n"
+        "Preprint 2021 doi 10.1234/example",
+    )
+
+    metadata = ExtractedMetadata(
+        title="Natural-Language Multi-Agent Simulations of Argumentative Opinion Dynamics",
+        authors="Gregor Betz",
+        year=2021,
+        doi="10.1234/example",
+    )
+
+    result = pdf_highlighter.create_metadata_highlighted_pdf(
+        pdf_path,
+        metadata,
+        output_dir=tmp_path / "metadata-highlights",
+    )
+
+    assert result.success is True
+    assert result.highlighted_pdf_path is not None
+    assert result.highlighted_pdf_path.exists()
+    assert result.highlighted_pdf_path != pdf_path
+
+    source_doc = fitz.open(pdf_path)
+    highlighted_doc = fitz.open(result.highlighted_pdf_path)
+    try:
+        assert list(source_doc[0].annots() or []) == []
+        annotations = list(highlighted_doc[0].annots() or [])
+        colors = [annot.colors.get("stroke") for annot in annotations]
+    finally:
+        source_doc.close()
+        highlighted_doc.close()
+
+    rounded_colors = {tuple(round(channel, 2) for channel in color) for color in colors}
+
+    assert len(annotations) >= 4
+    assert (1.0, 0.0, 0.0) in rounded_colors
+    assert (1.0, 0.55, 0.0) in rounded_colors
+    assert (0.0, 0.25, 1.0) in rounded_colors
+    assert (1.0, 0.35, 0.8) in rounded_colors

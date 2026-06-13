@@ -9,6 +9,7 @@ returned OpenPdfResult and decide what to print.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 import os
 from pathlib import Path
 import shutil
@@ -26,6 +27,7 @@ class OpenPdfResult:
     page_supported: bool = False
     command: tuple[str, ...] | None = None
     message: str | None = None
+    process: Any | None = None
 
 
 def _normalized_page(page: int | None) -> int | None:
@@ -48,6 +50,7 @@ def _normalized_page(page: int | None) -> int | None:
 def _open_command_for_platform(
     path: Path,
     page: int | None,
+    prefer_managed_process: bool = False,
 ) -> tuple[tuple[str, ...] | None, bool]:
     """Return the command and whether it should honor page navigation."""
 
@@ -57,13 +60,22 @@ def _open_command_for_platform(
     if sys.platform == "darwin":
         return ("open", str(path)), False
 
-    if page is not None and shutil.which("okular") is not None:
-        return ("okular", "--page", str(page), str(path)), True
+    if shutil.which("okular") is not None:
+        if page is not None:
+            return ("okular", "--page", str(page), str(path)), True
+
+        if prefer_managed_process:
+            return ("okular", str(path)), False
 
     return ("xdg-open", str(path)), False
 
 
-def open_pdf(path: str | Path, page: int | None = None) -> OpenPdfResult:
+def open_pdf(
+    path: str | Path,
+    page: int | None = None,
+    *,
+    prefer_managed_process: bool = False,
+) -> OpenPdfResult:
     """Best-effort open of a PDF in the user's system viewer.
 
     On Linux, Okular is preferred when a page number is provided because it
@@ -83,7 +95,11 @@ def open_pdf(path: str | Path, page: int | None = None) -> OpenPdfResult:
             message=f"PDF path does not exist: {pdf_path}",
         )
 
-    command, page_supported = _open_command_for_platform(pdf_path, page)
+    command, page_supported = _open_command_for_platform(
+        pdf_path,
+        page,
+        prefer_managed_process=prefer_managed_process,
+    )
 
     try:
         if sys.platform == "win32":
@@ -104,7 +120,7 @@ def open_pdf(path: str | Path, page: int | None = None) -> OpenPdfResult:
                 message="No PDF opener command is available.",
             )
 
-        subprocess.Popen(
+        process = subprocess.Popen(
             list(command),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -116,6 +132,7 @@ def open_pdf(path: str | Path, page: int | None = None) -> OpenPdfResult:
             page=page,
             page_supported=page_supported,
             command=command,
+            process=process,
         )
     except OSError as exc:
         return OpenPdfResult(
@@ -126,3 +143,30 @@ def open_pdf(path: str | Path, page: int | None = None) -> OpenPdfResult:
             command=command,
             message=f"Could not open PDF automatically: {type(exc).__name__}: {exc}",
         )
+
+
+def close_open_pdf(result: OpenPdfResult | None) -> bool:
+    """Best-effort close for a PDF viewer process Kurrent launched directly.
+
+    This can only close viewers when the platform opener leaves Kurrent with a
+    live child process. Desktop helpers such as xdg-open may hand off the PDF to
+    another application and exit immediately; in those cases there is nothing
+    reliable for Kurrent to close.
+    """
+
+    if result is None:
+        return False
+
+    process = getattr(result, "process", None)
+
+    if process is None:
+        return False
+
+    try:
+        if process.poll() is not None:
+            return False
+
+        process.terminate()
+        return True
+    except OSError:
+        return False

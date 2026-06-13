@@ -665,3 +665,177 @@ def create_highlighted_pdf_for_research_interest(
         )
     finally:
         document.close()
+
+MetadataHighlightSpec = tuple[str, tuple[float, float, float]]
+
+
+def _metadata_highlight_output_path(
+    pdf_path: Path,
+    output_dir: Path | None = None,
+) -> Path:
+    """Return a temporary output path for a metadata-highlighted PDF copy."""
+
+    if output_dir is None:
+        output_dir = Path(tempfile.gettempdir()) / "kurrent-metadata-highlights"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{pdf_path.stem}-metadata-{uuid4().hex[:10]}.pdf"
+
+
+def _highlight_rects_with_color(page, rects, color: tuple[float, float, float]) -> None:
+    """Add highlight annotations with a specific RGB color."""
+
+    if not rects:
+        return
+
+    try:
+        annot = page.add_highlight_annot(rects)
+
+        if annot is not None:
+            annot.set_colors(stroke=color)
+            annot.update()
+            return
+    except Exception:
+        pass
+
+    for rect in rects:
+        annot = page.add_highlight_annot(rect)
+
+        if annot is not None:
+            annot.set_colors(stroke=color)
+            annot.update()
+
+
+def _first_metadata_match_on_page(
+    page_words: list[PageWord],
+    value: str,
+) -> WordSpanMatch | None:
+    """Return the first exact/fuzzy word-span match for a metadata value."""
+
+    value = collapse_whitespace(value)
+
+    if not value:
+        return None
+
+    # Metadata fields are short enough that direct fuzzy matching is appropriate.
+    return fuzzy_match_excerpt_to_words(page_words, value, min_score=0.82)
+
+
+def create_metadata_highlighted_pdf(
+    pdf_path: str | Path,
+    metadata,
+    *,
+    output_dir: Path | None = None,
+) -> HighlightResult:
+    """Create a temporary PDF copy with proposed metadata highlighted.
+
+    Title, authors, year, and DOI are highlighted with distinct colors on the
+    first few pages so a user can visually check where Kurrent found each value.
+    The original PDF is never modified.
+    """
+
+    pdf_path = Path(pdf_path)
+
+    if not pdf_path.exists():
+        return HighlightResult(
+            original_pdf_path=pdf_path,
+            highlighted_pdf_path=None,
+            page=None,
+            success=False,
+            message=f"PDF path does not exist: {pdf_path}",
+        )
+
+    try:
+        import fitz  # noqa: F401
+    except ImportError as exc:
+        return HighlightResult(
+            original_pdf_path=pdf_path,
+            highlighted_pdf_path=None,
+            page=None,
+            success=False,
+            message=f"PyMuPDF is not available: {exc}",
+        )
+
+    try:
+        document = fitz.open(pdf_path)
+    except Exception as exc:
+        return HighlightResult(
+            original_pdf_path=pdf_path,
+            highlighted_pdf_path=None,
+            page=None,
+            success=False,
+            message=f"Could not open PDF for metadata highlighting: {type(exc).__name__}: {exc}",
+        )
+
+    specs: list[MetadataHighlightSpec] = []
+
+    if getattr(metadata, "title", None):
+        specs.append((str(metadata.title), (1.0, 0.0, 0.0)))  # red
+    if getattr(metadata, "authors", None):
+        specs.append((str(metadata.authors), (1.0, 0.55, 0.0)))  # orange
+    if getattr(metadata, "year", None) is not None:
+        specs.append((str(metadata.year), (0.0, 0.25, 1.0)))  # blue
+    if getattr(metadata, "doi", None):
+        specs.append((str(metadata.doi), (1.0, 0.35, 0.8)))  # pink
+
+    if not specs:
+        document.close()
+        return HighlightResult(
+            original_pdf_path=pdf_path,
+            highlighted_pdf_path=None,
+            page=None,
+            success=False,
+            message="No metadata values were available to highlight.",
+        )
+
+    try:
+        highlighted_any = False
+        max_pages = min(3, document.page_count)
+
+        for value, color in specs:
+            for page_index in range(max_pages):
+                page = document[page_index]
+                page_words = _page_words(page)
+                match = _first_metadata_match_on_page(page_words, value)
+
+                if match is None:
+                    continue
+
+                rects = _line_rects_for_match(page_words, match)
+
+                if not rects:
+                    continue
+
+                _highlight_rects_with_color(page, rects, color)
+                highlighted_any = True
+                break
+
+        if not highlighted_any:
+            return HighlightResult(
+                original_pdf_path=pdf_path,
+                highlighted_pdf_path=None,
+                page=1 if document.page_count else None,
+                success=False,
+                message="No proposed metadata values could be located on the PDF pages.",
+            )
+
+        output_path = _metadata_highlight_output_path(pdf_path, output_dir=output_dir)
+        document.save(output_path, garbage=4, deflate=True)
+
+        return HighlightResult(
+            original_pdf_path=pdf_path,
+            highlighted_pdf_path=output_path,
+            page=1,
+            success=True,
+            method="metadata-highlight",
+        )
+    except Exception as exc:
+        return HighlightResult(
+            original_pdf_path=pdf_path,
+            highlighted_pdf_path=None,
+            page=None,
+            success=False,
+            message=f"Could not create metadata-highlighted PDF: {type(exc).__name__}: {exc}",
+        )
+    finally:
+        document.close()
