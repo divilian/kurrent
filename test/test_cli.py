@@ -13,7 +13,7 @@ def test_ingest_defaults_to_crossref_metadata():
     args = parser.parse_args(["ingest", "paper.pdf"])
 
     assert args.command == "ingest"
-    assert args.path == Path("paper.pdf")
+    assert args.paths == [Path("paper.pdf")]
     assert args.metadata_mode == "crossref"
     assert args.assume_yes is False
 
@@ -58,7 +58,7 @@ def test_yes_flag_parses_for_batch_ingest():
     parser = cli.build_parser()
     args = parser.parse_args(["ingest", "-y", "pdfs"])
 
-    assert args.path == Path("pdfs")
+    assert args.paths == [Path("pdfs")]
     assert args.assume_yes is True
 
 
@@ -76,7 +76,16 @@ def test_state_dir_global_option_parses_before_subcommand():
     )
 
     assert args.state_dir == Path("/tmp/kurrent-test-state")
-    assert args.path == Path("paper.pdf")
+    assert args.paths == [Path("paper.pdf")]
+
+
+def test_ingest_accepts_multiple_paths():
+    """Verify that ingest accepts any number of file and directory inputs."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "paper.pdf", "more-papers", "other.pdf"])
+
+    assert args.paths == [Path("paper.pdf"), Path("more-papers"), Path("other.pdf")]
 
 
 def test_ingest_targets_accepts_single_pdf(tmp_path):
@@ -125,6 +134,27 @@ def test_ingest_targets_recursively_finds_pdfs(tmp_path):
     targets = cli.ingest_targets(tmp_path)
 
     assert targets == sorted([first_pdf.resolve(), second_pdf.resolve()])
+
+
+def test_ingest_targets_accepts_multiple_files_and_directories(tmp_path):
+    """Verify that multiple file and directory inputs are combined and de-duplicated."""
+
+    first_pdf = tmp_path / "a.pdf"
+    second_pdf = tmp_path / "nested" / "b.pdf"
+    duplicate_pdf = tmp_path / "nested" / "duplicate.pdf"
+
+    second_pdf.parent.mkdir()
+    first_pdf.write_bytes(b"%PDF- first")
+    second_pdf.write_bytes(b"%PDF- second")
+    duplicate_pdf.write_bytes(b"%PDF- duplicate")
+
+    targets = cli.ingest_targets([first_pdf, second_pdf.parent, duplicate_pdf])
+
+    assert targets == [
+        first_pdf.resolve(),
+        second_pdf.resolve(),
+        duplicate_pdf.resolve(),
+    ]
 
 
 def test_sectioner_accepts_common_and_numbered_headings():

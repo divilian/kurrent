@@ -836,37 +836,65 @@ def ingest_one_pdf(
     return outcome
 
 
-def ingest_targets(path: Path) -> list[Path]:
+def ingest_targets(paths: Path | list[Path] | tuple[Path, ...]) -> list[Path]:
     """Return PDF paths selected by CLI arguments.
 
-    A file path selects that one PDF. A directory path automatically selects all
-    PDFs below it recursively.
+    Each path may be a PDF file or a directory. Directory paths automatically
+    select all PDFs below them recursively. Returned PDF paths are de-duplicated
+    while preserving first-seen order across command-line arguments.
     """
 
     from kurrent.file_utils import is_pdf, normalize_path
 
-    path = normalize_path(path)
+    if isinstance(paths, Path):
+        candidate_paths = [paths]
+    else:
+        candidate_paths = list(paths)
 
-    if not path.exists():
-        raise CliUsageError(f"No such path: {path}")
+    selected: list[Path] = []
+    seen: set[Path] = set()
 
-    if path.is_dir():
-        return sorted(
-            candidate
-            for candidate in path.rglob("*")
-            if candidate.is_file() and candidate.suffix.lower() == ".pdf"
-        )
+    for raw_path in candidate_paths:
+        path = normalize_path(raw_path)
 
-    if not path.is_file():
-        raise CliUsageError(f"Ingest requires a PDF file or directory. Got: {path}")
+        if not path.exists():
+            raise CliUsageError(f"No such path: {path}")
 
-    if not is_pdf(path):
-        raise CliUsageError(
-            "Ingest requires a PDF file or directory. "
-            f"Got a non-PDF path: {path}"
-        )
+        if path.is_dir():
+            discovered = sorted(
+                candidate
+                for candidate in path.rglob("*")
+                if candidate.is_file() and candidate.suffix.lower() == ".pdf"
+            )
+        elif path.is_file():
+            if not is_pdf(path):
+                raise CliUsageError(
+                    "Ingest requires PDF files and/or directories. "
+                    f"Got a non-PDF path: {path}"
+                )
+            discovered = [path]
+        else:
+            raise CliUsageError(
+                "Ingest requires PDF files and/or directories. "
+                f"Got: {path}"
+            )
 
-    return [path]
+        for pdf_path in discovered:
+            pdf_path = normalize_path(pdf_path)
+            if pdf_path in seen:
+                continue
+            seen.add(pdf_path)
+            selected.append(pdf_path)
+
+    return selected
+
+
+def format_ingest_path_list(paths: list[Path] | tuple[Path, ...]) -> str:
+    """Return a concise display string for one or more ingest input paths."""
+
+    if len(paths) == 1:
+        return str(paths[0])
+    return ", ".join(str(path) for path in paths)
 
 
 def print_chunk_explanation(
@@ -3317,14 +3345,14 @@ def run_ingest(args: argparse.Namespace) -> int:
     print_gray_status("Finding PDFs...")
 
     try:
-        pdf_paths = ingest_targets(args.path)
+        pdf_paths = ingest_targets(args.paths)
     except CliUsageError as exc:
         print()
         print_usage_error(str(exc))
         return 2
 
     if not pdf_paths:
-        print(f"No PDFs found under: {args.path}")
+        print(f"No PDFs found under: {format_ingest_path_list(args.paths)}")
         return 0
 
     doi_lookup = args.metadata_mode == "crossref"
@@ -3505,9 +3533,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="ingest PDFs into kurrent state",
     )
     ingest_parser.add_argument(
-        "path",
+        "paths",
+        nargs="+",
         type=Path,
-        help="PDF file, or directory of PDFs to ingest recursively.",
+        help="PDF files and/or directories of PDFs to ingest; directories are searched recursively.",
     )
     ingest_parser.add_argument(
         "-y",
