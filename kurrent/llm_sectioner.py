@@ -1368,6 +1368,7 @@ def _select_heading_batch_with_timeout_fallback(
     singleton_timeout_seconds: int,
     num_predict: int,
     depth: int = 0,
+    verbose: bool = True,
 ) -> list[SectionHeadingDecision]:
     """Select headings, recursively splitting a failed batch.
 
@@ -1442,7 +1443,7 @@ def _select_heading_batch_with_timeout_fallback(
                 fallback_kind=f"{prompt_kind}_parse_attempt_{attempt_number}",
             )
 
-            if attempt_number == 2:
+            if attempt_number == 2 and verbose:
                 print(
                     "Warning: Ollama returned malformed/truncated JSON while "
                     "selecting section headings for "
@@ -1451,24 +1452,26 @@ def _select_heading_batch_with_timeout_fallback(
                 )
 
         if attempt_number == 1:
-            print(
-                "Warning: Ollama failed while selecting section headings "
-                f"for {len(candidates)} candidate(s) ({last_failure}); "
-                "retrying the same payload once.",
-                file=sys.stderr,
-            )
+            if verbose:
+                print(
+                    "Warning: Ollama failed while selecting section headings "
+                    f"for {len(candidates)} candidate(s) ({last_failure}); "
+                    "retrying the same payload once.",
+                    file=sys.stderr,
+                )
             continue
 
     if len(candidates) == 1:
         candidate = candidates[0]
 
-        print(
-            "Warning: Ollama failed twice on a single heading candidate; "
-            "trying simpler non-JSON YES/NO fallback for "
-            f"candidate_id={candidate.candidate_id} on page {candidate.page}: "
-            f"{_candidate_text_for_filtering(candidate)!r}",
-            file=sys.stderr,
-        )
+        if verbose:
+            print(
+                "Warning: Ollama failed twice on a single heading candidate; "
+                "trying simpler non-JSON YES/NO fallback for "
+                f"candidate_id={candidate.candidate_id} on page {candidate.page}: "
+                f"{_candidate_text_for_filtering(candidate)!r}",
+                file=sys.stderr,
+            )
 
         yes_no_decisions = _singleton_yes_no_fallback(
             candidate=candidate,
@@ -1481,13 +1484,14 @@ def _select_heading_batch_with_timeout_fallback(
         if yes_no_decisions:
             return yes_no_decisions
 
-        print(
-            "Warning: skipping single heading candidate after LLM/fallback "
-            f"failure: candidate_id={candidate.candidate_id} "
-            f"on page {candidate.page}: "
-            f"{_candidate_text_for_filtering(candidate)!r}",
-            file=sys.stderr,
-        )
+        if verbose:
+            print(
+                "Warning: skipping single heading candidate after LLM/fallback "
+                f"failure: candidate_id={candidate.candidate_id} "
+                f"on page {candidate.page}: "
+                f"{_candidate_text_for_filtering(candidate)!r}",
+                file=sys.stderr,
+            )
         raise _HeadingCandidateFailedError(
             "Ollama could not classify heading candidate "
             f"candidate_id={candidate.candidate_id} on page {candidate.page}."
@@ -1497,12 +1501,13 @@ def _select_heading_batch_with_timeout_fallback(
     left = candidates[:midpoint]
     right = candidates[midpoint:]
 
-    print(
-        "Warning: Ollama failed twice while selecting section headings "
-        f"for {len(candidates)} candidates ({last_failure}); retrying as "
-        f"{len(left)} + {len(right)} candidates.",
-        file=sys.stderr,
-    )
+    if verbose:
+        print(
+            "Warning: Ollama failed twice while selecting section headings "
+            f"for {len(candidates)} candidates ({last_failure}); retrying as "
+            f"{len(left)} + {len(right)} candidates.",
+            file=sys.stderr,
+        )
 
     return (
         _select_heading_batch_with_timeout_fallback(
@@ -1514,6 +1519,7 @@ def _select_heading_batch_with_timeout_fallback(
             singleton_timeout_seconds=singleton_timeout_seconds,
             num_predict=num_predict,
             depth=depth + 1,
+            verbose=verbose,
         )
         + _select_heading_batch_with_timeout_fallback(
             candidates=right,
@@ -1524,6 +1530,7 @@ def _select_heading_batch_with_timeout_fallback(
             singleton_timeout_seconds=singleton_timeout_seconds,
             num_predict=num_predict,
             depth=depth + 1,
+            verbose=verbose,
         )
     )
 
@@ -1588,6 +1595,7 @@ def select_section_headings_with_ollama(
     max_consecutive_failures: int | None = None,
     progress_total_callback: Callable[[int], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
+    verbose: bool = True,
 ) -> list[SectionHeadingDecision]:
     """Ask Ollama to select real section headings from candidates.
 
@@ -1666,6 +1674,7 @@ def select_section_headings_with_ollama(
                 timeout_seconds=timeout_seconds,
                 singleton_timeout_seconds=singleton_timeout_seconds,
                 num_predict=num_predict,
+                verbose=verbose,
             )
         except _HeadingCandidateFailedError as exc:
             consecutive_failures += 1

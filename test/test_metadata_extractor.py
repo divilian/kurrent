@@ -207,6 +207,43 @@ def test_guess_title_from_first_page_skips_noise():
     assert guess_title_from_first_page(text) == "review articles"
 
 
+
+def test_guess_title_from_first_page_joins_wrapped_title_after_preposition():
+    """Verify wrapped title lines are merged before the author line."""
+
+    text = """
+    Natural-Language Multi-Agent Simulations of
+    Argumentative Opinion Dynamics
+    Gregor Betz
+    Karlsruhe Institute of Technology
+    Abstract
+    This paper develops a natural-language agent-based model.
+    """
+
+    assert guess_title_from_first_page(text) == (
+        "Natural-Language Multi-Agent Simulations of "
+        "Argumentative Opinion Dynamics"
+    )
+
+
+def test_guess_authors_from_first_page_uses_line_after_wrapped_title_block():
+    """Verify the last title line is not mistaken for the author."""
+
+    text = """
+    Natural-Language Multi-Agent Simulations of
+    Argumentative Opinion Dynamics
+    Gregor Betz
+    Karlsruhe Institute of Technology
+    Abstract
+    This paper develops a natural-language agent-based model.
+    """
+    title = (
+        "Natural-Language Multi-Agent Simulations of "
+        "Argumentative Opinion Dynamics"
+    )
+
+    assert guess_authors_from_first_page(text, title) == "Gregor Betz"
+
 def test_guess_authors_from_first_page_uses_line_after_title():
     """Verify that author guessing uses the line after the guessed title."""
 

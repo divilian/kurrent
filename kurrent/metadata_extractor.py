@@ -292,21 +292,135 @@ def looks_like_header_noise(line: str) -> bool:
     return False
 
 
+TITLE_CONTINUATION_END_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+    "without",
+}
+
+AFFILIATION_MARKERS = {
+    "college",
+    "department",
+    "faculty",
+    "institute",
+    "laboratory",
+    "school",
+    "university",
+}
+
+
+def _metadata_line_key(line: str) -> str:
+    """Normalize one line for comparing extracted metadata text."""
+
+    return re.sub(r"\s+", " ", line).strip().lower()
+
+
+def _last_word(line: str) -> str | None:
+    """Return the last word-like token in a metadata line."""
+
+    words = re.findall(r"[A-Za-z]+", line)
+
+    if not words:
+        return None
+
+    return words[-1].lower()
+
+
+def _looks_like_affiliation_line(line: str) -> bool:
+    """Return True when a line looks like institution/affiliation text."""
+
+    lower_line = line.lower()
+
+    if "@" in line:
+        return True
+
+    return any(marker in lower_line for marker in AFFILIATION_MARKERS)
+
+
+def _looks_like_title_continuation(previous_line: str, candidate: str) -> bool:
+    """Return True when candidate likely continues a wrapped title line.
+
+    The deliberately conservative rule here fixes common wrapped titles such
+    as ``Natural-Language Multi-Agent Simulations of`` followed by
+    ``Argumentative Opinion Dynamics`` without turning ordinary journal/section
+    headings into accidental title prefixes.
+    """
+
+    if looks_like_header_noise(candidate):
+        return False
+
+    if _looks_like_affiliation_line(candidate):
+        return False
+
+    if len(candidate) < 4 or len(candidate) > 160:
+        return False
+
+    previous_last_word = _last_word(previous_line)
+
+    if previous_last_word in TITLE_CONTINUATION_END_WORDS:
+        return True
+
+    # Hyphenated line wrapping can split title words across lines.
+    if previous_line.endswith("-"):
+        return True
+
+    return False
+
+
+def _find_title_line_span(lines: list[str], title: str) -> tuple[int, int] | None:
+    """Find the inclusive-exclusive line span that produced a title guess."""
+
+    title_key = _metadata_line_key(title)
+
+    for start in range(len(lines)):
+        pieces: list[str] = []
+
+        for end in range(start + 1, min(len(lines), start + 6) + 1):
+            pieces.append(lines[end - 1])
+
+            if _metadata_line_key(" ".join(pieces)) == title_key:
+                return (start, end)
+
+    return None
+
+
 def guess_title_from_first_page(text: str) -> str | None:
     """Guess a paper title from early first-page text.
 
-    This heuristic picks the first substantial non-noise line. It deliberately
-    avoids trying to be clever about multi-line titles for now.
+    This heuristic starts from the first substantial non-noise line, then
+    conservatively joins immediately following lines when the first line looks
+    syntactically incomplete, as in titles that wrap after words like ``of``.
     """
 
-    for line in first_nonempty_lines(text):
+    lines = first_nonempty_lines(text)
+
+    for i, line in enumerate(lines):
         if looks_like_header_noise(line):
             continue
 
         if len(line) < 8:
             continue
 
-        return clean_title_metadata_text(line)
+        title_lines = [line]
+
+        for candidate in lines[i + 1:]:
+            if not _looks_like_title_continuation(title_lines[-1], candidate):
+                break
+
+            title_lines.append(candidate)
+
+        return clean_title_metadata_text(" ".join(title_lines))
 
     return None
 
@@ -317,28 +431,26 @@ def guess_authors_from_first_page(
 ) -> str | None:
     """Guess an author line from the first page.
 
-    This uses the line after the guessed title when it looks author-like.
-    It is intentionally conservative.
+    This uses the line after the guessed title block when it looks author-like.
+    Multi-line titles are treated as one title block so the final title line is
+    not misclassified as the author.
     """
 
     if title is None:
         return None
 
     lines = first_nonempty_lines(text)
-    title_index: int | None = None
+    title_span = _find_title_line_span(lines, title)
 
-    for i, line in enumerate(lines):
-        if line == title:
-            title_index = i
-            break
-
-    if title_index is None:
+    if title_span is None:
         return None
 
-    if title_index + 1 >= len(lines):
+    _, title_end = title_span
+
+    if title_end >= len(lines):
         return None
 
-    candidate = lines[title_index + 1]
+    candidate = lines[title_end]
 
     if looks_like_header_noise(candidate):
         return None
@@ -348,10 +460,7 @@ def guess_authors_from_first_page(
     if "abstract" in lower_candidate:
         return None
 
-    if "university" in lower_candidate:
-        return None
-
-    if "department" in lower_candidate:
+    if _looks_like_affiliation_line(candidate):
         return None
 
     if len(candidate) > 200:

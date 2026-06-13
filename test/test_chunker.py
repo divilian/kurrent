@@ -407,3 +407,68 @@ def test_make_section_spans_with_llm_falls_back_after_repeated_ollama_failures(
     assert sections
     assert any(section.section_title == "INTRODUCTION" for section in sections)
     assert "falling back to rules-based sectioning" in capsys.readouterr().err
+
+
+def test_make_section_spans_with_llm_uses_prefetched_decisions_without_ollama(
+    tmp_path,
+    monkeypatch,
+):
+    """Verify background section decisions can be consumed without re-calling Ollama."""
+
+    from kurrent.chunker import LLMSectioningPrefetchResult
+    from kurrent.llm_sectioner import SectionHeadingDecision
+    from kurrent.sectioner import HeadingCandidate
+    import kurrent.chunker as chunker
+
+    pdf_path = write_pdf(
+        tmp_path / "paper.pdf",
+        ["I. INTRODUCTION\nThis is body text.\nII. MODEL\nMore body text."],
+    )
+
+    candidates = [
+        HeadingCandidate(
+            candidate_id=0,
+            line_index=0,
+            page=1,
+            line_text="I. INTRODUCTION",
+            previous_lines=[],
+            next_lines=["This is body text."],
+            features={},
+            candidate_text="I. INTRODUCTION",
+        ),
+        HeadingCandidate(
+            candidate_id=1,
+            line_index=2,
+            page=1,
+            line_text="II. MODEL",
+            previous_lines=["This is body text."],
+            next_lines=["More body text."],
+            features={},
+            candidate_text="II. MODEL",
+        ),
+    ]
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("prefetched decisions should avoid Ollama")
+
+    monkeypatch.setattr(
+        "kurrent.llm_sectioner.select_section_headings_with_ollama",
+        fail_if_called,
+    )
+
+    sections = chunker.make_section_spans_with_llm(
+        pdf_path=pdf_path,
+        doc_id="doc-1",
+        prefetch_result=LLMSectioningPrefetchResult(
+            candidates=candidates,
+            decisions=[
+                SectionHeadingDecision(0, "I", "INTRODUCTION"),
+                SectionHeadingDecision(1, "II", "MODEL"),
+            ],
+        ),
+    )
+
+    assert [section.section_title for section in sections] == [
+        "INTRODUCTION",
+        "MODEL",
+    ]

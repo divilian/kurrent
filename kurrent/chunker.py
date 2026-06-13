@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 import hashlib
 import os
 import sys
@@ -33,7 +34,23 @@ __all__ = [
     "pdf_page_count",
     "should_use_rules_based_sectioning_for_huge_pdf",
     "make_section_spans_with_llm",
+    "LLMSectioningPrefetchResult",
+    "compute_llm_sectioning_prefetch",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class LLMSectioningPrefetchResult:
+    """Background result for LLM-assisted section recognition.
+
+    candidates and decisions are independent of doc_id, so they can be computed
+    before the document record exists. The foreground chunking step later turns
+    them into SectionSpan objects for the real doc_id.
+    """
+
+    candidates: Sequence[object]
+    decisions: Sequence[object]
+    unavailable_error: str | None = None
 
 
 DEFAULT_LLM_SECTIONING_MAX_PAGES = 200
@@ -111,6 +128,7 @@ def chunk_document(
     llm_max_pages: int | None = None,
     llm_progress_total_callback: Callable[[int], None] | None = None,
     llm_progress_callback: Callable[[int], None] | None = None,
+    llm_sectioning_prefetch: LLMSectioningPrefetchResult | None = None,
 ) -> list[Chunk]:
     """Extract, section, chunk, store, and return chunks for a document.
 
@@ -193,6 +211,7 @@ def chunk_document(
                 max_pages=llm_max_pages,
                 progress_total_callback=llm_progress_total_callback,
                 progress_callback=llm_progress_callback,
+                prefetch_result=llm_sectioning_prefetch,
             )
     else:
         headings = detect_heading_candidates(doc.pdf_path)
@@ -226,14 +245,20 @@ def chunk_document(
     return chunks
 
 
-def make_section_spans_with_llm(
+def compute_llm_sectioning_prefetch(
     pdf_path: str | Path,
-    doc_id: str,
     max_pages: int | None = None,
     progress_total_callback: Callable[[int], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
-) -> list[SectionSpan]:
-    """Detect sections with the LLM-assisted HeadingCandidate pipeline."""
+    quiet: bool = False,
+) -> LLMSectioningPrefetchResult:
+    """Compute LLM section-heading decisions without needing a doc_id.
+
+    This is useful during interactive ingest: while the user reviews metadata,
+    kurrent can quietly ask Ollama to classify heading candidates. The returned
+    candidates/decisions can later be converted into SectionSpan objects once
+    the real document record exists.
+    """
 
     from kurrent.llm_sectioner import (
         LLMSectioningUnavailableError,
@@ -249,10 +274,42 @@ def make_section_spans_with_llm(
             candidates,
             progress_total_callback=progress_total_callback,
             progress_callback=progress_callback,
+            verbose=not quiet,
         )
     except LLMSectioningUnavailableError as exc:
+        return LLMSectioningPrefetchResult(
+            candidates=candidates,
+            decisions=[],
+            unavailable_error=str(exc),
+        )
+
+    return LLMSectioningPrefetchResult(
+        candidates=candidates,
+        decisions=decisions,
+    )
+
+
+def make_section_spans_with_llm(
+    pdf_path: str | Path,
+    doc_id: str,
+    max_pages: int | None = None,
+    progress_total_callback: Callable[[int], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+    prefetch_result: LLMSectioningPrefetchResult | None = None,
+) -> list[SectionSpan]:
+    """Detect sections with the LLM-assisted HeadingCandidate pipeline."""
+
+    if prefetch_result is None:
+        prefetch_result = compute_llm_sectioning_prefetch(
+            pdf_path=pdf_path,
+            max_pages=max_pages,
+            progress_total_callback=progress_total_callback,
+            progress_callback=progress_callback,
+        )
+
+    if prefetch_result.unavailable_error is not None:
         print(
-            f"Warning: {exc}",
+            f"Warning: {prefetch_result.unavailable_error}",
             file=sys.stderr,
         )
         headings = detect_heading_candidates(pdf_path)
@@ -265,8 +322,8 @@ def make_section_spans_with_llm(
     return make_section_spans_from_llm_decisions(
         pdf_path=pdf_path,
         doc_id=doc_id,
-        candidates=candidates,
-        decisions=decisions,
+        candidates=prefetch_result.candidates,
+        decisions=prefetch_result.decisions,
     )
 
 

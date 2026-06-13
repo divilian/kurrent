@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -270,6 +271,141 @@ class ExistingDocumentStatus:
     has_current_pipeline: bool
     has_current_semantic_index: bool = True
     has_no_extractable_text: bool = False
+
+
+@dataclass(slots=True)
+class _SectioningPrefetchTask:
+    """One background LLM-sectioning prefetch task."""
+
+    pdf_path: Path
+    future: Future
+    progress: "_SectioningPrefetchProgress"
+
+
+class _SectioningPrefetchProgress:
+    """Thread-safe progress counters for background sectioning."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.total: int | None = None
+        self.completed = 0
+
+    def set_total(self, total: int) -> None:
+        with self._lock:
+            self.total = total
+
+    def advance(self, completed: int) -> None:
+        with self._lock:
+            self.completed += completed
+
+    def snapshot(self) -> tuple[int | None, int]:
+        with self._lock:
+            return self.total, self.completed
+
+
+class IngestSectioningPrefetcher:
+    """Quietly precompute LLM section decisions during interactive ingest."""
+
+    def __init__(self, enabled: bool, max_workers: int = 1):
+        self.enabled = enabled
+        self._executor: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=max_workers)
+            if enabled
+            else None
+        )
+        self._tasks: dict[Path, _SectioningPrefetchTask] = {}
+
+    def submit(self, pdf_path: Path) -> _SectioningPrefetchTask | None:
+        if not self.enabled or self._executor is None:
+            return None
+
+        from kurrent.file_utils import normalize_path
+
+        key = normalize_path(pdf_path)
+        existing = self._tasks.get(key)
+        if existing is not None:
+            return existing
+
+        progress = _SectioningPrefetchProgress()
+
+        def compute():
+            from kurrent.chunker import compute_llm_sectioning_prefetch
+
+            return compute_llm_sectioning_prefetch(
+                key,
+                progress_total_callback=progress.set_total,
+                progress_callback=progress.advance,
+                quiet=True,
+            )
+
+        future = self._executor.submit(compute)
+        task = _SectioningPrefetchTask(
+            pdf_path=key,
+            future=future,
+            progress=progress,
+        )
+        self._tasks[key] = task
+        return task
+
+    def task_for(self, pdf_path: Path) -> _SectioningPrefetchTask | None:
+        if not self.enabled:
+            return None
+
+        from kurrent.file_utils import normalize_path
+
+        return self._tasks.get(normalize_path(pdf_path))
+
+    def shutdown(self) -> None:
+        if self._executor is None:
+            return
+
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self._executor.shutdown(wait=False)
+
+
+def wait_for_sectioning_prefetch(task: _SectioningPrefetchTask | None):
+    """Return a precomputed LLM-sectioning result, showing progress if needed."""
+
+    if task is None:
+        return None
+
+    if task.future.done():
+        return task.future.result()
+
+    print_gray_status("Waiting for background LLM section recognition to finish...")
+
+    progress_bar = None
+    shown_completed = 0
+
+    try:
+        while not task.future.done():
+            total, completed = task.progress.snapshot()
+
+            if progress_bar is None and total is not None and total > 0:
+                progress_bar = tqdm(
+                    total=total,
+                    desc="Ollama section candidates",
+                    unit="candidate",
+                )
+
+            if progress_bar is not None and completed > shown_completed:
+                progress_bar.update(completed - shown_completed)
+                shown_completed = completed
+
+            time.sleep(0.1)
+
+        result = task.future.result()
+        total, completed = task.progress.snapshot()
+
+        if progress_bar is not None and completed > shown_completed:
+            progress_bar.update(completed - shown_completed)
+
+        return result
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
 
 
@@ -607,6 +743,7 @@ def ingest_pdf_with_metadata(
     managed_pdf_dir: Path | None,
     llm_progress_total_callback=None,
     llm_progress_callback=None,
+    llm_sectioning_prefetch=None,
 ) -> IngestOutcome:
     """Ingest one PDF using already-extracted metadata.
 
@@ -692,6 +829,7 @@ def ingest_pdf_with_metadata(
         use_llm_sectioning=use_llm_sectioning,
         llm_progress_total_callback=llm_progress_total_callback,
         llm_progress_callback=llm_progress_callback,
+        llm_sectioning_prefetch=llm_sectioning_prefetch,
     )
 
     if chunks is None or chunks:
@@ -713,6 +851,7 @@ def ingest_one_pdf(
     use_llm_sectioning: bool,
     storage_mode: str,
     managed_pdf_dir: Path | None,
+    sectioning_prefetch_task: _SectioningPrefetchTask | None = None,
 ) -> IngestOutcome:
     """Ingest one PDF through the CLI workflow."""
 
@@ -778,6 +917,12 @@ def ingest_one_pdf(
             use_llm_sectioning=use_llm_sectioning,
         )
 
+    llm_sectioning_prefetch = None
+    if use_llm_sectioning and reviewed_headings is None:
+        llm_sectioning_prefetch = wait_for_sectioning_prefetch(
+            sectioning_prefetch_task,
+        )
+
     progress_bar = None
 
     def start_llm_progress(total: int) -> None:
@@ -814,14 +959,23 @@ def ingest_one_pdf(
             managed_pdf_dir=managed_pdf_dir,
             llm_progress_total_callback=(
                 start_llm_progress
-                if use_llm_sectioning and reviewed_headings is None
+                if (
+                    use_llm_sectioning
+                    and reviewed_headings is None
+                    and llm_sectioning_prefetch is None
+                )
                 else None
             ),
             llm_progress_callback=(
                 update_llm_progress
-                if use_llm_sectioning and reviewed_headings is None
+                if (
+                    use_llm_sectioning
+                    and reviewed_headings is None
+                    and llm_sectioning_prefetch is None
+                )
                 else None
             ),
+            llm_sectioning_prefetch=llm_sectioning_prefetch,
         )
     finally:
         if progress_bar is not None:
@@ -2245,6 +2399,7 @@ def run_search(args: argparse.Namespace) -> int:
 
         raise CliUsageError(f"Unknown search mode: {args.search_mode}")
     finally:
+        sectioning_prefetcher.shutdown()
         store.close()
 
 
@@ -3432,9 +3587,17 @@ def run_ingest(args: argparse.Namespace) -> int:
     print_gray_status("Ready. Beginning PDF ingest.")
 
     results: list[IngestResult] = []
+    sectioning_prefetcher = IngestSectioningPrefetcher(
+        enabled=(not args.rules_based_sections and not args.assume_yes),
+    )
 
     try:
         for i, pdf_path in enumerate(pdf_paths, start=1):
+            if sectioning_prefetcher.enabled:
+                sectioning_prefetcher.submit(pdf_path)
+                if i < len(pdf_paths):
+                    sectioning_prefetcher.submit(pdf_paths[i])
+
             print()
             print("-" * 79)
             print(f"[{i}/{len(pdf_paths)}] {pdf_path}", flush=True)
@@ -3454,6 +3617,7 @@ def run_ingest(args: argparse.Namespace) -> int:
                         if storage_mode == "managed"
                         else None
                     ),
+                    sectioning_prefetch_task=sectioning_prefetcher.task_for(pdf_path),
                 )
                 results.append(
                     IngestResult(
