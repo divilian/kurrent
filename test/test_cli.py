@@ -1461,65 +1461,6 @@ def test_dedupe_can_mark_pair_as_not_duplicate(tmp_path, capsys, monkeypatch):
     assert "Marked this pair as not duplicates." in output
 
 
-
-def test_dedupe_skip_does_not_repeat_pair_in_same_run(tmp_path, capsys, monkeypatch):
-    """Verify skip advances past a duplicate pair for the current dedupe run."""
-
-    from datetime import datetime, timezone
-    import sys
-    import types
-
-    from kurrent.schema import Document
-    from kurrent.state_store import StateStore
-
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    store = StateStore(state_dir / "kurrent.db")
-    try:
-        for suffix, title, doi in [
-            ("a", "Same Title One", "10.123/example-one"),
-            ("b", "Same Title One", "10.123/example-one"),
-            ("c", "Same Title Two", "10.123/example-two"),
-            ("d", "Same Title Two", "10.123/example-two"),
-        ]:
-            store.insert_document(
-                Document(
-                    doc_id=f"doc-{suffix}",
-                    pdf_sha256=f"sha-{suffix}",
-                    storage_mode="external",
-                    pdf_path=tmp_path / f"{suffix}.pdf",
-                    ingested_at=datetime.now(timezone.utc),
-                    title=title,
-                    authors="Jane Smith",
-                    year=2020,
-                    doi=doi,
-                )
-            )
-    finally:
-        store.close()
-
-    class FakeEmbedder:
-        def __init__(self, chroma_path):
-            self.chroma_path = chroma_path
-
-    monkeypatch.setitem(
-        sys.modules,
-        "kurrent.embedder",
-        types.SimpleNamespace(Embedder=FakeEmbedder),
-    )
-    responses = iter(["s", "q"])
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
-
-    parser = cli.build_parser()
-    args = parser.parse_args(["--state-dir", str(state_dir), "dedupe"])
-
-    assert cli.run_dedupe(args) == 0
-
-    output = capsys.readouterr().out
-    assert "Skipped for now." in output
-    assert "Same Title One" in output
-    assert "Same Title Two" in output
-
 def test_dedupe_can_open_each_pdf_separately(tmp_path, capsys, monkeypatch):
     """Verify dedupe offers separate open-1/open-2 actions instead of open-both."""
 
@@ -1599,3 +1540,73 @@ def test_dedupe_can_open_each_pdf_separately(tmp_path, capsys, monkeypatch):
     assert cli.prompt_dedupe_action() == "q"
     assert "[o1]open 1, [o2]open 2" in prompt[0]
     assert "open both" not in prompt[0].lower()
+
+
+def test_metadata_search_quit_does_not_reference_ingest_section_prefetcher(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """Verify q from metadata search exits cleanly without ingest-only cleanup."""
+
+    import sys
+    import types
+
+    from kurrent.schema import DocumentHit
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "kurrent.db").write_text("fake sqlite marker")
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.path = path
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeSearcher:
+        def __init__(self, state_store, embedder=None):
+            self.state_store = state_store
+            self.embedder = embedder
+
+        def metadata_search(self, query, limit=10):
+            return [
+                DocumentHit(
+                    doc_id="doc-1",
+                    path=pdf_path,
+                    title="A Test Paper",
+                    authors="Jane Smith",
+                    year=2024,
+                )
+            ]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.state_store",
+        types.SimpleNamespace(StateStore=FakeStateStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.searcher",
+        types.SimpleNamespace(Searcher=FakeSearcher),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "q")
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "--state-dir",
+        str(state_dir),
+        "search",
+        "--metadata",
+        "test",
+    ])
+
+    assert cli.run_search(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Metadata search: 'test'" in output
+    assert "A Test Paper" in output

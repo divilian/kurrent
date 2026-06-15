@@ -3452,14 +3452,14 @@ def run_dedupe(args: argparse.Namespace) -> int:
         reviewed = 0
         resolved = 0
         dismissed = 0
-        skipped_pairs: set[tuple[str, str]] = set()
+        skipped_pairs = set()
 
         while True:
             documents = store.list_documents()
             candidates = [
                 candidate
                 for candidate in duplicate_candidates_for_documents(documents, store)
-                if tuple(sorted([candidate.doc_a.doc_id, candidate.doc_b.doc_id]))
+                if tuple(sorted((candidate.doc_a.doc_id, candidate.doc_b.doc_id)))
                 not in skipped_pairs
             ]
 
@@ -3522,7 +3522,7 @@ def run_dedupe(args: argparse.Namespace) -> int:
                     break
 
                 if choice == "s":
-                    skipped_pairs.add(tuple(sorted([doc_a.doc_id, doc_b.doc_id])))
+                    skipped_pairs.add(tuple(sorted((doc_a.doc_id, doc_b.doc_id))))
                     print_wrapped("Skipped for now.")
                     break
 
@@ -3672,7 +3672,6 @@ def run_search(args: argparse.Namespace) -> int:
 
         raise CliUsageError(f"Unknown search mode: {args.search_mode}")
     finally:
-        sectioning_prefetcher.shutdown()
         store.close()
 
 
