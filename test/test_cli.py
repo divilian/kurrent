@@ -579,19 +579,19 @@ def test_present_document_hits_rejects_open_when_pdf_missing(monkeypatch, tmp_pa
     assert "Please press Enter, or type d, e, or q." in output
 
 
-def test_converse_accepts_initial_research_question_arguments():
-    """Verify converse can take the first research question from argv."""
+def test_ask_accepts_initial_research_question_arguments():
+    """Verify ask can take the first research question from argv."""
 
     parser = cli.build_parser()
     args = parser.parse_args([
-        "converse",
+        "ask",
         "agents",
         "rewiring",
         "local",
         "networks",
     ])
 
-    assert args.command == "converse"
+    assert args.command == "ask"
     assert args.research_question == [
         "agents",
         "rewiring",
@@ -600,12 +600,12 @@ def test_converse_accepts_initial_research_question_arguments():
     ]
 
 
-def test_converse_initial_research_question_can_follow_options():
-    """Verify converse options still parse before an initial research question."""
+def test_ask_initial_research_question_can_follow_options():
+    """Verify ask options still parse before an initial research question."""
 
     parser = cli.build_parser()
     args = parser.parse_args([
-        "converse",
+        "ask",
         "--limit",
         "4",
         "network",
@@ -616,12 +616,12 @@ def test_converse_initial_research_question_can_follow_options():
     assert args.research_question == ["network", "rewiring"]
 
 
-def test_converse_debug_options_parse_before_initial_question():
-    """Verify converse accepts semantic retrieval debug flags."""
+def test_ask_debug_options_parse_before_initial_question():
+    """Verify ask accepts semantic retrieval debug flags."""
 
     parser = cli.build_parser()
     args = parser.parse_args([
-        "converse",
+        "ask",
         "--debug",
         "--debug-candidates",
         "12",
@@ -632,12 +632,22 @@ def test_converse_debug_options_parse_before_initial_question():
         "base",
     ])
 
-    assert args.command == "converse"
+    assert args.command == "ask"
     assert args.debug is True
     assert args.debug_candidates == 12
     assert args.debug_grep == ["memex|PKB"]
     assert args.research_question == ["personal", "knowledge", "base"]
 
+
+
+
+def test_converse_subcommand_is_removed():
+    """Verify the old converse command is no longer accepted."""
+
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["converse", "agents"])
 
 def test_search_debug_options_parse():
     """Verify semantic search accepts retrieval debug flags."""
@@ -716,7 +726,7 @@ def test_print_semantic_debug_report_prints_semantic_and_grep_sections(capsys, t
     assert "Still Building the Memex" in output
 
 
-def test_ingest_startup_status_lines_are_indented_like_converse(
+def test_ingest_startup_status_lines_are_indented_like_ask(
     monkeypatch,
     tmp_path,
     capsys,

@@ -21,6 +21,8 @@
 - [x] pop up PDFs in user PDF reader
 - [x] pop up PDFs to correct page in user PDF reader
 - [x] pop up PDFs highlighting key text in user PDF reader
+- [ ] summary verb
+- [ ] list verb
 
 ## Bugs
 
@@ -245,7 +247,7 @@ Types of search:
 - Do not split the project into separate top-level executables.
 - Likely commands:
   - `kurrent ingest ...`
-  - `kurrent converse ...`
+  - `kurrent ask ...`
   - `kurrent search ...`
   - `kurrent links ...`
   - `kurrent sources ...`

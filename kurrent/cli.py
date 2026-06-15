@@ -1370,7 +1370,7 @@ def semantic_refresh_documents(store, embedder, progress_callback=None) -> list:
     """Return documents needing refresh before trustworthy semantic search.
 
     The check is intentionally split into coarse phases so interactive commands
-    such as ``kurrent converse`` can narrate startup work while still keeping
+    such as ``kurrent ask`` can narrate startup work while still keeping
     missing external PDFs out of the repeated refresh prompt.
     """
 
@@ -2485,7 +2485,7 @@ def run_search(args: argparse.Namespace) -> int:
 
 
 def print_converse_help() -> None:
-    """Print available kurrent converse slash commands."""
+    """Print available kurrent ask slash commands."""
 
     print()
     print("Available commands")
@@ -2493,7 +2493,7 @@ def print_converse_help() -> None:
     print_wrapped("/help       Show this help.")
     print_wrapped("/sources    Open the source browser for the most recent answer.")
     print_wrapped("/open N     Open source N from the most recent answer.")
-    print_wrapped("/quit       Leave converse.")
+    print_wrapped("/quit       Leave ask.")
 
 
 def _latest_converse_sources(turn):
@@ -3121,7 +3121,7 @@ def handle_converse_command(
     ollama_url: str = DEFAULT_OLLAMA_URL,
     ollama_timeout: float = 45.0,
 ) -> bool:
-    """Handle a kurrent converse slash command.
+    """Handle a kurrent ask slash command.
 
     Return True when the caller should continue the session and False when it
     should exit.
@@ -3167,7 +3167,7 @@ def handle_converse_command(
     return True
 
 def run_converse(args: argparse.Namespace) -> int:
-    """Run the kurrent converse command."""
+    """Run the kurrent ask command."""
 
     from kurrent.config import get_kurrent_state_paths
     from kurrent.converser import ConverseEngine, ConverseError, build_retrieval_query
@@ -4047,47 +4047,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
 
-    converse_parser = subparsers.add_parser(
-        "converse",
-        help="open a stateful RAG research-inquiry session",
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="ask research questions using the current Kurrent library",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "-n",
         "--limit",
         type=int,
         default=8,
         help="number of semantic chunks to retrieve for each turn (default: 8).",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--max-distance",
         type=float,
         default=None,
         help="semantic-search distance cutoff; lower is more similar.",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--include-reference-sections",
         action="store_true",
         help="include reference/bibliography chunks in RAG evidence.",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--debug",
         action="store_true",
         help="print semantic-retrieval diagnostics before each answer.",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--debug-candidates",
         type=int,
         default=30,
         help="number of semantic candidates to print with --debug (default: 30).",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--debug-grep",
         action="append",
         default=[],
         metavar="REGEX",
         help="with --debug, scan document metadata and current chunks for REGEX; repeatable.",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--ollama-RAG-model",
         dest="ollama_model",
         default=DEFAULT_RAG_LLM,
@@ -4098,44 +4098,44 @@ def build_parser() -> argparse.ArgumentParser:
             "used for Kurrent's non-RAG LLM functions."
         ),
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--ollama-model",
         dest="ollama_model",
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--ollama-RAG-url",
         dest="ollama_url",
         default=DEFAULT_OLLAMA_URL,
         help=f"Ollama base URL for RAG answers (default: {DEFAULT_OLLAMA_URL}).",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--ollama-url",
         dest="ollama_url",
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--ollama-RAG-timeout",
         dest="ollama_timeout",
         type=float,
         default=120.0,
         help="seconds before one Ollama RAG answer request times out.",
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "--ollama-timeout",
         dest="ollama_timeout",
         type=float,
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
     )
-    converse_parser.add_argument(
+    ask_parser.add_argument(
         "research_question",
         nargs="*",
         help="optional first research question to answer before entering interactive mode.",
     )
-    converse_parser.set_defaults(func=run_converse)
+    ask_parser.set_defaults(func=run_converse)
 
     return parser
 
