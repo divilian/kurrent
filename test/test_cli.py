@@ -813,6 +813,54 @@ def test_stats_command_parses_top_authors():
 
     assert args.command == "stats"
     assert args.top_authors == 3
+    assert not args.histogram
+
+
+def test_stats_command_parses_histogram_aliases():
+    """Verify stats accepts both histogram flag spellings."""
+
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["stats", "--hist"])
+    assert args.command == "stats"
+    assert args.histogram
+
+    args = parser.parse_args(["stats", "--histogram"])
+    assert args.command == "stats"
+    assert args.histogram
+
+
+def test_unicode_bar_uses_partial_block_elements():
+    """Verify histogram bars use Unicode block elements, including fractions."""
+
+    assert cli.unicode_bar(0, 10, width=4) == ""
+    assert cli.unicode_bar(5, 10, width=4) == "██"
+    assert cli.unicode_bar(1, 10, width=1) == "▏"
+
+
+def test_format_year_histogram_includes_empty_years_descending():
+    """Verify year histograms include zero-count gaps from latest to earliest."""
+
+    assert cli.format_year_histogram({2024: 2, 2022: 1}, width=4) == [
+        "2024 (2): ████",
+        "2023 (0): ",
+        "2022 (1): ██",
+    ]
+
+
+def test_format_year_histogram_omits_future_years_and_aligns_counts():
+    """Verify histograms ignore future metadata errors and align counts."""
+
+    assert cli.format_year_histogram(
+        {2099: 99, 2026: 13, 2025: 127, 2023: 8},
+        width=8,
+        max_year=2026,
+    ) == [
+        "2026 ( 13): ▉",
+        "2025 (127): ████████",
+        "2024 (  0): ",
+        "2023 (  8): ▌",
+    ]
 
 
 def test_author_surname_counts_count_all_author_positions():
@@ -921,6 +969,7 @@ def test_stats_command_prints_database_summary(tmp_path, capsys):
             "stats",
             "--top-authors",
             "2",
+            "--hist",
         ]
     )
 
@@ -937,6 +986,9 @@ def test_stats_command_prints_database_summary(tmp_path, capsys):
     assert "Avg chunks/document:    1.50" in output
     assert "Tanner:  2" in output
     assert "Betz:    1" in output or "Davies:  1" in output
+    assert "Documents per year" in output
+    assert "2021 (1): ████████████████████████████████████████" in output
+    assert "2020 (1): ████████████████████████████████████████" in output
 
 
 def test_health_command_prints_database_health(tmp_path, capsys, monkeypatch):
@@ -1040,6 +1092,6 @@ def test_health_command_prints_database_health(tmp_path, capsys, monkeypatch):
     assert "Missing year:           1" in output
     assert "Missing DOI:            2" in output
     assert "Missing PDF paths:      1" in output
-    assert "Documents with all chunks current:        1" in output
-    assert "Documents with stale/missing chunks:      1" in output
+    assert "Documents with all chunks current:   1" in output
+    assert "Documents with stale/missing chunks: 1" in output
     assert "Missing from index:     1 documents" in output

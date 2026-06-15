@@ -23,7 +23,7 @@
 - [x] pop up PDFs highlighting key text in user PDF reader
 - [x] stats verb
 - [ ] list verb
-- [ ] year histogram
+- [x] year histogram
 
 ## Bugs
 

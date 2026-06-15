@@ -2589,6 +2589,80 @@ def _semantic_index_missing_count(documents, embedder) -> int | None:
     return missing
 
 
+
+def year_counts_for_documents(documents) -> dict[int, int]:
+    """Return document counts by publication year."""
+
+    counts: dict[int, int] = {}
+
+    for document in documents:
+        year = getattr(document, "year", None)
+
+        if isinstance(year, int):
+            counts[year] = counts.get(year, 0) + 1
+        elif isinstance(year, str) and year.strip().isdigit():
+            counts[int(year.strip())] = counts.get(int(year.strip()), 0) + 1
+
+    return counts
+
+
+def unicode_bar(value: int, max_value: int, width: int = 40) -> str:
+    """Return a scaled horizontal bar using Unicode block elements."""
+
+    if value <= 0 or max_value <= 0 or width <= 0:
+        return ""
+
+    eighths = round((value / max_value) * width * 8)
+
+    if eighths <= 0:
+        eighths = 1
+
+    full_blocks, remainder = divmod(eighths, 8)
+    partial_blocks = "▏▎▍▌▋▊▉"
+
+    bar = "█" * full_blocks
+
+    if remainder:
+        bar += partial_blocks[remainder - 1]
+
+    return bar
+
+
+def format_year_histogram(
+    year_counts: dict[int, int],
+    width: int = 40,
+    max_year: int | None = None,
+) -> list[str]:
+    """Return display lines for a document-count histogram by year."""
+
+    from datetime import datetime
+
+    if max_year is None:
+        max_year = datetime.now().year
+
+    display_counts = {
+        year: count
+        for year, count in year_counts.items()
+        if year <= max_year
+    }
+
+    if not display_counts:
+        return ["No year metadata found."]
+
+    first_year = min(display_counts)
+    last_year = min(max(display_counts), max_year)
+    max_count = max(display_counts.values())
+    count_width = max(len(str(count)) for count in display_counts.values())
+
+    lines = []
+
+    for year in range(last_year, first_year - 1, -1):
+        count = display_counts.get(year, 0)
+        bar = unicode_bar(count, max_count, width=width)
+        lines.append(f"{year} ({count:>{count_width}}): {bar}")
+
+    return lines
+
 def run_stats(args: argparse.Namespace) -> int:
     """Print summary statistics for the current Kurrent database."""
 
@@ -2600,7 +2674,7 @@ def run_stats(args: argparse.Namespace) -> int:
 
     state_paths = get_kurrent_state_paths(args.state_dir)
 
-    print("\nKurrent database stats")
+    print("Kurrent database stats")
     print("----------------------")
     print(f"State directory:        {state_paths.state_dir}")
     print(f"SQLite database:        {state_paths.sqlite_path}")
@@ -2617,6 +2691,11 @@ def run_stats(args: argparse.Namespace) -> int:
         print("Avg sections/document:  0.00")
         print("Avg pages/document:     0.00")
         print("Avg chunks/document:    0.00")
+        if args.histogram:
+            print()
+            print("Documents per year")
+            print("------------------")
+            print("No year metadata found.")
         return 0
 
     store = StateStore(state_paths.sqlite_path)
@@ -2657,6 +2736,14 @@ def run_stats(args: argparse.Namespace) -> int:
 
                 for surname, count in top_authors:
                     print(f"{surname + ':':<{surname_width + 1}}{count:>{count_width}}")
+
+        if args.histogram:
+            print()
+            print("Documents per year")
+            print("------------------")
+
+            for line in format_year_histogram(year_counts_for_documents(documents)):
+                print(line)
     finally:
         store.close()
 
@@ -2672,7 +2759,7 @@ def run_health(args: argparse.Namespace) -> int:
 
     state_paths = get_kurrent_state_paths(args.state_dir)
 
-    print("\nKurrent database health")
+    print("Kurrent database health")
     print("-----------------------")
     print(f"State directory:        {state_paths.state_dir}")
     print(f"SQLite database:        {state_paths.sqlite_path}")
@@ -2715,8 +2802,8 @@ def run_health(args: argparse.Namespace) -> int:
         print()
         print("Derived artifacts")
         print("-----------------")
-        print(f"Documents with all chunks current:        {current_chunks}")
-        print(f"Documents with stale/missing chunks:      {stale_or_missing_chunks}")
+        print(f"Documents with all chunks current:   {current_chunks}")
+        print(f"Documents with stale/missing chunks: {stale_or_missing_chunks}")
 
         print()
         print("Semantic index")
@@ -4236,6 +4323,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         metavar="K",
         help="number of most common author surnames to show (default: 10).",
+    )
+    stats_parser.add_argument(
+        "--hist",
+        "--histogram",
+        action="store_true",
+        dest="histogram",
+        help="show a Unicode histogram of documents per publication year.",
     )
     stats_parser.set_defaults(func=run_stats)
 
