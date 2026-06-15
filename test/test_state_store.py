@@ -477,3 +477,38 @@ def test_insert_proximity_alert_is_idempotent_for_reversed_pair(store):
     ).fetchone()
 
     assert row["n"] == 1
+
+
+def test_duplicate_decision_records_canonical_not_duplicate_pair(store):
+    """Verify duplicate-dismissal decisions are stored canonically."""
+
+    from test.factories import make_document
+
+    doc_a = make_document(doc_id="doc-a", pdf_sha256="sha-a")
+    doc_b = make_document(doc_id="doc-b", pdf_sha256="sha-b")
+    store.insert_document(doc_a)
+    store.insert_document(doc_b)
+
+    store.record_duplicate_decision("doc-b", "doc-a", reason="same DOI")
+
+    assert store.duplicate_pair_is_ignored("doc-a", "doc-b")
+    assert store.duplicate_pair_is_ignored("doc-b", "doc-a")
+    assert store.ignored_duplicate_pair_count() == 1
+
+
+def test_delete_document_removes_record_and_preserves_other_documents(store):
+    """Verify deleting a duplicate removes its document row only."""
+
+    from test.factories import make_document
+
+    doc_a = make_document(doc_id="doc-a", pdf_sha256="sha-a")
+    doc_b = make_document(doc_id="doc-b", pdf_sha256="sha-b")
+    store.insert_document(doc_a)
+    store.insert_document(doc_b)
+    store.record_duplicate_decision("doc-a", "doc-b")
+
+    store.delete_document("doc-b")
+
+    assert store.get_document("doc-b") is None
+    assert store.get_document("doc-a") is not None
+    assert store.ignored_duplicate_pair_count() == 0

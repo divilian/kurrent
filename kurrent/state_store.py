@@ -24,6 +24,7 @@ __all__ = [
     "TEXT_PIPELINE_STATUS_OK",
     "TEXT_PIPELINE_STATUS_NO_EXTRACTABLE_TEXT",
     "canonical_chunk_pair",
+    "canonical_document_pair",
     "StateStore",
 ]
 
@@ -46,6 +47,20 @@ def canonical_chunk_pair(
         )
 
     return tuple(sorted([chunk_a_id, chunk_b_id]))
+
+
+def canonical_document_pair(
+    doc_a_id: str,
+    doc_b_id: str,
+) -> tuple[str, str]:
+    """Return document ids in canonical order for duplicate decisions."""
+
+    if doc_a_id == doc_b_id:
+        raise ValueError(
+            f"Duplicate decision cannot compare a document to itself: {doc_a_id!r}"
+        )
+
+    return tuple(sorted([doc_a_id, doc_b_id]))
 
 class StateStore:
     """
@@ -529,6 +544,101 @@ class StateStore:
                 """,
                 (doc_id,),
             )
+
+    def delete_document(self, doc_id: str) -> None:
+        """Delete one document record and its database-managed derived state.
+
+        Source PDF files are intentionally left on disk. Callers that also own
+        a Chroma embedder should delete that document from Chroma separately.
+        """
+
+        if self.get_document(doc_id) is None:
+            raise ValueError(f"Document not found: {doc_id}")
+
+        with self.conn:
+            self.delete_derived_artifacts_for_document(doc_id)
+            self.conn.execute(
+                """
+                DELETE FROM duplicate_decisions
+                WHERE doc_id_a = ? OR doc_id_b = ?
+                """,
+                (doc_id, doc_id),
+            )
+            self.conn.execute(
+                """
+                DELETE FROM documents
+                WHERE doc_id = ?
+                """,
+                (doc_id,),
+            )
+
+    def record_duplicate_decision(
+        self,
+        doc_a_id: str,
+        doc_b_id: str,
+        decision: str = "not_duplicate",
+        reason: str | None = None,
+    ) -> None:
+        """Persist a user decision for one possible duplicate pair."""
+
+        if decision != "not_duplicate":
+            raise ValueError(f"Unsupported duplicate decision: {decision!r}")
+
+        doc_a_id, doc_b_id = canonical_document_pair(doc_a_id, doc_b_id)
+        decided_at = datetime.now(timezone.utc).isoformat()
+
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO duplicate_decisions
+                (doc_id_a, doc_id_b, decision, reason, decided_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id_a, doc_id_b) DO UPDATE SET
+                    decision = excluded.decision,
+                    reason = excluded.reason,
+                    decided_at = excluded.decided_at
+                """,
+                (doc_a_id, doc_b_id, decision, reason, decided_at),
+            )
+
+    def get_duplicate_decision(
+        self,
+        doc_a_id: str,
+        doc_b_id: str,
+    ) -> sqlite3.Row | None:
+        """Return a duplicate-decision row for this pair, if any."""
+
+        doc_a_id, doc_b_id = canonical_document_pair(doc_a_id, doc_b_id)
+        return self.conn.execute(
+            """
+            SELECT doc_id_a, doc_id_b, decision, reason, decided_at
+            FROM duplicate_decisions
+            WHERE doc_id_a = ? AND doc_id_b = ?
+            """,
+            (doc_a_id, doc_b_id),
+        ).fetchone()
+
+    def duplicate_pair_is_ignored(
+        self,
+        doc_a_id: str,
+        doc_b_id: str,
+    ) -> bool:
+        """Return whether the user has marked this pair not duplicate."""
+
+        row = self.get_duplicate_decision(doc_a_id, doc_b_id)
+        return row is not None and row["decision"] == "not_duplicate"
+
+    def ignored_duplicate_pair_count(self) -> int:
+        """Return how many possible duplicate pairs have been dismissed."""
+
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM duplicate_decisions
+            WHERE decision = 'not_duplicate'
+            """
+        ).fetchone()
+        return int(row["count"]) if row is not None else 0
 
 
     @staticmethod

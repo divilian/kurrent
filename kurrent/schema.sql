@@ -12,6 +12,22 @@ CREATE TABLE IF NOT EXISTS documents (
     CHECK (storage_mode IN ('managed', 'library', 'external'))
 );
 
+
+CREATE TABLE IF NOT EXISTS duplicate_decisions (
+    doc_id_a TEXT NOT NULL,
+    doc_id_b TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT,
+    decided_at TEXT NOT NULL,
+
+    PRIMARY KEY (doc_id_a, doc_id_b),
+    FOREIGN KEY (doc_id_a) REFERENCES documents(doc_id) ON DELETE CASCADE,
+    FOREIGN KEY (doc_id_b) REFERENCES documents(doc_id) ON DELETE CASCADE,
+
+    CHECK (doc_id_a < doc_id_b),
+    CHECK (decision IN ('not_duplicate'))
+);
+
 CREATE TABLE IF NOT EXISTS document_pipeline_state (
     doc_id TEXT PRIMARY KEY,
     pipeline_fingerprint TEXT NOT NULL,

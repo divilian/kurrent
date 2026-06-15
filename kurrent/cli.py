@@ -26,6 +26,8 @@ The default search mode is semantic chunk search.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+from itertools import combinations
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
 import threading
@@ -290,6 +292,16 @@ class ExistingDocumentStatus:
     has_current_pipeline: bool
     has_current_semantic_index: bool = True
     has_no_extractable_text: bool = False
+
+
+@dataclass(slots=True)
+class DuplicateCandidate:
+    """One possible duplicate-document pair for health/dedupe."""
+
+    doc_a: object
+    doc_b: object
+    reason: str
+    key: str
 
 
 @dataclass(slots=True)
@@ -975,6 +987,13 @@ def ingest_one_pdf(
 
     if assume_yes:
         print_metadata(metadata)
+        duplicate_doi_document = document_with_same_doi(store, metadata.doi)
+        if duplicate_doi_document is not None:
+            print_duplicate_doi_skip_message(pdf_path, duplicate_doi_document)
+            return IngestOutcome(
+                doc_id=duplicate_doi_document.doc_id,
+                already_existed=True,
+            )
         reviewed_headings = accept_section_headings_without_review(
             pdf_path,
             use_llm_sectioning=use_llm_sectioning,
@@ -986,6 +1005,13 @@ def ingest_one_pdf(
         finally:
             close_open_pdf(opened_metadata_pdf)
         metadata_was_reviewed = True
+        duplicate_doi_document = document_with_same_doi(store, metadata.doi)
+        if duplicate_doi_document is not None:
+            print_duplicate_doi_skip_message(pdf_path, duplicate_doi_document)
+            return IngestOutcome(
+                doc_id=duplicate_doi_document.doc_id,
+                already_existed=True,
+            )
         reviewed_headings = review_section_headings(
             pdf_path,
             use_llm_sectioning=use_llm_sectioning,
@@ -2677,6 +2703,191 @@ def format_year_histogram(
     return lines
 
 
+
+DOI_URL_PREFIX_PATTERN = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
+NON_ALNUM_PATTERN = re.compile(r"[^a-z0-9]+", re.IGNORECASE)
+
+
+def normalize_doi_for_match(doi: str | None) -> str | None:
+    """Return a conservative normalized DOI key, or None."""
+
+    if doi is None:
+        return None
+
+    text = collapse_whitespace(str(doi)).strip().strip(" .,")
+    if not text or text.lower() in {"none", "unknown", "n/a"}:
+        return None
+
+    text = DOI_URL_PREFIX_PATTERN.sub("", text).strip().strip(" .,")
+    return text.casefold() or None
+
+
+def normalize_title_for_match(title: str | None) -> str | None:
+    """Return a conservative normalized title key, or None."""
+
+    if title is None:
+        return None
+
+    text = collapse_whitespace(str(title)).strip().casefold()
+    if not text or text in {"none", "unknown", "untitled", "(untitled)"}:
+        return None
+
+    text = NON_ALNUM_PATTERN.sub(" ", text)
+    text = collapse_whitespace(text).strip()
+    return text or None
+
+
+def first_author_surname_key(document) -> str | None:
+    """Return a normalized first-author surname key for duplicate checks."""
+
+    authors = split_author_names(getattr(document, "authors", None))
+    if not authors:
+        return None
+
+    surname = surname_from_author_name(authors[0])
+    if surname is None:
+        return None
+
+    return surname.casefold()
+
+
+def title_year_author_duplicate_key(document) -> str | None:
+    """Return fuzzy duplicate key: normalized title + year + first surname."""
+
+    title = normalize_title_for_match(getattr(document, "title", None))
+    year = getattr(document, "year", None)
+    surname = first_author_surname_key(document)
+
+    if title is None or year is None or surname is None:
+        return None
+
+    return f"{title}|{year}|{surname}"
+
+
+def document_duplicate_groups(
+    documents,
+    key_func,
+    *,
+    min_group_size: int = 2,
+) -> list[tuple[str, list]]:
+    """Group documents by a duplicate key function."""
+
+    grouped: dict[str, list] = defaultdict(list)
+
+    for document in documents:
+        key = key_func(document)
+        if key is not None:
+            grouped[key].append(document)
+
+    return [
+        (key, group)
+        for key, group in grouped.items()
+        if len(group) >= min_group_size
+    ]
+
+
+def duplicate_pair_is_ignored(store, doc_a_id: str, doc_b_id: str) -> bool:
+    """Return whether a possible duplicate pair was dismissed by the user."""
+
+    if store is None or not hasattr(store, "duplicate_pair_is_ignored"):
+        return False
+
+    try:
+        return bool(store.duplicate_pair_is_ignored(doc_a_id, doc_b_id))
+    except Exception:
+        return False
+
+
+def duplicate_candidates_for_documents(documents, store=None) -> list[DuplicateCandidate]:
+    """Return unresolved possible duplicate document pairs."""
+
+    candidate_by_pair: dict[tuple[str, str], DuplicateCandidate] = {}
+
+    duplicate_specs = [
+        ("same PDF hash", lambda document: getattr(document, "pdf_sha256", None)),
+        ("same DOI", lambda document: normalize_doi_for_match(getattr(document, "doi", None))),
+        ("same title/year/first author", title_year_author_duplicate_key),
+    ]
+
+    for reason, key_func in duplicate_specs:
+        for key, group in document_duplicate_groups(documents, key_func):
+            sorted_group = sorted(group, key=lambda doc: doc.doc_id)
+            for doc_a, doc_b in combinations(sorted_group, 2):
+                pair = tuple(sorted([doc_a.doc_id, doc_b.doc_id]))
+                if pair in candidate_by_pair:
+                    continue
+                if duplicate_pair_is_ignored(store, doc_a.doc_id, doc_b.doc_id):
+                    continue
+                candidate_by_pair[pair] = DuplicateCandidate(
+                    doc_a=doc_a,
+                    doc_b=doc_b,
+                    reason=reason,
+                    key=key,
+                )
+
+    return sorted(
+        candidate_by_pair.values(),
+        key=lambda candidate: (
+            candidate.reason,
+            source_name_for_hit(document_hit_from_stored_document(candidate.doc_a)).casefold()
+            if source_name_for_hit(document_hit_from_stored_document(candidate.doc_a))
+            else "",
+            candidate.doc_a.doc_id,
+            candidate.doc_b.doc_id,
+        ),
+    )
+
+
+def unresolved_duplicate_group_count(documents, store, reason: str, key_func) -> int:
+    """Return duplicate-key groups that still contain unresolved pairs."""
+
+    count = 0
+
+    for _key, group in document_duplicate_groups(documents, key_func):
+        unresolved_pair_exists = False
+        for doc_a, doc_b in combinations(group, 2):
+            if not duplicate_pair_is_ignored(store, doc_a.doc_id, doc_b.doc_id):
+                unresolved_pair_exists = True
+                break
+        if unresolved_pair_exists:
+            count += 1
+
+    return count
+
+
+def document_with_same_doi(store, doi: str | None, *, exclude_doc_id: str | None = None):
+    """Return an existing document with the same normalized DOI, if any."""
+
+    doi_key = normalize_doi_for_match(doi)
+    if doi_key is None:
+        return None
+
+    for document in store.list_documents():
+        if exclude_doc_id is not None and document.doc_id == exclude_doc_id:
+            continue
+        if normalize_doi_for_match(getattr(document, "doi", None)) == doi_key:
+            return document
+
+    return None
+
+
+def print_duplicate_doi_skip_message(pdf_path: Path, duplicate_document) -> None:
+    """Explain that ingest skipped a PDF because DOI already exists."""
+
+    print()
+    print(f"Duplicate DOI: {pdf_path}", flush=True)
+    print_wrapped(
+        "This PDF's reviewed metadata has the same DOI as an existing "
+        "kurrent document:"
+    )
+    print_field("title", duplicate_document.title or "(untitled)")
+    print_field("authors", duplicate_document.authors or "unknown author")
+    print_field("year", duplicate_document.year if duplicate_document.year is not None else "n.d.")
+    print_field("doi", duplicate_document.doi or "unknown DOI")
+    print_pdf_path_field(duplicate_document)
+    print_wrapped("Skipping metadata, chunking, and embedding.")
+
+
 LEADING_TITLE_ARTICLE_PATTERN = re.compile(r"^(a|an|the)\s+(.+)$", re.IGNORECASE)
 
 
@@ -2815,6 +3026,8 @@ def title_for_listing(title: str | None) -> str:
     if match:
         article = match.group(1)
         rest = match.group(2).strip()
+        if rest:
+            rest = rest[0].upper() + rest[1:]
         return f"{rest}, {article}"
 
     return title
@@ -3135,10 +3348,206 @@ def run_health(args: argparse.Namespace) -> int:
                 print(f"Missing from index:     {missing_from_index} documents")
         except Exception as exc:
             print(f"Missing from index:     unable to check ({exc})")
+
+        print()
+        print("Possible duplicates")
+        print("-------------------")
+        same_hash_groups = unresolved_duplicate_group_count(
+            documents,
+            store,
+            "same PDF hash",
+            lambda document: getattr(document, "pdf_sha256", None),
+        )
+        same_doi_groups = unresolved_duplicate_group_count(
+            documents,
+            store,
+            "same DOI",
+            lambda document: normalize_doi_for_match(getattr(document, "doi", None)),
+        )
+        same_title_groups = unresolved_duplicate_group_count(
+            documents,
+            store,
+            "same title/year/first author",
+            title_year_author_duplicate_key,
+        )
+        ignored_pairs = (
+            store.ignored_duplicate_pair_count()
+            if hasattr(store, "ignored_duplicate_pair_count")
+            else 0
+        )
+        print(f"Same PDF hash groups:              {same_hash_groups}")
+        print(f"Same DOI groups:                   {same_doi_groups}")
+        print(f"Same title/year/author groups:     {same_title_groups}")
+        print(f"Ignored duplicate pairs:           {ignored_pairs}")
+        if same_hash_groups or same_doi_groups or same_title_groups:
+            print("Run `kurrent dedupe` to review possible duplicates.")
     finally:
         store.close()
 
     return 0
+
+
+def print_dedupe_document(document, label: str) -> None:
+    """Print one side of a possible duplicate pair."""
+
+    print()
+    print(f"[{label}] {document.title or '(untitled)'}")
+    print_field("authors", document.authors or "unknown author")
+    print_field("year", document.year if document.year is not None else "n.d.")
+    if getattr(document, "doi", None):
+        print_field("doi", document.doi)
+    print_pdf_path_field(document)
+
+
+def prompt_dedupe_action() -> str:
+    """Prompt for one duplicate-resolution action."""
+
+    try:
+        return input(
+            "[o1]open 1, [o2]open 2, [1]keep 1, [2]keep 2, "
+            "[n]not dupes, [s]skip, [q]quit > "
+        ).strip().lower()
+    except EOFError:
+        print()
+        return "q"
+
+
+def delete_duplicate_document(store, embedder, duplicate_doc_id: str) -> None:
+    """Delete one duplicate document from Kurrent state, leaving PDFs on disk."""
+
+    if embedder is not None and hasattr(embedder, "delete_document"):
+        try:
+            embedder.delete_document(duplicate_doc_id)
+        except Exception as exc:
+            print_wrapped(f"Warning: could not delete Chroma entries for {duplicate_doc_id}: {exc}")
+
+    store.delete_document(duplicate_doc_id)
+
+
+def run_dedupe(args: argparse.Namespace) -> int:
+    """Interactively review and resolve possible duplicate documents."""
+
+    from kurrent.config import get_kurrent_state_paths
+    from kurrent.embedder import Embedder
+    from kurrent.state_store import StateStore
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    if not state_paths.sqlite_path.exists():
+        raise CliUsageError(
+            "No kurrent SQLite database exists yet. Ingest PDFs first, or pass "
+            "--state-dir pointing to an existing kurrent state directory. "
+            f"Expected database: {state_paths.sqlite_path}"
+        )
+
+    store = StateStore(state_paths.sqlite_path)
+    embedder = None
+
+    try:
+        try:
+            embedder = Embedder(state_paths.chroma_path)
+        except Exception:
+            embedder = None
+
+        reviewed = 0
+        resolved = 0
+        dismissed = 0
+        skipped_pairs: set[tuple[str, str]] = set()
+
+        while True:
+            documents = store.list_documents()
+            candidates = [
+                candidate
+                for candidate in duplicate_candidates_for_documents(documents, store)
+                if tuple(sorted([candidate.doc_a.doc_id, candidate.doc_b.doc_id]))
+                not in skipped_pairs
+            ]
+
+            if not candidates:
+                if reviewed == 0:
+                    print("No unresolved possible duplicates found.")
+                else:
+                    print("No more unresolved possible duplicates found.")
+                break
+
+            candidate = candidates[0]
+            reviewed += 1
+            total = len(candidates)
+
+            while True:
+                doc_a = store.get_document(candidate.doc_a.doc_id)
+                doc_b = store.get_document(candidate.doc_b.doc_id)
+
+                if doc_a is None or doc_b is None:
+                    break
+
+                print()
+                print(f"Possible duplicate {reviewed} ({total} remaining)")
+                print("------------------")
+                print_field("reason", candidate.reason)
+                print_dedupe_document(doc_a, "1")
+                print_dedupe_document(doc_b, "2")
+
+                choice = prompt_dedupe_action()
+
+                if choice == "o1":
+                    open_document_pdf(doc_a, purpose="PDF 1")
+                    continue
+
+                if choice == "o2":
+                    open_document_pdf(doc_b, purpose="PDF 2")
+                    continue
+
+                if choice == "1":
+                    delete_duplicate_document(store, embedder, doc_b.doc_id)
+                    print_wrapped("Deleted document 2 from Kurrent state. Source PDF file left on disk.")
+                    resolved += 1
+                    break
+
+                if choice == "2":
+                    delete_duplicate_document(store, embedder, doc_a.doc_id)
+                    print_wrapped("Deleted document 1 from Kurrent state. Source PDF file left on disk.")
+                    resolved += 1
+                    break
+
+                if choice == "n":
+                    store.record_duplicate_decision(
+                        doc_a.doc_id,
+                        doc_b.doc_id,
+                        decision="not_duplicate",
+                        reason=candidate.reason,
+                    )
+                    print_wrapped("Marked this pair as not duplicates.")
+                    dismissed += 1
+                    break
+
+                if choice == "s":
+                    skipped_pairs.add(tuple(sorted([doc_a.doc_id, doc_b.doc_id])))
+                    print_wrapped("Skipped for now.")
+                    break
+
+                if is_quit_command(choice):
+                    print()
+                    print("Dedupe summary")
+                    print("--------------")
+                    print(f"Reviewed:   {reviewed}")
+                    print(f"Resolved:   {resolved}")
+                    print(f"Dismissed:  {dismissed}")
+                    return 0
+
+                print("Please type o1, o2, 1, 2, n, s, or q.")
+
+        print()
+        print("Dedupe summary")
+        print("--------------")
+        print(f"Reviewed:   {reviewed}")
+        print(f"Resolved:   {resolved}")
+        print(f"Dismissed:  {dismissed}")
+    finally:
+        store.close()
+
+    return 0
+
 
 def run_search(args: argparse.Namespace) -> int:
     """Run the kurrent search command."""
@@ -4678,6 +5087,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="show health checks for the Kurrent database",
     )
     health_parser.set_defaults(func=run_health)
+
+    dedupe_parser = subparsers.add_parser(
+        "dedupe",
+        help="interactively review and resolve possible duplicate documents",
+    )
+    dedupe_parser.set_defaults(func=run_dedupe)
 
 
     search_parser = subparsers.add_parser(
