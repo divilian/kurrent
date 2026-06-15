@@ -2356,6 +2356,388 @@ def print_semantic_debug_report(
     print()
 
 
+
+AUTHOR_SPLIT_PATTERN = re.compile(r"\s*(?:;|\band\b|&)\s*", re.IGNORECASE)
+AUTHOR_SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "ph.d."}
+SURNAME_PARTICLES = {
+    "da", "de", "del", "della", "der", "di", "du", "la", "le",
+    "van", "von", "ten", "ter", "vander", "st", "st.", "mc", "mac",
+}
+
+
+def split_author_names(authors: str | None) -> list[str]:
+    """Split a stored author string into likely individual author names."""
+
+    if authors is None:
+        return []
+
+    text = authors.strip()
+
+    if not text or text.lower() in {"none", "unknown", "anonymous"}:
+        return []
+
+    # Semicolons and ampersands are strong author separators.  The word "and"
+    # usually separates the final author in natural-language lists.
+    if ";" in text or "&" in text or re.search(r"\band\b", text, re.IGNORECASE):
+        pieces = AUTHOR_SPLIT_PATTERN.split(text)
+        split_pieces: list[str] = []
+        for piece in pieces:
+            split_pieces.extend(part.strip() for part in piece.split(","))
+        return [piece for piece in split_pieces if piece]
+
+    # With no stronger signal, commas usually separate authors in Kurrent's
+    # cleaned metadata (e.g., "John Davies, Beth Tanner, Goofus Gallant").
+    return [piece.strip() for piece in text.split(",") if piece.strip()]
+
+
+def surname_from_author_name(author_name: str) -> str | None:
+    """Return a best-effort surname for one author name."""
+
+    name = collapse_whitespace(author_name).strip(" ,")
+
+    if not name:
+        return None
+
+    # Handle common bibliographic "Surname, Given" strings when they survive
+    # as a single author token.
+    if "," in name:
+        name = name.split(",", 1)[0].strip()
+
+    name = re.sub(r"\([^)]*\)", " ", name)
+    name = collapse_whitespace(name)
+    tokens = [token.strip(".,") for token in name.split() if token.strip(".,")]
+
+    while tokens and tokens[-1].lower() in AUTHOR_SUFFIXES:
+        tokens.pop()
+
+    if not tokens:
+        return None
+
+    surname_tokens = [tokens[-1]]
+    i = len(tokens) - 2
+    while i >= 0 and tokens[i].lower() in SURNAME_PARTICLES:
+        surname_tokens.insert(0, tokens[i])
+        i -= 1
+
+    surname = " ".join(surname_tokens).strip()
+
+    if not surname or re.fullmatch(r"[A-Z]\.?", surname):
+        return None
+
+    return surname
+
+
+def author_surname_counts(documents) -> list[tuple[str, int]]:
+    """Return surname counts across all author positions in all documents."""
+
+    counts: dict[str, tuple[str, int]] = {}
+
+    for document in documents:
+        for author_name in split_author_names(getattr(document, "authors", None)):
+            surname = surname_from_author_name(author_name)
+
+            if surname is None:
+                continue
+
+            key = surname.casefold()
+            display, count = counts.get(key, (surname, 0))
+            counts[key] = (display, count + 1)
+
+    return sorted(
+        counts.values(),
+        key=lambda item: (-item[1], item[0].casefold()),
+    )
+
+
+def chunk_counts_by_document(store) -> dict[str, int]:
+    """Return stored chunk counts keyed by document id."""
+
+    rows = store.conn.execute(
+        """
+        SELECT doc_id, COUNT(*) AS chunk_count
+        FROM chunks
+        GROUP BY doc_id
+        """
+    ).fetchall()
+
+    return {row["doc_id"]: row["chunk_count"] for row in rows}
+
+def section_counts_by_document(store) -> dict[str, int]:
+    """Return distinct stored section counts keyed by document id."""
+
+    rows = store.conn.execute(
+        """
+        SELECT doc_id, COUNT(DISTINCT section_key) AS section_count
+        FROM (
+            SELECT
+                doc_id,
+                CASE
+                    WHEN section_index IS NOT NULL THEN 'index:' || section_index
+                    WHEN section_title IS NOT NULL AND TRIM(section_title) <> ''
+                        THEN 'title:' || LOWER(TRIM(section_title))
+                    ELSE NULL
+                END AS section_key
+            FROM chunks
+        )
+        WHERE section_key IS NOT NULL
+        GROUP BY doc_id
+        """
+    ).fetchall()
+
+    return {row["doc_id"]: row["section_count"] for row in rows}
+
+
+def page_counts_by_document(store) -> dict[str, int]:
+    """Return approximate page counts keyed by document id from chunk provenance."""
+
+    rows = store.conn.execute(
+        """
+        SELECT doc_id, MAX(page_end) AS page_count
+        FROM chunks
+        WHERE page_end IS NOT NULL
+        GROUP BY doc_id
+        """
+    ).fetchall()
+
+    return {row["doc_id"]: row["page_count"] for row in rows}
+
+
+def average_count_per_document(counts_by_document: dict[str, int], document_count: int) -> float:
+    """Return average of a per-document count over all documents."""
+
+    if document_count <= 0:
+        return 0.0
+
+    return sum(counts_by_document.values()) / document_count
+
+
+def _missing_metadata_count(documents, field_name: str) -> int:
+    """Return count of documents missing one metadata field."""
+
+    count = 0
+
+    for document in documents:
+        value = getattr(document, field_name, None)
+
+        if value is None:
+            count += 1
+        elif isinstance(value, str) and not value.strip():
+            count += 1
+
+    return count
+
+
+def _chunk_health_counts(documents, store) -> tuple[int, int, list]:
+    """Return (current_count, stale_or_missing_count, current_documents)."""
+
+    from kurrent.chunker import chunker_version
+    from kurrent.pipeline import is_current_text_pipeline_fingerprint
+
+    current_count = 0
+    stale_or_missing_count = 0
+    current_documents = []
+
+    for document in documents:
+        if document is None or not document_pdf_exists(document):
+            continue
+
+        try:
+            if (
+                hasattr(store, "document_has_no_extractable_text")
+                and store.document_has_no_extractable_text(document.doc_id)
+            ):
+                current_count += 1
+                continue
+
+            chunks = store.get_chunks_for_document(
+                doc_id=document.doc_id,
+                chunker_version=chunker_version(),
+            )
+            pipeline_fingerprint = store.get_document_pipeline_fingerprint(
+                document.doc_id,
+            )
+            has_current_pipeline = is_current_text_pipeline_fingerprint(
+                pipeline_fingerprint,
+            )
+
+            if chunks and has_current_pipeline:
+                current_count += 1
+                current_documents.append(document)
+            else:
+                stale_or_missing_count += 1
+        except Exception:
+            stale_or_missing_count += 1
+
+    return current_count, stale_or_missing_count, current_documents
+
+
+def _semantic_index_missing_count(documents, embedder) -> int | None:
+    """Return how many current documents are missing from the semantic index."""
+
+    if not hasattr(embedder, "has_document"):
+        return None
+
+    missing = 0
+
+    for document in documents:
+        try:
+            if not embedder.has_document(document.doc_id):
+                missing += 1
+        except Exception:
+            return None
+
+    return missing
+
+
+def run_stats(args: argparse.Namespace) -> int:
+    """Print summary statistics for the current Kurrent database."""
+
+    from kurrent.config import get_kurrent_state_paths
+    from kurrent.state_store import StateStore
+
+    if args.top_authors < 0:
+        raise CliUsageError("--top-authors must be zero or greater.")
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    print("\nKurrent database stats")
+    print("----------------------")
+    print(f"State directory:        {state_paths.state_dir}")
+    print(f"SQLite database:        {state_paths.sqlite_path}")
+    print(f"Chroma directory:       {state_paths.chroma_path}")
+    print(f"Managed PDF directory:  {state_paths.pdfs_path}")
+
+    if not state_paths.sqlite_path.exists():
+        print("Database exists:        no")
+        print("Documents:              0")
+        print("Chunks:                 0")
+        print()
+        print("Document size")
+        print("-------------")
+        print("Avg sections/document:  0.00")
+        print("Avg pages/document:     0.00")
+        print("Avg chunks/document:    0.00")
+        return 0
+
+    store = StateStore(state_paths.sqlite_path)
+
+    try:
+        documents = store.list_documents()
+        chunk_counts = chunk_counts_by_document(store)
+        section_counts = section_counts_by_document(store)
+        page_counts = page_counts_by_document(store)
+        document_count = len(documents)
+        chunk_count = sum(chunk_counts.values())
+        avg_chunks = average_count_per_document(chunk_counts, document_count)
+        avg_sections = average_count_per_document(section_counts, document_count)
+        avg_pages = average_count_per_document(page_counts, document_count)
+
+        print("Database exists:        yes")
+        print(f"Documents:              {document_count}")
+        print(f"Chunks:                 {chunk_count}")
+
+        print()
+        print("Document size")
+        print("-------------")
+        print(f"Avg sections/document:  {avg_sections:.2f}")
+        print(f"Avg pages/document:     {avg_pages:.2f}")
+        print(f"Avg chunks/document:    {avg_chunks:.2f}")
+
+        if args.top_authors:
+            print()
+            print(f"Top author surnames (top {args.top_authors})")
+            print("--------------------------------")
+            top_authors = author_surname_counts(documents)[: args.top_authors]
+
+            if not top_authors:
+                print("No author metadata found.")
+            else:
+                surname_width = max(len(surname) for surname, _count in top_authors) + 2
+                count_width = max(len(str(count)) for _surname, count in top_authors)
+
+                for surname, count in top_authors:
+                    print(f"{surname + ':':<{surname_width + 1}}{count:>{count_width}}")
+    finally:
+        store.close()
+
+    return 0
+
+
+def run_health(args: argparse.Namespace) -> int:
+    """Print health checks for the current Kurrent database."""
+
+    from kurrent.config import get_kurrent_state_paths
+    from kurrent.embedder import Embedder
+    from kurrent.state_store import StateStore
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    print("\nKurrent database health")
+    print("-----------------------")
+    print(f"State directory:        {state_paths.state_dir}")
+    print(f"SQLite database:        {state_paths.sqlite_path}")
+    print(f"Chroma directory:       {state_paths.chroma_path}")
+    print(f"Managed PDF directory:  {state_paths.pdfs_path}")
+
+    if not state_paths.sqlite_path.exists():
+        print("Database exists:        no")
+        return 0
+
+    store = StateStore(state_paths.sqlite_path)
+
+    try:
+        documents = store.list_documents()
+        missing_pdf_paths = sum(
+            1
+            for document in documents
+            if document is not None and not document_pdf_exists(document)
+        )
+        current_chunks, stale_or_missing_chunks, current_documents = _chunk_health_counts(
+            documents,
+            store,
+        )
+
+        print("Database exists:        yes")
+        print(f"Documents:              {len(documents)}")
+
+        print()
+        print("Metadata completeness")
+        print("---------------------")
+        print(f"Missing authors:        {_missing_metadata_count(documents, 'authors')}")
+        print(f"Missing year:           {_missing_metadata_count(documents, 'year')}")
+        print(f"Missing DOI:            {_missing_metadata_count(documents, 'doi')}")
+
+        print()
+        print("PDF files")
+        print("---------")
+        print(f"Missing PDF paths:      {missing_pdf_paths}")
+
+        print()
+        print("Derived artifacts")
+        print("-----------------")
+        print(f"Documents with all chunks current:        {current_chunks}")
+        print(f"Documents with stale/missing chunks:      {stale_or_missing_chunks}")
+
+        print()
+        print("Semantic index")
+        print("--------------")
+        try:
+            embedder = Embedder(state_paths.chroma_path)
+            missing_from_index = _semantic_index_missing_count(
+                current_documents,
+                embedder,
+            )
+            if missing_from_index is None:
+                print("Missing from index:     unable to check")
+            else:
+                print(f"Missing from index:     {missing_from_index} documents")
+        except Exception as exc:
+            print(f"Missing from index:     unable to check ({exc})")
+    finally:
+        store.close()
+
+    return 0
+
 def run_search(args: argparse.Namespace) -> int:
     """Run the kurrent search command."""
 
@@ -3843,6 +4225,26 @@ def build_parser() -> argparse.ArgumentParser:
         func=run_ingest,
         metadata_mode="crossref",
     )
+
+    stats_parser = subparsers.add_parser(
+        "stats",
+        help="show summary statistics for the current Kurrent database",
+    )
+    stats_parser.add_argument(
+        "--top-authors",
+        type=int,
+        default=10,
+        metavar="K",
+        help="number of most common author surnames to show (default: 10).",
+    )
+    stats_parser.set_defaults(func=run_stats)
+
+    health_parser = subparsers.add_parser(
+        "health",
+        help="show health checks for the current Kurrent database",
+    )
+    health_parser.set_defaults(func=run_health)
+
 
     search_parser = subparsers.add_parser(
         "search",

@@ -804,3 +804,242 @@ def test_ingest_startup_status_lines_are_indented_like_ask(
 
     assert startup_lines
     assert all(line.startswith(" ") for line in startup_lines)
+
+def test_stats_command_parses_top_authors():
+    """Verify that stats accepts a configurable top-author count."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["stats", "--top-authors", "3"])
+
+    assert args.command == "stats"
+    assert args.top_authors == 3
+
+
+def test_author_surname_counts_count_all_author_positions():
+    """Verify top author stats count surnames from every author-list position."""
+
+    class FakeDocument:
+        def __init__(self, authors):
+            self.authors = authors
+
+    documents = [
+        FakeDocument("John Davies, Beth Tanner, and Goofus Gallant"),
+        FakeDocument("Beth Tanner and Jane Tanner"),
+        FakeDocument("Gregor Betz"),
+    ]
+
+    assert cli.author_surname_counts(documents) == [
+        ("Tanner", 3),
+        ("Betz", 1),
+        ("Davies", 1),
+        ("Gallant", 1),
+    ]
+
+
+def test_stats_command_prints_database_summary(tmp_path, capsys):
+    """Verify that stats prints document, chunk, and author summary counts."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import Chunk, Document
+    from kurrent.state_store import StateStore
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    store = StateStore(state_dir / "kurrent.db")
+
+    try:
+        first_doc = Document(
+            doc_id="doc-1",
+            pdf_sha256="sha-1",
+            storage_mode="external",
+            pdf_path=tmp_path / "first.pdf",
+            ingested_at=datetime.now(timezone.utc),
+            title="First Paper",
+            authors="John Davies, Beth Tanner, and Goofus Gallant",
+            year=2020,
+            doi=None,
+        )
+        second_doc = Document(
+            doc_id="doc-2",
+            pdf_sha256="sha-2",
+            storage_mode="external",
+            pdf_path=tmp_path / "second.pdf",
+            ingested_at=datetime.now(timezone.utc),
+            title="Second Paper",
+            authors="Beth Tanner and Gregor Betz",
+            year=2021,
+            doi=None,
+        )
+        store.insert_document(first_doc)
+        store.insert_document(second_doc)
+        store.insert_chunks(
+            [
+                Chunk(
+                    doc_id="doc-1",
+                    chunker_version="test-chunker",
+                    chunk_index=0,
+                    text="chunk one",
+                    text_sha256="chunk-sha-1",
+                    page_start=1,
+                    page_end=2,
+                    section_index=0,
+                    section_title="Introduction",
+                ),
+                Chunk(
+                    doc_id="doc-1",
+                    chunker_version="test-chunker",
+                    chunk_index=1,
+                    text="chunk two",
+                    text_sha256="chunk-sha-2",
+                    page_start=3,
+                    page_end=5,
+                    section_index=1,
+                    section_title="Model",
+                ),
+                Chunk(
+                    doc_id="doc-2",
+                    chunker_version="test-chunker",
+                    chunk_index=0,
+                    text="chunk three",
+                    text_sha256="chunk-sha-3",
+                    page_start=1,
+                    page_end=3,
+                    section_index=0,
+                    section_title="Introduction",
+                ),
+            ]
+        )
+    finally:
+        store.close()
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--state-dir",
+            str(state_dir),
+            "stats",
+            "--top-authors",
+            "2",
+        ]
+    )
+
+    assert cli.run_stats(args) == 0
+
+    output = capsys.readouterr().out
+
+    assert f"SQLite database:        {state_dir / 'kurrent.db'}" in output
+    assert "Documents:              2" in output
+    assert "Chunks:                 3" in output
+    assert "Document size" in output
+    assert "Avg sections/document:  1.50" in output
+    assert "Avg pages/document:     4.00" in output
+    assert "Avg chunks/document:    1.50" in output
+    assert "Tanner:  2" in output
+    assert "Betz:    1" in output or "Davies:  1" in output
+
+
+def test_health_command_prints_database_health(tmp_path, capsys, monkeypatch):
+    """Verify health reports metadata, PDF, chunk, and semantic-index checks."""
+
+    from datetime import datetime, timezone
+    import sys
+    import types
+
+    from kurrent.chunker import chunker_version
+    from kurrent.pipeline import current_text_pipeline_fingerprint
+    from kurrent.schema import Chunk, Document
+    from kurrent.state_store import StateStore
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    existing_pdf = tmp_path / "existing.pdf"
+    existing_pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    missing_pdf = tmp_path / "missing.pdf"
+    store = StateStore(state_dir / "kurrent.db")
+
+    try:
+        current_doc = Document(
+            doc_id="doc-current",
+            pdf_sha256="sha-current",
+            storage_mode="external",
+            pdf_path=existing_pdf,
+            ingested_at=datetime.now(timezone.utc),
+            title="Current Paper",
+            authors="Jane Smith",
+            year=2022,
+            doi="10.123/example",
+        )
+        stale_doc = Document(
+            doc_id="doc-stale",
+            pdf_sha256="sha-stale",
+            storage_mode="external",
+            pdf_path=existing_pdf,
+            ingested_at=datetime.now(timezone.utc),
+            title="Stale Paper",
+            authors=None,
+            year=None,
+            doi=None,
+        )
+        missing_path_doc = Document(
+            doc_id="doc-missing-path",
+            pdf_sha256="sha-missing-path",
+            storage_mode="external",
+            pdf_path=missing_pdf,
+            ingested_at=datetime.now(timezone.utc),
+            title="Missing Path Paper",
+            authors="John Davies",
+            year=2020,
+            doi=None,
+        )
+        store.insert_document(current_doc)
+        store.insert_document(stale_doc)
+        store.insert_document(missing_path_doc)
+        store.insert_chunks(
+            [
+                Chunk(
+                    doc_id="doc-current",
+                    chunker_version=chunker_version(),
+                    chunk_index=0,
+                    text="current chunk",
+                    text_sha256="chunk-current",
+                ),
+            ]
+        )
+        store.set_document_pipeline_fingerprint(
+            "doc-current",
+            current_text_pipeline_fingerprint(),
+        )
+    finally:
+        store.close()
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+        def has_document(self, doc_id):
+            return False
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.embedder",
+        types.SimpleNamespace(Embedder=FakeEmbedder),
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--state-dir", str(state_dir), "health"])
+
+    assert cli.run_health(args) == 0
+
+    output = capsys.readouterr().out
+
+    assert "Kurrent database health" in output
+    assert f"SQLite database:        {state_dir / 'kurrent.db'}" in output
+    assert "Documents:              3" in output
+    assert "Missing authors:        1" in output
+    assert "Missing year:           1" in output
+    assert "Missing DOI:            2" in output
+    assert "Missing PDF paths:      1" in output
+    assert "Documents with all chunks current:        1" in output
+    assert "Documents with stale/missing chunks:      1" in output
+    assert "Missing from index:     1 documents" in output

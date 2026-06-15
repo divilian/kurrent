@@ -21,8 +21,9 @@
 - [x] pop up PDFs in user PDF reader
 - [x] pop up PDFs to correct page in user PDF reader
 - [x] pop up PDFs highlighting key text in user PDF reader
-- [ ] summary verb
+- [x] stats verb
 - [ ] list verb
+- [ ] year histogram
 
 ## Bugs
 
