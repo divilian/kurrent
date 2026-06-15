@@ -79,6 +79,7 @@ CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 SEMANTIC_OVERFETCH_FACTOR = 5
 ANSI_RED = "\033[31m"
 ANSI_YELLOW = "\033[93m"
+ANSI_GREEN = "\033[32m"
 ANSI_GRAY = "\033[90m"
 ANSI_WHITE = "\033[97m"
 ANSI_ORANGE = "\033[38;5;208m"
@@ -121,6 +122,18 @@ def yellow_menu_text(text: str) -> str:
     """Return source-browser menu text colored yellow when possible."""
 
     return colored_cli_text(text, ANSI_YELLOW)
+
+
+def green_prompt(text: str) -> str:
+    """Return the document-list prompt colored green when possible."""
+
+    return colored_cli_text(text, ANSI_GREEN)
+
+
+def green_menu_text(text: str) -> str:
+    """Return document-list menu text colored green when possible."""
+
+    return colored_cli_text(text, ANSI_GREEN)
 
 
 def gray_status_text(text: str) -> str:
@@ -2663,6 +2676,308 @@ def format_year_histogram(
 
     return lines
 
+
+LEADING_TITLE_ARTICLE_PATTERN = re.compile(r"^(a|an|the)\s+(.+)$", re.IGNORECASE)
+
+
+def document_hit_from_stored_document(document):
+    """Return a DocumentHit for an already-loaded stored document."""
+
+    from kurrent.schema import DocumentHit
+
+    return DocumentHit(
+        doc_id=document.doc_id,
+        path=document.pdf_path,
+        title=document.title,
+        authors=document.authors,
+        year=document.year,
+    )
+
+
+def year_display(year) -> str:
+    """Return a compact year display string."""
+
+    return str(year) if year is not None else "n.d."
+
+
+def first_author_surname(document) -> str:
+    """Return a best-effort first-author surname for list tags."""
+
+    authors = split_author_names(getattr(document, "authors", None))
+
+    if authors:
+        surname = surname_from_author_name(authors[0])
+        if surname:
+            return surname
+
+    title = getattr(document, "title", None)
+    if title:
+        token = re.sub(r"[^A-Za-z0-9]+", "", title.split()[0])
+        if token:
+            return token
+
+    path = getattr(document, "pdf_path", None)
+    if path is not None:
+        stem = Path(path).stem
+        token = re.sub(r"[^A-Za-z0-9]+", "", stem.split("-", 1)[0])
+        if token:
+            return token
+
+    return "unknown"
+
+
+def document_list_disambiguator(index: int) -> str:
+    """Return a,b,c,...,z,aa,ab,... for same-author/year tags."""
+
+    letters = ""
+    value = index
+
+    while True:
+        letters = chr(ord("a") + (value % 26)) + letters
+        value = value // 26 - 1
+        if value < 0:
+            return letters
+
+
+def default_document_list_entries(documents) -> list[tuple[str, object]]:
+    """Return first-author/year tags, adding letters only to disambiguate."""
+
+    base_entries: list[tuple[str, object]] = []
+
+    for document in documents:
+        surname = first_author_surname(document).lower()
+        year = year_display(getattr(document, "year", None))
+        base_entries.append((f"{surname}{year}", document))
+
+    base_counts: dict[str, int] = {}
+    for base, _document in base_entries:
+        base_counts[base] = base_counts.get(base, 0) + 1
+
+    base_seen: dict[str, int] = {}
+    entries: list[tuple[str, object]] = []
+
+    for base, document in base_entries:
+        if base_counts[base] <= 1:
+            label = base
+        else:
+            index = base_seen.get(base, 0)
+            base_seen[base] = index + 1
+            label = f"{base}{document_list_disambiguator(index)}"
+        entries.append((label, document))
+
+    return sorted(entries, key=lambda item: (item[0].casefold(), item[1].doc_id))
+
+
+def invert_first_author_for_listing(authors: str | None) -> str:
+    """Return author text with the first author rendered surname-first."""
+
+    pieces = split_author_names(authors)
+
+    if not pieces:
+        return "unknown author"
+
+    first = collapse_whitespace(pieces[0]).strip(" ,")
+    surname = surname_from_author_name(first)
+
+    if surname:
+        first_tokens = [token.strip(".,") for token in first.split() if token.strip(".,")]
+        surname_token_count = len(surname.split())
+        given_tokens = first_tokens[: max(0, len(first_tokens) - surname_token_count)]
+        given = " ".join(given_tokens).strip()
+        first_display = f"{surname}, {given}" if given else surname
+    else:
+        first_display = first
+
+    if len(pieces) == 1:
+        return first_display
+
+    if len(pieces) == 2:
+        return f"{first_display} and {pieces[1]}"
+
+    return f"{first_display}, " + ", ".join(pieces[1:-1]) + f", and {pieces[-1]}"
+
+
+def author_document_list_entry(document) -> str:
+    """Return an author-sorted document-list entry."""
+
+    return f"{invert_first_author_for_listing(getattr(document, 'authors', None))}, {year_display(getattr(document, 'year', None))}"
+
+
+def title_for_listing(title: str | None) -> str:
+    """Return title with leading article moved to the end for sorting/display."""
+
+    if not title or not title.strip():
+        return "(untitled)"
+
+    title = collapse_whitespace(title).strip()
+    match = LEADING_TITLE_ARTICLE_PATTERN.match(title)
+
+    if match:
+        article = match.group(1)
+        rest = match.group(2).strip()
+        return f"{rest}, {article}"
+
+    return title
+
+
+def title_document_list_entry(document) -> str:
+    """Return a title-sorted document-list entry."""
+
+    return f"{title_for_listing(getattr(document, 'title', None))} ({year_display(getattr(document, 'year', None))})."
+
+
+def list_entries_for_documents(documents, mode: str) -> list[tuple[str, object]]:
+    """Return sorted display labels and documents for kurrent list."""
+
+    if mode == "author":
+        entries = [(author_document_list_entry(document), document) for document in documents]
+    elif mode == "title":
+        entries = [(title_document_list_entry(document), document) for document in documents]
+    else:
+        return default_document_list_entries(documents)
+
+    return sorted(entries, key=lambda item: (item[0].casefold(), item[1].doc_id))
+
+
+def print_document_list(entries: list[tuple[str, object]]) -> None:
+    """Print the numbered document list in green."""
+
+    if not entries:
+        print(green_menu_text("No documents found."))
+        return
+
+    width = len(str(len(entries)))
+    for index, (label, _document) in enumerate(entries, start=1):
+        print(green_menu_text(f"{index:>{width}}. {label}"))
+
+
+def prompt_document_list_action() -> str:
+    """Prompt for a document-list selection."""
+
+    try:
+        return input(green_prompt("documents> ")).strip()
+    except EOFError:
+        print()
+        return "q"
+
+
+def print_list_document_summary(document) -> None:
+    """Print the selected document's core metadata."""
+
+    print()
+    print_wrapped(document.title or "(untitled)")
+    print_field("authors", document.authors or "unknown author")
+    print_field("year", document.year if document.year is not None else "n.d.")
+    print_pdf_path_field(document)
+
+
+def prompt_list_document_action(document=None, state_store=None) -> str:
+    """Prompt for actions on one selected document."""
+
+    return prompt_document_result_action(
+        document_hit_from_stored_document(document) if document is not None else None,
+        state_store,
+    )
+
+
+def browse_list_document(entries: list[tuple[str, object]], start_index: int, store) -> None:
+    """Browse selected documents; q returns to the document list."""
+
+    index = start_index
+
+    while 0 <= index < len(entries):
+        document = entries[index][1]
+        hit = document_hit_from_stored_document(document)
+        print_list_document_summary(document)
+
+        while True:
+            choice = prompt_list_document_action(document, store)
+
+            if choice == "":
+                index += 1
+                break
+
+            if choice == "d":
+                print_document_detail(hit, index + 1, len(entries), state_store=store)
+                continue
+
+            if choice == "o":
+                if pdf_exists_for_result(hit, store):
+                    open_document_pdf(document, purpose="PDF")
+                else:
+                    print("Please press Enter, or type d, e, or q.")
+                continue
+
+            if choice == "e":
+                refreshed_hit = edit_document_hit_metadata(hit, store)
+                refreshed_document = store.get_document(refreshed_hit.doc_id)
+                if refreshed_document is not None:
+                    entries[index] = (entries[index][0], refreshed_document)
+                    document = refreshed_document
+                    hit = document_hit_from_stored_document(document)
+                    print_list_document_summary(document)
+                continue
+
+            if is_quit_command(choice):
+                return
+
+            if pdf_exists_for_result(hit, store):
+                print("Please press Enter, or type d, o, e, or q.")
+            else:
+                print("Please press Enter, or type d, e, or q.")
+
+
+def run_list(args: argparse.Namespace) -> int:
+    """Run the interactive kurrent list command."""
+
+    from kurrent.config import get_kurrent_state_paths
+    from kurrent.state_store import StateStore
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    if not state_paths.sqlite_path.exists():
+        raise CliUsageError(
+            "No kurrent SQLite database exists yet. Ingest PDFs first, or pass "
+            "--state-dir pointing to an existing kurrent state directory. "
+            f"Expected database: {state_paths.sqlite_path}"
+        )
+
+    store = StateStore(state_paths.sqlite_path)
+
+    try:
+        documents = store.list_documents()
+        entries = list_entries_for_documents(documents, args.list_mode)
+
+        while True:
+            print()
+            print_document_list(entries)
+
+            choice = prompt_document_list_action()
+            lowered = choice.lower()
+
+            if is_quit_command(lowered):
+                return 0
+
+            if not lowered:
+                continue
+
+            try:
+                selection = int(lowered)
+            except ValueError:
+                print(green_menu_text("Type a document number, or q to quit."))
+                continue
+
+            if selection < 1 or selection > len(entries):
+                print(green_menu_text(f"Choose a number from 1 to {len(entries)}, or q to quit."))
+                continue
+
+            browse_list_document(entries, selection - 1, store)
+    finally:
+        store.close()
+
+    return 0
+
+
 def run_stats(args: argparse.Namespace) -> int:
     """Print summary statistics for the current Kurrent database."""
 
@@ -4313,9 +4628,34 @@ def build_parser() -> argparse.ArgumentParser:
         metadata_mode="crossref",
     )
 
+    list_parser = subparsers.add_parser(
+        "list",
+        help="list ingested documents and inspect their metadata",
+    )
+    list_group = list_parser.add_mutually_exclusive_group()
+    list_group.add_argument(
+        "-a",
+        "--author",
+        "--authors",
+        action="store_const",
+        const="author",
+        dest="list_mode",
+        help="list documents by authors and year.",
+    )
+    list_group.add_argument(
+        "-t",
+        "--title",
+        "--titles",
+        action="store_const",
+        const="title",
+        dest="list_mode",
+        help="list documents by title and year.",
+    )
+    list_parser.set_defaults(func=run_list, list_mode="tag")
+
     stats_parser = subparsers.add_parser(
         "stats",
-        help="show summary statistics for the current Kurrent database",
+        help="show summary statistics for the Kurrent database",
     )
     stats_parser.add_argument(
         "--top-authors",
@@ -4335,7 +4675,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     health_parser = subparsers.add_parser(
         "health",
-        help="show health checks for the current Kurrent database",
+        help="show health checks for the Kurrent database",
     )
     health_parser.set_defaults(func=run_health)
 
@@ -4545,7 +4885,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ask_parser = subparsers.add_parser(
         "ask",
-        help="ask research questions using the current Kurrent library",
+        help="ask research questions using the Kurrent library",
     )
     ask_parser.add_argument(
         "-n",

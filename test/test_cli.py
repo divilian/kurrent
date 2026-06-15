@@ -1095,3 +1095,173 @@ def test_health_command_prints_database_health(tmp_path, capsys, monkeypatch):
     assert "Documents with all chunks current:   1" in output
     assert "Documents with stale/missing chunks: 1" in output
     assert "Missing from index:     1 documents" in output
+
+
+def test_list_command_parses_display_aliases():
+    """Verify list accepts author/title display aliases."""
+
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["list"])
+    assert args.command == "list"
+    assert args.list_mode == "tag"
+
+    for flag in ["-a", "--author", "--authors"]:
+        args = parser.parse_args(["list", flag])
+        assert args.list_mode == "author"
+
+    for flag in ["-t", "--title", "--titles"]:
+        args = parser.parse_args(["list", flag])
+        assert args.list_mode == "title"
+
+
+def test_document_list_entries_format_tags_authors_and_titles(tmp_path):
+    """Verify kurrent list display modes use the requested sort labels."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import Document
+
+    now = datetime.now(timezone.utc)
+    docs = [
+        Document(
+            doc_id="doc-1",
+            pdf_sha256="sha-1",
+            storage_mode="external",
+            pdf_path=tmp_path / "one.pdf",
+            ingested_at=now,
+            title="The Surprising Effects of Convergence",
+            authors="Stephen Davies and Hannah Zontine",
+            year=2016,
+        ),
+        Document(
+            doc_id="doc-2",
+            pdf_sha256="sha-2",
+            storage_mode="external",
+            pdf_path=tmp_path / "two.pdf",
+            ingested_at=now,
+            title="A Smaller Paper",
+            authors="Stephen Davies and Beth Tanner",
+            year=2016,
+        ),
+    ]
+
+    assert [label for label, _doc in cli.list_entries_for_documents(docs, "tag")] == [
+        "davies2016a",
+        "davies2016b",
+    ]
+    assert [label for label, _doc in cli.list_entries_for_documents(docs, "author")] == [
+        "Davies, Stephen and Beth Tanner, 2016",
+        "Davies, Stephen and Hannah Zontine, 2016",
+    ]
+    assert [label for label, _doc in cli.list_entries_for_documents(docs, "title")] == [
+        "Smaller Paper, A (2016).",
+        "Surprising Effects of Convergence, The (2016).",
+    ]
+
+
+def test_list_command_prints_green_document_list_and_returns_to_list(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    """Verify list can inspect a document and return to the document menu."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import Document
+    from kurrent.state_store import StateStore
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    store = StateStore(state_dir / "kurrent.db")
+
+    try:
+        store.insert_document(
+            Document(
+                doc_id="doc-1",
+                pdf_sha256="sha-1",
+                storage_mode="external",
+                pdf_path=tmp_path / "paper.pdf",
+                ingested_at=datetime.now(timezone.utc),
+                title="A Mechanistic Model of Gossip",
+                authors="Mari Kawakatsu, Taylor A. Kessinger, Joshua B. Plotkin",
+                year=2024,
+            )
+        )
+    finally:
+        store.close()
+
+    responses = iter(["1", "q", "q"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--state-dir", str(state_dir), "list"])
+
+    assert cli.run_list(args) == 0
+
+    output = capsys.readouterr().out
+    assert "1. kawakatsu2024" in output
+    assert "A Mechanistic Model of Gossip" in output
+    assert "authors: Mari Kawakatsu, Taylor A. Kessinger, Joshua B. Plotkin" in output
+    assert "year: 2024" in output
+    assert f"pdf: {tmp_path / 'paper.pdf'}" in output
+
+
+def test_list_open_pdf_returns_to_same_action_prompt_without_editing(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    """Verify list open action does not fall through into metadata editing."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import Document
+    from kurrent.state_store import StateStore
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    store = StateStore(state_dir / "kurrent.db")
+
+    try:
+        store.insert_document(
+            Document(
+                doc_id="doc-1",
+                pdf_sha256="sha-1",
+                storage_mode="external",
+                pdf_path=pdf_path,
+                ingested_at=datetime.now(timezone.utc),
+                title="A Mechanistic Model of Gossip",
+                authors="Mari Kawakatsu, Taylor A. Kessinger, Joshua B. Plotkin",
+                year=2024,
+            )
+        )
+    finally:
+        store.close()
+
+    opened = []
+
+    def fake_open_document_pdf(document, *, purpose="PDF"):
+        opened.append((document.doc_id, purpose))
+        print(f"Opened {purpose}: {document.pdf_path}")
+
+    def fail_edit_metadata(*_args, **_kwargs):
+        raise AssertionError("open PDF action should not edit metadata")
+
+    responses = iter(["1", "o", "q", "q"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+    monkeypatch.setattr(cli, "open_document_pdf", fake_open_document_pdf)
+    monkeypatch.setattr(cli, "edit_document_hit_metadata", fail_edit_metadata)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--state-dir", str(state_dir), "list"])
+
+    assert cli.run_list(args) == 0
+    assert opened == [("doc-1", "PDF")]
+
+    output = capsys.readouterr().out
+    assert output.count("A Mechanistic Model of Gossip") == 1
+    assert f"Opened PDF: {pdf_path}" in output
