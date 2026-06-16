@@ -58,9 +58,13 @@ from kurrent.cli_display import (
 )
 from kurrent.config import (
     DEFAULT_METADATA_LLM,
+    DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+    DEFAULT_OLLAMA_SUMMARY_MODEL,
+    DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
     DEFAULT_OLLAMA_URL,
     DEFAULT_RAG_LLM,
     DEFAULT_RELEVANCE_LLM,
+    DEFAULT_SUMMARY_DEPTH,
 )
 from kurrent.relevance_judge import (
     RelevanceJudgment,
@@ -91,6 +95,54 @@ ANSI_PINK = "\033[38;5;205m"
 
 class CliUsageError(Exception):
     """Raised for friendly CLI usage errors."""
+
+
+class ScreeningSummaryDeclined(Exception):
+    """Raised when the user declines to ingest after seeing a summary."""
+
+
+
+class KurrentArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser with friendlier optional ingest summary counts."""
+
+    @staticmethod
+    def _looks_like_positive_int(text: str) -> bool:
+        try:
+            return int(text) >= 1
+        except ValueError:
+            return False
+
+    def _normalize_optional_summary_counts(
+        self,
+        args: list[str],
+    ) -> list[str]:
+        normalized: list[str] = []
+        i = 0
+
+        while i < len(args):
+            token = args[i]
+            normalized.append(token)
+
+            if token in {"--summary", "--summary-depth"}:
+                next_token = args[i + 1] if i + 1 < len(args) else None
+
+                if (
+                    next_token is None
+                    or next_token.startswith("-")
+                    or not self._looks_like_positive_int(next_token)
+                ):
+                    normalized.append(str(DEFAULT_SUMMARY_DEPTH))
+
+            i += 1
+
+        return normalized
+
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+
+        args = self._normalize_optional_summary_counts(list(args))
+        return super().parse_args(args, namespace)
 
 
 def print_usage_error(message: str) -> None:
@@ -924,6 +976,84 @@ def ingest_pdf_with_metadata(
     )
 
 
+def prompt_yes_no(prompt: str) -> bool:
+    """Prompt until the user answers yes or no."""
+
+    while True:
+        answer = input(prompt).strip().lower()
+
+        if answer in {"y", "yes"}:
+            return True
+
+        if answer in {"n", "no"}:
+            return False
+
+        if is_quit_command(answer):
+            raise KeyboardInterrupt("Ingest cancelled by user.")
+
+        print("Please answer y or n.")
+
+
+def completed_sectioning_prefetch_result(
+    task: _SectioningPrefetchTask | None,
+):
+    """Return a background LLM-sectioning result only if it is ready now."""
+
+    if task is None or not task.future.done():
+        return None
+
+    try:
+        return task.future.result()
+    except Exception:
+        return None
+
+
+def run_screening_summary_gate(
+    pdf_path: Path,
+    *,
+    assume_yes: bool,
+    depth: int,
+    model: str,
+    ollama_url: str,
+    timeout_seconds: float,
+    max_num_ctx: int,
+    sectioning_prefetch_task: _SectioningPrefetchTask | None = None,
+) -> None:
+    """Summarize a PDF and ask whether ingestion should continue."""
+
+    from kurrent.summarizer import summarize_pdf_for_screening
+
+    summary = summarize_pdf_for_screening(
+        pdf_path=pdf_path,
+        depth=depth,
+        model=model,
+        ollama_url=ollama_url,
+        timeout_seconds=timeout_seconds,
+        max_num_ctx=max_num_ctx,
+        llm_sectioning_prefetch=completed_sectioning_prefetch_result(
+            sectioning_prefetch_task,
+        ),
+        progress_callback=print_gray_status,
+    )
+
+    print()
+    print("Screening summary")
+    print("-----------------")
+    print_wrapped(summary.text)
+    print()
+    print_wrapped(
+        "For a more complete summary after ingestion, use `kurrent summarize`."
+    )
+    print()
+
+    if assume_yes:
+        print_gray_status("Continuing because -y/--yes was used.")
+        return
+
+    if not prompt_yes_no("Ingest into Kurrent? (y/n) > "):
+        raise ScreeningSummaryDeclined("User declined ingestion after screening summary.")
+
+
 def ingest_one_pdf(
     pdf_path: Path,
     store,
@@ -935,6 +1065,12 @@ def ingest_one_pdf(
     storage_mode: str,
     managed_pdf_dir: Path | None,
     sectioning_prefetch_task: _SectioningPrefetchTask | None = None,
+    summarize_before_ingest: bool = True,
+    summary_depth: int = DEFAULT_SUMMARY_DEPTH,
+    summary_model: str = DEFAULT_OLLAMA_SUMMARY_MODEL,
+    summary_ollama_url: str = DEFAULT_OLLAMA_URL,
+    summary_timeout: float = DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
+    summary_max_num_ctx: int = DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
 ) -> IngestOutcome:
     """Ingest one PDF through the CLI workflow."""
 
@@ -975,6 +1111,18 @@ def ingest_one_pdf(
         print_existing_document_needs_current_chunks_message(
             source_pdf_path=pdf_path,
             existing_document=existing_status.document,
+        )
+
+    if summarize_before_ingest:
+        run_screening_summary_gate(
+            pdf_path,
+            assume_yes=assume_yes,
+            depth=summary_depth,
+            model=summary_model,
+            ollama_url=summary_ollama_url,
+            timeout_seconds=summary_timeout,
+            max_num_ctx=summary_max_num_ctx,
+            sectioning_prefetch_task=sectioning_prefetch_task,
         )
 
     metadata = extract_metadata(
@@ -4771,6 +4919,11 @@ def run_ingest(args: argparse.Namespace) -> int:
 
     state_paths = get_kurrent_state_paths(args.state_dir)
     storage_mode = "external" if args.in_place else "managed"
+    args.summary_enabled = not getattr(args, "no_summary", False)
+
+    if args.summary_depth < 1:
+        print_usage_error("Summary depth must be at least 1.")
+        return 2
 
     if state_paths.state_dir.exists():
         print_gray_status(f"kurrent state directory: {state_paths.state_dir}")
@@ -4793,6 +4946,14 @@ def run_ingest(args: argparse.Namespace) -> int:
     if not pdf_paths:
         print(f"No PDFs found under: {format_ingest_path_list(args.paths)}")
         return 0
+
+    if args.summary_enabled and len(pdf_paths) != 1:
+        print()
+        print_usage_error(
+            "Screening summaries currently support one PDF at a time. "
+            "Use --no-summary for multi-document or recursive ingest."
+        )
+        return 2
 
     doi_lookup = args.metadata_mode == "crossref"
     crossref_mailto = get_crossref_mailto()
@@ -4829,6 +4990,14 @@ def run_ingest(args: argparse.Namespace) -> int:
         + ("managed" if storage_mode == "managed" else "in-place")
     )
     print_gray_status(f"Metadata mode:           {args.metadata_mode}")
+    print_gray_status(
+        "Screening summary:       "
+        + (
+            f"depth {args.summary_depth}"
+            if args.summary_enabled
+            else "off"
+        )
+    )
     print_gray_status(
         "Sectioning mode:         "
         + (
@@ -4890,6 +5059,12 @@ def run_ingest(args: argparse.Namespace) -> int:
                         else None
                     ),
                     sectioning_prefetch_task=sectioning_prefetcher.task_for(pdf_path),
+                    summarize_before_ingest=args.summary_enabled,
+                    summary_depth=args.summary_depth,
+                    summary_model=DEFAULT_OLLAMA_SUMMARY_MODEL,
+                    summary_ollama_url=DEFAULT_OLLAMA_URL,
+                    summary_timeout=DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
+                    summary_max_num_ctx=DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
                 )
                 results.append(
                     IngestResult(
@@ -4898,6 +5073,10 @@ def run_ingest(args: argparse.Namespace) -> int:
                         already_existed=outcome.already_existed,
                     )
                 )
+            except ScreeningSummaryDeclined:
+                print()
+                print("Not ingested.")
+                return 0
             except KeyboardInterrupt:
                 print()
                 print("Cancelled.")
@@ -4955,7 +5134,7 @@ def run_ingest(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level kurrent CLI parser."""
 
-    parser = argparse.ArgumentParser(
+    parser = KurrentArgumentParser(
         prog="kurrent",
         description="kurrent command-line research-literature manager.",
     )
@@ -5012,6 +5191,36 @@ def build_parser() -> argparse.ArgumentParser:
             "LLM-assisted section recognition"
         ),
     )
+    summary_group = ingest_parser.add_mutually_exclusive_group()
+    summary_group.add_argument(
+        "--summary",
+        nargs="?",
+        const=DEFAULT_SUMMARY_DEPTH,
+        default=DEFAULT_SUMMARY_DEPTH,
+        type=int,
+        dest="summary_depth",
+        help=(
+            "show an ingest-screening summary before metadata review; "
+            f"optionally specify summary depth (default: {DEFAULT_SUMMARY_DEPTH})."
+        ),
+    )
+    summary_group.add_argument(
+        "--summary-depth",
+        nargs="?",
+        const=DEFAULT_SUMMARY_DEPTH,
+        type=int,
+        dest="summary_depth",
+        help=(
+            "show an ingest-screening summary with the given depth target "
+            f"for prose coverage (default: {DEFAULT_SUMMARY_DEPTH})."
+        ),
+    )
+    summary_group.add_argument(
+        "--no-summary",
+        action="store_true",
+        dest="no_summary",
+        help="skip the ingest-screening summary gate.",
+    )
 
     metadata_group = ingest_parser.add_mutually_exclusive_group()
     metadata_group.add_argument(
@@ -5034,6 +5243,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.set_defaults(
         func=run_ingest,
         metadata_mode="crossref",
+        no_summary=False,
+        summary_enabled=True,
     )
 
     list_parser = subparsers.add_parser(

@@ -1610,3 +1610,82 @@ def test_metadata_search_quit_does_not_reference_ingest_section_prefetcher(
     output = capsys.readouterr().out
     assert "Metadata search: 'test'" in output
     assert "A Test Paper" in output
+
+def test_ingest_summary_is_enabled_by_default():
+    """Verify that ingest defaults to a depth-2 screening summary."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "paper.pdf"])
+
+    assert args.no_summary is False
+    assert args.summary_depth == 2
+
+
+def test_ingest_accepts_summary_depth_short_flag():
+    """Verify that --summary can set a summary depth."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "--summary", "3", "paper.pdf"])
+
+    assert args.no_summary is False
+    assert args.summary_depth == 3
+
+
+def test_ingest_accepts_summary_depth_long_flag():
+    """Verify that --summary-depth can set a summary depth."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "--summary-depth", "1", "paper.pdf"])
+
+    assert args.no_summary is False
+    assert args.summary_depth == 1
+
+
+def test_ingest_rejects_removed_summary_paragraphs_flag():
+    """Verify that the old --summary-paragraphs and --summary-points spellings were removed."""
+
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ingest", "--summary-paragraphs", "1", "paper.pdf"])
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ingest", "--summary-points", "1", "paper.pdf"])
+
+
+def test_ingest_accepts_no_summary_flag():
+    """Verify that --no-summary disables the screening summary gate."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "--no-summary", "paper.pdf"])
+
+    assert args.no_summary is True
+    assert args.summary_depth == 2
+
+
+def test_summary_flags_are_mutually_exclusive():
+    """Verify that summary and no-summary flags cannot conflict."""
+
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ingest", "--summary", "2", "--no-summary", "paper.pdf"])
+
+def test_ingest_bare_summary_flag_does_not_eat_pdf_path():
+    """Verify that bare --summary remains usable before a path."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "--summary", "paper.pdf"])
+
+    assert args.summary_depth == 2
+    assert args.paths == [Path("paper.pdf")]
+
+
+def test_ingest_bare_summary_depth_flag_does_not_eat_pdf_path():
+    """Verify that bare --summary-depth remains usable before a path."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "--summary-depth", "paper.pdf"])
+
+    assert args.summary_depth == 2
+    assert args.paths == [Path("paper.pdf")]

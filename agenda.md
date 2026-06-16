@@ -30,6 +30,8 @@
 
 ## Bugs
 
+- [ ] rules-based summarizer on memex gives just "front matter"
+
 ## Later
 
 - [ ] metadata quality check, and auto-Crossref if it looks sus (my prev question: "Why can't an LLM check metadata on ingestion like it does sections?")
@@ -286,7 +288,3 @@ definitions.
 - Prefer source-specific ingestion routes, for example:
   - `kurrent ingest file paper.pdf`
   - `kurrent ingest zotero JSFWJ7G6`
-
-
-
-
