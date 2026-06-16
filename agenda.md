@@ -205,6 +205,34 @@ Types of search:
 - MVP may support only `managed` and `library`; postpone `external` unless
   needed.
 
+## Ollama model aliases for Kurrent tasks
+
+The following Ollama aliases are used to make local model roles easier to read
+in `ollama ls` and in Kurrent configuration:
+
+```bash
+ollama cp qwen2.5:7b qwen2.5:kurrent-summarization-7b
+ollama cp qwen3:8b qwen3:kurrent-rag-8b
+ollama cp llama3.2:3b llama3.2:kurrent-sectioning-3b
+ollama cp llama3.1:8b-instruct-q4_K_M llama3.1:kurrent-metadata-8b-instruct-q4_K_M
+ollama cp llama3.1:8b-instruct-q4_K_M llama3.1:kurrent-relevance-8b-instruct-q4_K_M
+ollama cp llama3.1:8b-instruct-q4_K_M llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M
+```
+
+These aliases are currently only labels/convenience names. Task-specific
+prompting and model behavior should remain controlled by Kurrent configuration
+and code.
+
+### Future: Ollama Modelfiles
+
+A future possibility is to replace some of these aliases with customized Ollama
+Modelfiles, if tasks benefit from baked-in defaults such as a system prompt,
+lower temperature, longer context settings, or task-specific stop/formatting
+behavior. For now, we are avoiding Modelfiles so that Kurrent’s behavior
+remains explicit in the repo rather than hidden inside local Ollama model
+definitions.
+
+
 ### Zotero and other library managers
 
 - Do not bake Zotero into the heart of the data model. Aim for library-manager
