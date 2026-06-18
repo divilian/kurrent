@@ -1555,7 +1555,16 @@ def screen_pdfs_for_ingest(
                     and existing_status.has_current_pipeline
                     and existing_status.has_current_semantic_index
                 ):
-                    approved.append(pdf_path)
+                    if len(pdf_paths) > 1:
+                        print()
+                        print("-" * 79)
+                        print(f"[{i}/{len(pdf_paths)}] {pdf_path}", flush=True)
+                    print_already_ingested_message(
+                        pdf_path,
+                        existing_status.document,
+                    )
+                    delete_pending_ingest_approval(store, pdf_path)
+                    clear_screening_rejection(store, pdf_path)
                     continue
 
             if len(pdf_paths) > 1:

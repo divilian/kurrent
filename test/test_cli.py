@@ -2478,3 +2478,88 @@ def test_screening_gate_handles_no_extractable_summary_text(monkeypatch, tmp_pat
     output = capsys.readouterr().out
     assert "Screening summary unavailable" in output
     assert "No extractable text was found" in output
+
+
+def test_screening_reports_already_ingested_pdfs_in_phase_one(monkeypatch, tmp_path, capsys):
+    """Verify already-ingested PDFs are reported during screening, not phase-two ingest."""
+
+    from types import SimpleNamespace
+    from kurrent.summarizer import ScreeningSummary
+
+    first_pdf = tmp_path / "already-one.pdf"
+    second_pdf = tmp_path / "already-two.pdf"
+    third_pdf = tmp_path / "new.pdf"
+    for pdf_path in (first_pdf, second_pdf, third_pdf):
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    class FakeStore:
+        def __init__(self):
+            self.deleted_pending = []
+            self.deleted_rejections = []
+            self.added_pending = []
+
+        def get_document_by_sha256(self, _sha):
+            return None
+
+        def get_screening_rejection(self, _pdf_path):
+            return None
+
+        def delete_pending_ingest(self, pdf_path):
+            self.deleted_pending.append(Path(pdf_path).resolve())
+
+        def delete_screening_rejection(self, pdf_path):
+            self.deleted_rejections.append(Path(pdf_path).resolve())
+
+        def add_pending_ingest(self, pdf_path, **_kwargs):
+            self.added_pending.append(Path(pdf_path).resolve())
+
+    fake_store = FakeStore()
+
+    def fake_existing_document_status(pdf_path, *_args, **_kwargs):
+        if Path(pdf_path).resolve() in {first_pdf.resolve(), second_pdf.resolve()}:
+            return cli.ExistingDocumentStatus(
+                pdf_sha256="sha",
+                document=SimpleNamespace(
+                    title=f"Stored {Path(pdf_path).stem}",
+                    pdf_path=f"/stored/{Path(pdf_path).name}",
+                ),
+                has_chunks=True,
+                has_current_pipeline=True,
+                has_current_semantic_index=True,
+            )
+        return None
+
+    screen_calls = []
+
+    def fake_screening_gate(pdf_path, **_kwargs):
+        screen_calls.append(Path(pdf_path).resolve())
+        return ScreeningSummary(text="summary", section_notes=(), depth=2)
+
+    monkeypatch.setattr(cli, "existing_document_status", fake_existing_document_status)
+    monkeypatch.setattr(cli, "run_screening_summary_gate", fake_screening_gate)
+
+    approved = cli.screen_pdfs_for_ingest(
+        [first_pdf.resolve(), second_pdf.resolve(), third_pdf.resolve()],
+        store=fake_store,
+        embedder=object(),
+        assume_yes=False,
+        use_llm_sectioning=True,
+        summary_depth=2,
+        summary_model="fake-model",
+        summary_ollama_url="http://example.test",
+        summary_timeout=1,
+        summary_max_num_ctx=4096,
+    )
+
+    output = capsys.readouterr().out
+    first_index = output.index(f"[1/3] {first_pdf.resolve()}")
+    second_index = output.index(f"[2/3] {second_pdf.resolve()}")
+    third_index = output.index(f"[3/3] {third_pdf.resolve()}")
+    assert first_index < second_index < third_index
+    assert output.count("Already ingested:") == 2
+    assert "Stored already-one" in output
+    assert "Stored already-two" in output
+    assert screen_calls == [third_pdf.resolve()]
+    assert approved == [third_pdf.resolve()]
+    assert fake_store.deleted_pending == [first_pdf.resolve(), second_pdf.resolve()]
+    assert fake_store.added_pending == [third_pdf.resolve()]
