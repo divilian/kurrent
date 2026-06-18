@@ -26,7 +26,9 @@ The default search mode is semantic chunk search.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from collections import defaultdict
+import queue
 from itertools import combinations
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -100,6 +102,9 @@ class CliUsageError(Exception):
 class ScreeningSummaryDeclined(Exception):
     """Raised when the user declines to ingest after seeing a summary."""
 
+
+class ScreeningSummaryPaused(Exception):
+    """Raised when the user pauses ingest after seeing a summary."""
 
 
 class KurrentArgumentParser(argparse.ArgumentParser):
@@ -386,13 +391,166 @@ class _SectioningPrefetchProgress:
             return self.total, self.completed
 
 
+
+
+
+class DaemonThreadPoolExecutor:
+    """Small daemon-worker executor for cancel-friendly ingest prefetching."""
+
+    def __init__(self, max_workers: int = 1):
+        self._work_queue: queue.Queue = queue.Queue()
+        self._shutdown = False
+        self._threads: list[threading.Thread] = []
+        for worker_index in range(max_workers):
+            thread = threading.Thread(
+                target=self._worker,
+                name=f"kurrent-prefetch-{worker_index + 1}",
+                daemon=True,
+            )
+            thread.start()
+            self._threads.append(thread)
+
+    def submit(self, fn, /, *args, **kwargs) -> Future:
+        future = Future()
+        if self._shutdown:
+            future.cancel()
+            return future
+        self._work_queue.put((future, fn, args, kwargs))
+        return future
+
+    def shutdown(self, wait: bool = False, *, cancel_futures: bool = False) -> None:
+        self._shutdown = True
+        if cancel_futures:
+            while True:
+                try:
+                    item = self._work_queue.get_nowait()
+                except queue.Empty:
+                    break
+                future = item[0]
+                future.cancel()
+                self._work_queue.task_done()
+        for _thread in self._threads:
+            self._work_queue.put(None)
+        if wait:
+            for thread in self._threads:
+                thread.join()
+
+    def _worker(self) -> None:
+        while True:
+            item = self._work_queue.get()
+            try:
+                if item is None:
+                    return
+                future, fn, args, kwargs = item
+                if not future.set_running_or_notify_cancel():
+                    continue
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException as exc:
+                    future.set_exception(exc)
+                else:
+                    future.set_result(result)
+            finally:
+                self._work_queue.task_done()
+
+
+@dataclass(slots=True)
+class _SummaryPrefetchTask:
+    """One background screening-summary prefetch task."""
+
+    pdf_path: Path
+    future: Future
+
+
+class IngestSummaryPrefetcher:
+    """Quietly precompute ingest-screening summaries for upcoming PDFs."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        depth: int,
+        model: str,
+        ollama_url: str,
+        timeout_seconds: float,
+        max_num_ctx: int,
+        max_workers: int = 1,
+    ):
+        self.enabled = enabled
+        self.depth = depth
+        self.model = model
+        self.ollama_url = ollama_url
+        self.timeout_seconds = timeout_seconds
+        self.max_num_ctx = max_num_ctx
+        self._executor: DaemonThreadPoolExecutor | None = (
+            DaemonThreadPoolExecutor(max_workers=max_workers)
+            if enabled
+            else None
+        )
+        self._tasks: dict[Path, _SummaryPrefetchTask] = {}
+
+    def submit(
+        self,
+        pdf_path: Path,
+        *,
+        sectioning_prefetch_task: _SectioningPrefetchTask | None = None,
+    ) -> _SummaryPrefetchTask | None:
+        if not self.enabled or self._executor is None:
+            return None
+
+        from kurrent.file_utils import normalize_path
+
+        key = normalize_path(pdf_path)
+        existing = self._tasks.get(key)
+        if existing is not None:
+            return existing
+
+        def compute():
+            from kurrent.summarizer import summarize_pdf_for_screening
+
+            return summarize_pdf_for_screening(
+                pdf_path=key,
+                depth=self.depth,
+                model=self.model,
+                ollama_url=self.ollama_url,
+                timeout_seconds=self.timeout_seconds,
+                max_num_ctx=self.max_num_ctx,
+                llm_sectioning_prefetch=completed_sectioning_prefetch_result(
+                    sectioning_prefetch_task,
+                ),
+                progress_callback=None,
+            )
+
+        future = self._executor.submit(compute)
+        task = _SummaryPrefetchTask(pdf_path=key, future=future)
+        self._tasks[key] = task
+        return task
+
+    def task_for(self, pdf_path: Path) -> _SummaryPrefetchTask | None:
+        if not self.enabled:
+            return None
+
+        from kurrent.file_utils import normalize_path
+
+        return self._tasks.get(normalize_path(pdf_path))
+
+    def shutdown(self) -> None:
+        if self._executor is None:
+            return
+
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self._executor.shutdown(wait=False)
+
+
 class IngestSectioningPrefetcher:
     """Quietly precompute LLM section decisions during interactive ingest."""
 
     def __init__(self, enabled: bool, max_workers: int = 1):
         self.enabled = enabled
-        self._executor: ThreadPoolExecutor | None = (
-            ThreadPoolExecutor(max_workers=max_workers)
+        self._executor: DaemonThreadPoolExecutor | None = (
+            DaemonThreadPoolExecutor(max_workers=max_workers)
             if enabled
             else None
         )
@@ -471,6 +629,7 @@ def wait_for_sectioning_prefetch(task: _SectioningPrefetchTask | None):
                     total=total,
                     desc="Ollama section candidates",
                     unit="candidate",
+                    bar_format=gray_status_text("{l_bar}{bar}{r_bar}"),
                 )
 
             if progress_bar is not None and completed > shown_completed:
@@ -540,6 +699,49 @@ def print_metadata(metadata, *, color_values: bool = False) -> None:
     print(f"doi:     {doi}")
 
 
+def metadata_input_readline_available() -> bool:
+    """Return True when editable prefilled metadata prompts can be used."""
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+
+    try:
+        import readline  # noqa: F401
+    except Exception:
+        return False
+
+    return True
+
+
+def prompt_prefilled_metadata_value(
+    label: str,
+    current: str,
+    *,
+    color_value: bool = False,
+) -> str:
+    """Prompt with current value preloaded into readline's edit buffer."""
+
+    import readline
+
+    color = metadata_field_color(label) if color_value else None
+    prompt = f"{label}: "
+    if color:
+        prompt += f"\001{color}\002"
+
+    def prefill() -> None:
+        readline.insert_text(current)
+
+    get_startup_hook = getattr(readline, "get_startup_hook", None)
+    previous_hook = get_startup_hook() if get_startup_hook is not None else None
+    readline.set_startup_hook(prefill)
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook(previous_hook)
+        if color:
+            print(ANSI_RESET, end="")
+
+
 def prompt_text_field(
     label: str,
     current: str | None,
@@ -550,10 +752,23 @@ def prompt_text_field(
 
     shown = "" if current is None else current
 
-    if color_value and shown:
-        shown = str(color_metadata_value(label, shown))
+    if metadata_input_readline_available():
+        value = prompt_prefilled_metadata_value(
+            label,
+            shown,
+            color_value=color_value,
+        ).strip()
+        if value == shown:
+            return current
+        if not value:
+            return None
+        return value
 
-    value = input(f"{label} [{shown}]: ").strip()
+    displayed = shown
+    if color_value and displayed:
+        displayed = str(color_metadata_value(label, displayed))
+
+    value = input(f"{label} [{displayed}]: ").strip()
 
     if not value:
         return current
@@ -570,14 +785,24 @@ def prompt_year_field(
 
     shown = "" if current is None else str(current)
 
-    if color_value and shown:
-        shown = str(color_metadata_value("year", shown))
-
     while True:
-        value = input(f"year [{shown}]: ").strip()
-
-        if not value:
-            return current
+        if metadata_input_readline_available():
+            value = prompt_prefilled_metadata_value(
+                "year",
+                shown,
+                color_value=color_value,
+            ).strip()
+            if value == shown:
+                return current
+            if not value:
+                return None
+        else:
+            displayed = shown
+            if color_value and displayed:
+                displayed = str(color_metadata_value("year", displayed))
+            value = input(f"year [{displayed}]: ").strip()
+            if not value:
+                return current
 
         try:
             return int(value)
@@ -994,6 +1219,48 @@ def prompt_yes_no(prompt: str) -> bool:
         print("Please answer y or n.")
 
 
+def print_paused_message() -> None:
+    """Tell the user that durable screening decisions were preserved."""
+
+    print()
+    print("Paused.")
+    print()
+    print_wrapped(
+        "Your screening decisions so far have been saved: approved PDFs will be "
+        "ingested next time, and declined PDFs will be skipped next time."
+    )
+    print_wrapped("Run `kurrent ingest ...` again when you are ready to continue.")
+
+
+def prompt_screening_ingest_decision(pdf_path: Path) -> bool:
+    """Prompt after a screening summary, allowing open/pause choices."""
+
+    while True:
+        answer = input(
+            "Ingest into Kurrent? ([y/n], [o]pen PDF, [p]ause for now) > "
+        ).strip().lower()
+
+        if answer in {"y", "yes"}:
+            return True
+
+        if answer in {"n", "no"}:
+            return False
+
+        if answer in {"o", "open"}:
+            result = open_pdf(pdf_path)
+            if not result.success and result.message:
+                print_wrapped(result.message)
+            continue
+
+        if answer in {"p", "pause"}:
+            raise ScreeningSummaryPaused("Ingest paused by user.")
+
+        if is_quit_command(answer):
+            raise KeyboardInterrupt("Ingest cancelled by user.")
+
+        print("Please answer y, n, o, or p.")
+
+
 def completed_sectioning_prefetch_result(
     task: _SectioningPrefetchTask | None,
 ):
@@ -1008,6 +1275,18 @@ def completed_sectioning_prefetch_result(
         return None
 
 
+def wait_for_summary_prefetch(task: _SummaryPrefetchTask | None):
+    """Return a precomputed screening summary, waiting quietly if needed."""
+
+    if task is None:
+        return None
+
+    if not task.future.done():
+        print_gray_status("Waiting for background screening summary to finish...")
+
+    return task.future.result()
+
+
 def run_screening_summary_gate(
     pdf_path: Path,
     *,
@@ -1018,41 +1297,407 @@ def run_screening_summary_gate(
     timeout_seconds: float,
     max_num_ctx: int,
     sectioning_prefetch_task: _SectioningPrefetchTask | None = None,
-) -> None:
-    """Summarize a PDF and ask whether ingestion should continue."""
+    summary_prefetch_task: _SummaryPrefetchTask | None = None,
+    on_summary_ready: Callable[[], None] | None = None,
+) -> object:
+    """Summarize a PDF, ask whether ingestion should continue, and return it."""
 
-    from kurrent.summarizer import summarize_pdf_for_screening
+    summary = None
+    summary_error = None
 
-    summary = summarize_pdf_for_screening(
-        pdf_path=pdf_path,
-        depth=depth,
-        model=model,
-        ollama_url=ollama_url,
-        timeout_seconds=timeout_seconds,
-        max_num_ctx=max_num_ctx,
-        llm_sectioning_prefetch=completed_sectioning_prefetch_result(
-            sectioning_prefetch_task,
-        ),
-        progress_callback=print_gray_status,
-    )
+    try:
+        summary = wait_for_summary_prefetch(summary_prefetch_task)
+
+        if summary is None:
+            from kurrent.summarizer import summarize_pdf_for_screening
+
+            summary = summarize_pdf_for_screening(
+                pdf_path=pdf_path,
+                depth=depth,
+                model=model,
+                ollama_url=ollama_url,
+                timeout_seconds=timeout_seconds,
+                max_num_ctx=max_num_ctx,
+                llm_sectioning_prefetch=completed_sectioning_prefetch_result(
+                    sectioning_prefetch_task,
+                ),
+                progress_callback=print_gray_status,
+            )
+    except Exception as exc:
+        from kurrent.summarizer import ScreeningSummaryError
+
+        if not isinstance(exc, ScreeningSummaryError):
+            raise
+        summary_error = str(exc)
+        summary = SimpleNamespace(
+            text=None,
+            section_notes=(),
+            depth=depth,
+            unavailable_reason=summary_error,
+        )
+
+    if on_summary_ready is not None:
+        on_summary_ready()
 
     print()
-    print("Screening summary")
-    print("-----------------")
-    print_wrapped(summary.text)
-    print()
-    print_wrapped(
-        "For a more complete summary after ingestion, use `kurrent summarize`."
-    )
+    if summary_error is None:
+        print("Screening summary")
+        print("-----------------")
+        print_wrapped(summary.text)
+        print()
+        print_wrapped(
+            "For a more complete summary after ingestion, use `kurrent summarize`."
+        )
+    else:
+        print("Screening summary unavailable")
+        print("-----------------------------")
+        if "No extractable content" in summary_error:
+            print_wrapped(
+                "No extractable text was found, so no screening summary could be generated."
+            )
+        else:
+            print_wrapped(f"Could not generate a screening summary: {summary_error}")
     print()
 
     if assume_yes:
         print_gray_status("Continuing because -y/--yes was used.")
-        return
+        return summary
 
-    if not prompt_yes_no("Ingest into Kurrent? (y/n) > "):
+    if not prompt_screening_ingest_decision(pdf_path):
         raise ScreeningSummaryDeclined("User declined ingestion after screening summary.")
 
+    return summary
+
+
+
+def pending_ingest_choice(count: int) -> str:
+    """Ask what to do with durable pending ingest approvals."""
+
+    print()
+    print_wrapped(
+        f"There are {count} PDFs previously approved for ingestion but not yet ingested."
+    )
+
+    while True:
+        answer = input(
+            "Pending ingests: [c]ontinue first, [s]kip for now, [d]iscard > "
+        ).strip().lower()
+
+        if answer in {"", "c", "continue"}:
+            return "continue"
+
+        if answer in {"s", "skip"}:
+            return "skip"
+
+        if answer in {"d", "discard"}:
+            return "discard"
+
+        if is_quit_command(answer):
+            raise KeyboardInterrupt("Ingest cancelled by user.")
+
+        print("Please answer c, s, or d.")
+
+
+def record_pending_ingest_approval(
+    store,
+    pdf_path: Path,
+    summary,
+    *,
+    summary_model: str,
+    summary_depth: int,
+) -> None:
+    """Persist one screening approval before actual ingestion starts."""
+
+    from kurrent.file_utils import sha256_file
+
+    pdf_sha256 = None
+    try:
+        pdf_sha256 = sha256_file(pdf_path)
+    except Exception:
+        # The path will be checked again during actual ingest. Recording the
+        # approval is still useful if the file is temporarily inaccessible.
+        pdf_sha256 = None
+
+    if hasattr(store, "add_pending_ingest"):
+        store.add_pending_ingest(
+            pdf_path,
+            pdf_sha256=pdf_sha256,
+            screening_summary=getattr(summary, "text", None),
+            summary_model=summary_model,
+            summary_depth=summary_depth,
+        )
+
+
+def delete_pending_ingest_approval(store, pdf_path: Path) -> None:
+    """Remove one pending approval when the PDF has been handled successfully."""
+
+    if hasattr(store, "delete_pending_ingest"):
+        store.delete_pending_ingest(pdf_path)
+
+
+def record_screening_rejection(
+    store,
+    pdf_path: Path,
+    *,
+    summary_model: str,
+    summary_depth: int,
+) -> None:
+    """Persist one screening rejection for interrupted batch resumption."""
+
+    if not hasattr(store, "add_screening_rejection"):
+        return
+
+    from kurrent.file_utils import sha256_file
+
+    pdf_sha256 = None
+    try:
+        pdf_sha256 = sha256_file(pdf_path)
+    except Exception:
+        pdf_sha256 = None
+
+    store.add_screening_rejection(
+        pdf_path,
+        pdf_sha256=pdf_sha256,
+        summary_model=summary_model,
+        summary_depth=summary_depth,
+    )
+
+
+def clear_screening_rejection(store, pdf_path: Path) -> None:
+    """Clear a stale rejection once the PDF is approved or ingested."""
+
+    if hasattr(store, "delete_screening_rejection"):
+        store.delete_screening_rejection(pdf_path)
+
+
+def should_skip_previously_rejected_screening(store, pdf_path: Path) -> bool:
+    """Return True if this PDF was already declined in an interrupted batch."""
+
+    if not hasattr(store, "get_screening_rejection"):
+        return False
+
+    rejection = store.get_screening_rejection(pdf_path)
+    if rejection is None:
+        return False
+
+    stored_sha = getattr(rejection, "pdf_sha256", None)
+    if stored_sha:
+        try:
+            from kurrent.file_utils import sha256_file
+
+            current_sha = sha256_file(pdf_path)
+        except Exception:
+            # If the path is currently unreadable, leave the rejection in place
+            # and skip it during this screening pass. The later ingest path will
+            # report missing/unreadable pending approvals explicitly.
+            return True
+
+        if current_sha != stored_sha:
+            clear_screening_rejection(store, pdf_path)
+            return False
+
+    return True
+
+
+def screen_pdfs_for_ingest(
+    pdf_paths: list[Path],
+    *,
+    store,
+    embedder,
+    assume_yes: bool,
+    use_llm_sectioning: bool,
+    summary_depth: int,
+    summary_model: str,
+    summary_ollama_url: str,
+    summary_timeout: float,
+    summary_max_num_ctx: int,
+) -> list[Path]:
+    """Screen a batch of PDFs first, returning paths approved for ingestion."""
+
+    approved: list[Path] = []
+    summary_prefetcher = IngestSummaryPrefetcher(
+        enabled=(len(pdf_paths) > 1),
+        depth=summary_depth,
+        model=summary_model,
+        ollama_url=summary_ollama_url,
+        timeout_seconds=summary_timeout,
+        max_num_ctx=summary_max_num_ctx,
+    )
+
+    def queue_future_summaries_after(current_index: int) -> None:
+        if not summary_prefetcher.enabled:
+            return
+
+        for future_pdf in pdf_paths[current_index:]:
+            summary_prefetcher.submit(future_pdf)
+
+    try:
+        for i, pdf_path in enumerate(pdf_paths, start=1):
+            if should_skip_previously_rejected_screening(store, pdf_path):
+                if len(pdf_paths) > 1:
+                    print()
+                    print("-" * 79)
+                    print(f"[{i}/{len(pdf_paths)}] {pdf_path}", flush=True)
+                print_gray_status("Previously declined during screening; skipping.")
+                continue
+
+            existing_status = None
+            if hasattr(store, "get_document_by_sha256"):
+                existing_status = existing_document_status(
+                    pdf_path,
+                    store,
+                    use_llm_sectioning=use_llm_sectioning,
+                    embedder=embedder,
+                )
+
+                if (
+                    existing_status is not None
+                    and existing_status.has_current_pipeline
+                    and existing_status.has_current_semantic_index
+                ):
+                    approved.append(pdf_path)
+                    continue
+
+            if len(pdf_paths) > 1:
+                print()
+                print("-" * 79)
+                print(f"[{i}/{len(pdf_paths)}] {pdf_path}", flush=True)
+
+            try:
+                summary = run_screening_summary_gate(
+                    pdf_path,
+                    assume_yes=assume_yes,
+                    depth=summary_depth,
+                    model=summary_model,
+                    ollama_url=summary_ollama_url,
+                    timeout_seconds=summary_timeout,
+                    max_num_ctx=summary_max_num_ctx,
+                    sectioning_prefetch_task=None,
+                    summary_prefetch_task=summary_prefetcher.task_for(pdf_path),
+                    on_summary_ready=(
+                        (lambda current_index=i: queue_future_summaries_after(current_index))
+                        if len(pdf_paths) > 1
+                        else None
+                    ),
+                )
+                record_pending_ingest_approval(
+                    store,
+                    pdf_path,
+                    summary,
+                    summary_model=summary_model,
+                    summary_depth=summary_depth,
+                )
+                clear_screening_rejection(store, pdf_path)
+                approved.append(pdf_path)
+            except ScreeningSummaryDeclined:
+                record_screening_rejection(
+                    store,
+                    pdf_path,
+                    summary_model=summary_model,
+                    summary_depth=summary_depth,
+                )
+                print()
+                print("Not ingested.")
+                continue
+    finally:
+        summary_prefetcher.shutdown()
+
+    return approved
+
+
+def ingest_pdf_paths(
+    pdf_paths: list[Path],
+    *,
+    store,
+    embedder,
+    doi_lookup: bool,
+    crossref_mailto: str | None,
+    assume_yes: bool,
+    use_llm_sectioning: bool,
+    storage_mode: str,
+    managed_pdf_dir: Path | None,
+    summarize_before_ingest: bool,
+    summary_depth: int,
+    pending_paths: set[Path] | None = None,
+) -> list[IngestResult]:
+    """Ingest paths using the ordinary metadata/chunking pipeline."""
+
+    from kurrent.file_utils import normalize_path
+
+    results: list[IngestResult] = []
+    pending_paths = pending_paths or set()
+    sectioning_prefetcher = IngestSectioningPrefetcher(
+        enabled=(use_llm_sectioning and not assume_yes),
+    )
+
+    try:
+        for i, pdf_path in enumerate(pdf_paths, start=1):
+            if len(pdf_paths) > 1:
+                print()
+                print("-" * 79)
+                print(f"[{i}/{len(pdf_paths)}] {pdf_path}", flush=True)
+
+            if not Path(pdf_path).exists():
+                message = f"Pending PDF not found: {pdf_path}"
+                print_wrapped(message)
+                results.append(IngestResult(pdf_path=pdf_path, doc_id=None, error=message))
+                continue
+
+            if sectioning_prefetcher.enabled:
+                sectioning_prefetcher.submit(pdf_path)
+                if i < len(pdf_paths):
+                    sectioning_prefetcher.submit(pdf_paths[i])
+
+            try:
+                outcome = ingest_one_pdf(
+                    pdf_path=pdf_path,
+                    store=store,
+                    embedder=embedder,
+                    doi_lookup=doi_lookup,
+                    crossref_mailto=crossref_mailto,
+                    assume_yes=assume_yes,
+                    use_llm_sectioning=use_llm_sectioning,
+                    storage_mode=storage_mode,
+                    managed_pdf_dir=managed_pdf_dir,
+                    sectioning_prefetch_task=sectioning_prefetcher.task_for(pdf_path),
+                    summarize_before_ingest=summarize_before_ingest,
+                    summary_depth=summary_depth,
+                    summary_model=DEFAULT_OLLAMA_SUMMARY_MODEL,
+                    summary_ollama_url=DEFAULT_OLLAMA_URL,
+                    summary_timeout=DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
+                    summary_max_num_ctx=DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+                )
+                results.append(
+                    IngestResult(
+                        pdf_path=pdf_path,
+                        doc_id=outcome.doc_id,
+                        already_existed=outcome.already_existed,
+                    )
+                )
+                if normalize_path(pdf_path) in pending_paths:
+                    delete_pending_ingest_approval(store, pdf_path)
+                clear_screening_rejection(store, pdf_path)
+            except ScreeningSummaryDeclined:
+                print()
+                print("Not ingested.")
+                continue
+            except KeyboardInterrupt:
+                print()
+                print("Cancelled.")
+                raise
+            except ScreeningSummaryPaused:
+                raise
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                print_wrapped(f"Could not ingest {pdf_path}: {message}")
+                results.append(IngestResult(pdf_path=pdf_path, doc_id=None, error=message))
+
+            if doi_lookup and i < len(pdf_paths):
+                time.sleep(CROSSREF_REQUEST_INTERVAL_SECONDS)
+    finally:
+        sectioning_prefetcher.shutdown()
+
+    return results
 
 def ingest_one_pdf(
     pdf_path: Path,
@@ -1065,6 +1710,8 @@ def ingest_one_pdf(
     storage_mode: str,
     managed_pdf_dir: Path | None,
     sectioning_prefetch_task: _SectioningPrefetchTask | None = None,
+    summary_prefetch_task: _SummaryPrefetchTask | None = None,
+    on_screening_summary_ready: Callable[[], None] | None = None,
     summarize_before_ingest: bool = True,
     summary_depth: int = DEFAULT_SUMMARY_DEPTH,
     summary_model: str = DEFAULT_OLLAMA_SUMMARY_MODEL,
@@ -1123,6 +1770,8 @@ def ingest_one_pdf(
             timeout_seconds=summary_timeout,
             max_num_ctx=summary_max_num_ctx,
             sectioning_prefetch_task=sectioning_prefetch_task,
+            summary_prefetch_task=summary_prefetch_task,
+            on_summary_ready=on_screening_summary_ready,
         )
 
     metadata = extract_metadata(
@@ -1188,6 +1837,7 @@ def ingest_one_pdf(
             total=total,
             desc="Ollama section candidates",
             unit="candidate",
+            bar_format=gray_status_text("{l_bar}{bar}{r_bar}"),
         )
 
     def update_llm_progress(completed: int) -> None:
@@ -4910,12 +5560,37 @@ def run_refresh_metadata(args: argparse.Namespace) -> int:
     finally:
         store.close()
 
+def ensure_ollama_for_screening_summaries() -> bool:
+    """Ensure Ollama is reachable before summary-screening LLM calls."""
+
+    from kurrent.metadata_refresher import (
+        MetadataRefreshError,
+        ensure_ollama_available,
+    )
+
+    print_gray_status("Checking Ollama availability for screening summaries...")
+    try:
+        started_ollama = ensure_ollama_available(
+            ollama_url=DEFAULT_OLLAMA_URL,
+            progress_callback=print_gray_status,
+        )
+    except MetadataRefreshError as exc:
+        print_usage_error(str(exc))
+        return False
+
+    if started_ollama:
+        print_gray_status("Ollama is ready.")
+
+    return True
+
+
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""
 
     print_gray_status("Starting kurrent ingest...")
 
     from kurrent.config import get_crossref_mailto, get_kurrent_state_paths
+    from kurrent.file_utils import normalize_path
 
     state_paths = get_kurrent_state_paths(args.state_dir)
     storage_mode = "external" if args.in_place else "managed"
@@ -4946,14 +5621,6 @@ def run_ingest(args: argparse.Namespace) -> int:
     if not pdf_paths:
         print(f"No PDFs found under: {format_ingest_path_list(args.paths)}")
         return 0
-
-    if args.summary_enabled and len(pdf_paths) != 1:
-        print()
-        print_usage_error(
-            "Screening summaries currently support one PDF at a time. "
-            "Use --no-summary for multi-document or recursive ingest."
-        )
-        return 2
 
     doi_lookup = args.metadata_mode == "crossref"
     crossref_mailto = get_crossref_mailto()
@@ -5015,6 +5682,9 @@ def run_ingest(args: argparse.Namespace) -> int:
             flush=True,
         )
 
+    if args.summary_enabled and not ensure_ollama_for_screening_summaries():
+        return 2
+
     print()
     print_gray_status("Loading kurrent state store...")
     from kurrent.state_store import StateStore
@@ -5028,24 +5698,75 @@ def run_ingest(args: argparse.Namespace) -> int:
     print_gray_status("Ready. Beginning PDF ingest.")
 
     results: list[IngestResult] = []
-    sectioning_prefetcher = IngestSectioningPrefetcher(
-        enabled=(not args.rules_based_sections and not args.assume_yes),
-    )
 
     try:
-        for i, pdf_path in enumerate(pdf_paths, start=1):
-            if sectioning_prefetcher.enabled:
-                sectioning_prefetcher.submit(pdf_path)
-                if i < len(pdf_paths):
-                    sectioning_prefetcher.submit(pdf_paths[i])
+        pending = store.list_pending_ingests() if hasattr(store, "list_pending_ingests") else []
 
-            print()
-            print("-" * 79)
-            print(f"[{i}/{len(pdf_paths)}] {pdf_path}", flush=True)
-
+        if pending:
             try:
-                outcome = ingest_one_pdf(
-                    pdf_path=pdf_path,
+                choice = pending_ingest_choice(len(pending))
+            except KeyboardInterrupt:
+                print()
+                print("Cancelled.")
+                return 130
+
+            if choice == "discard":
+                store.clear_pending_ingests()
+                print_wrapped("Discarded pending ingest approvals.")
+            elif choice == "continue":
+                pending_paths = [pending_item.pdf_path for pending_item in pending]
+                try:
+                    results.extend(
+                        ingest_pdf_paths(
+                            pending_paths,
+                            store=store,
+                            embedder=embedder,
+                            doi_lookup=doi_lookup,
+                            crossref_mailto=crossref_mailto,
+                            assume_yes=args.assume_yes,
+                            use_llm_sectioning=not args.rules_based_sections,
+                            storage_mode=storage_mode,
+                            managed_pdf_dir=(
+                                state_paths.pdfs_path
+                                if storage_mode == "managed"
+                                else None
+                            ),
+                            summarize_before_ingest=False,
+                            summary_depth=args.summary_depth,
+                            pending_paths={normalize_path(path) for path in pending_paths},
+                        )
+                    )
+                except KeyboardInterrupt:
+                    return 130
+
+        if args.summary_enabled and len(pdf_paths) > 1:
+            try:
+                pdf_paths_to_ingest = screen_pdfs_for_ingest(
+                    pdf_paths,
+                    store=store,
+                    embedder=embedder,
+                    assume_yes=args.assume_yes,
+                    use_llm_sectioning=not args.rules_based_sections,
+                    summary_depth=args.summary_depth,
+                    summary_model=DEFAULT_OLLAMA_SUMMARY_MODEL,
+                    summary_ollama_url=DEFAULT_OLLAMA_URL,
+                    summary_timeout=DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
+                    summary_max_num_ctx=DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+                )
+            except ScreeningSummaryPaused:
+                print_paused_message()
+                return 0
+            except KeyboardInterrupt:
+                print()
+                print("Cancelled.")
+                return 130
+        else:
+            pdf_paths_to_ingest = pdf_paths
+
+        try:
+            results.extend(
+                ingest_pdf_paths(
+                    pdf_paths_to_ingest,
                     store=store,
                     embedder=embedder,
                     doi_lookup=doi_lookup,
@@ -5058,42 +5779,22 @@ def run_ingest(args: argparse.Namespace) -> int:
                         if storage_mode == "managed"
                         else None
                     ),
-                    sectioning_prefetch_task=sectioning_prefetcher.task_for(pdf_path),
-                    summarize_before_ingest=args.summary_enabled,
+                    summarize_before_ingest=(
+                        args.summary_enabled and len(pdf_paths) == 1
+                    ),
                     summary_depth=args.summary_depth,
-                    summary_model=DEFAULT_OLLAMA_SUMMARY_MODEL,
-                    summary_ollama_url=DEFAULT_OLLAMA_URL,
-                    summary_timeout=DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
-                    summary_max_num_ctx=DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+                    pending_paths=(
+                        {normalize_path(path) for path in pdf_paths_to_ingest}
+                        if args.summary_enabled and len(pdf_paths) > 1
+                        else set()
+                    ),
                 )
-                results.append(
-                    IngestResult(
-                        pdf_path=pdf_path,
-                        doc_id=outcome.doc_id,
-                        already_existed=outcome.already_existed,
-                    )
-                )
-            except ScreeningSummaryDeclined:
-                print()
-                print("Not ingested.")
-                return 0
-            except KeyboardInterrupt:
-                print()
-                print("Cancelled.")
-                return 130
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"
-                print_wrapped(f"Could not ingest {pdf_path}: {message}")
-                results.append(
-                    IngestResult(
-                        pdf_path=pdf_path,
-                        doc_id=None,
-                        error=message,
-                    )
-                )
-
-            if doi_lookup and i < len(pdf_paths):
-                time.sleep(CROSSREF_REQUEST_INTERVAL_SECONDS)
+            )
+        except ScreeningSummaryPaused:
+            print_paused_message()
+            return 0
+        except KeyboardInterrupt:
+            return 130
     finally:
         store.close()
 
@@ -5109,6 +5810,9 @@ def run_ingest(args: argparse.Namespace) -> int:
         if result.already_existed
     ]
     failed = [result for result in results if result.error is not None]
+
+    if len(pdf_paths) == 1:
+        return 1 if failed else 0
 
     print()
     print("Ingest summary")
@@ -5129,7 +5833,6 @@ def run_ingest(args: argparse.Namespace) -> int:
             )
 
     return 1 if failed else 0
-
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level kurrent CLI parser."""
@@ -5217,9 +5920,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     summary_group.add_argument(
         "--no-summary",
+        "--no-summary-screening",
         action="store_true",
         dest="no_summary",
-        help="skip the ingest-screening summary gate.",
+        help="skip the screening summary and ingest-decision prompt.",
     )
 
     metadata_group = ingest_parser.add_mutually_exclusive_group()

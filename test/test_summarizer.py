@@ -163,7 +163,7 @@ def test_summarize_pdf_for_screening_uses_one_llm_call_over_selected_sections(mo
     ]
     assert progress == [
         "Selecting sections for screening summary...",
-        "Summarizing selected sections: Abstract, Introduction...",
+        "Summarizing selected sections: Abstract and Introduction...",
     ]
     assert len(calls) == 1
     user_prompt = calls[0][-1]["content"]
@@ -205,3 +205,31 @@ def test_summarize_pdf_for_screening_is_genre_agnostic(monkeypatch):
     assert "Do not mention Kurrent" in combined
     assert "Do not make claims about whether it is relevant to Kurrent" in combined
     assert "Focus on what the document appears to be about" in combined
+
+
+def test_screening_summary_progress_uses_and_for_final_section(monkeypatch):
+    """Verify selected-section status reads like a complete English list."""
+
+    sections = [
+        section("front matter", "Opening material.", index=0),
+        section("Introduction", "Background.", index=1),
+        section("Methods", "Methods.", index=2),
+        section("Results", "Results.", index=3),
+    ]
+    monkeypatch.setattr(
+        summarizer,
+        "screening_sections_for_pdf",
+        lambda pdf_path, llm_sectioning_prefetch=None: sections,
+    )
+
+    progress = []
+    summarizer.summarize_pdf_for_screening(
+        Path("paper.pdf"),
+        depth=2,
+        answer_function=lambda _messages: "Summary.",
+        progress_callback=progress.append,
+    )
+
+    assert progress[-1] == (
+        "Summarizing selected sections: front matter, Introduction, Methods, and Results..."
+    )

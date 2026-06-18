@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime, timezone
+from dataclasses import dataclass
 
 import sqlite3
 
@@ -25,6 +26,8 @@ __all__ = [
     "TEXT_PIPELINE_STATUS_NO_EXTRACTABLE_TEXT",
     "canonical_chunk_pair",
     "canonical_document_pair",
+    "PendingIngest",
+    "ScreeningRejection",
     "StateStore",
 ]
 
@@ -61,6 +64,31 @@ def canonical_document_pair(
         )
 
     return tuple(sorted([doc_a_id, doc_b_id]))
+
+
+
+@dataclass(frozen=True, slots=True)
+class PendingIngest:
+    """A PDF approved during screening but not yet ingested."""
+
+    pdf_path: Path
+    pdf_sha256: str | None
+    approved_at: datetime
+    screening_summary: str | None = None
+    summary_model: str | None = None
+    summary_depth: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScreeningRejection:
+    """A PDF declined during screening before a batch ingest completed."""
+
+    pdf_path: Path
+    pdf_sha256: str | None
+    declined_at: datetime
+    summary_model: str | None = None
+    summary_depth: int | None = None
+
 
 class StateStore:
     """
@@ -106,6 +134,219 @@ class StateStore:
                 ADD COLUMN message TEXT
                 """
             )
+
+
+    def add_pending_ingest(
+        self,
+        pdf_path: str | Path,
+        *,
+        pdf_sha256: str | None = None,
+        screening_summary: str | None = None,
+        summary_model: str | None = None,
+        summary_depth: int | None = None,
+        approved_at: datetime | None = None,
+    ) -> PendingIngest:
+        """Persist a PDF that the user approved for later ingestion."""
+
+        pdf_path = normalize_path(pdf_path)
+        approved_at = approved_at or datetime.now(timezone.utc)
+
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO pending_ingests
+                (
+                    pdf_path,
+                    pdf_sha256,
+                    approved_at,
+                    screening_summary,
+                    summary_model,
+                    summary_depth
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pdf_path) DO UPDATE SET
+                    pdf_sha256 = excluded.pdf_sha256,
+                    approved_at = excluded.approved_at,
+                    screening_summary = excluded.screening_summary,
+                    summary_model = excluded.summary_model,
+                    summary_depth = excluded.summary_depth
+                """,
+                (
+                    str(pdf_path),
+                    pdf_sha256,
+                    approved_at.isoformat(),
+                    screening_summary,
+                    summary_model,
+                    summary_depth,
+                ),
+            )
+
+        return PendingIngest(
+            pdf_path=pdf_path,
+            pdf_sha256=pdf_sha256,
+            approved_at=approved_at,
+            screening_summary=screening_summary,
+            summary_model=summary_model,
+            summary_depth=summary_depth,
+        )
+
+    def list_pending_ingests(self) -> list[PendingIngest]:
+        """Return PDFs approved for ingestion but not yet ingested."""
+
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM pending_ingests
+            ORDER BY approved_at, pdf_path
+            """
+        ).fetchall()
+
+        return [self._row_to_pending_ingest(row) for row in rows]
+
+    def get_pending_ingest(self, pdf_path: str | Path) -> PendingIngest | None:
+        """Return a pending ingest approval for a PDF path, if present."""
+
+        pdf_path = normalize_path(pdf_path)
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM pending_ingests
+            WHERE pdf_path = ?
+            """,
+            (str(pdf_path),),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_pending_ingest(row)
+
+    def delete_pending_ingest(self, pdf_path: str | Path) -> None:
+        """Remove one pending ingest approval."""
+
+        pdf_path = normalize_path(pdf_path)
+        with self.conn:
+            self.conn.execute(
+                """
+                DELETE FROM pending_ingests
+                WHERE pdf_path = ?
+                """,
+                (str(pdf_path),),
+            )
+
+    def clear_pending_ingests(self) -> None:
+        """Remove all pending ingest approvals."""
+
+        with self.conn:
+            self.conn.execute("DELETE FROM pending_ingests")
+
+    def add_screening_rejection(
+        self,
+        pdf_path: str | Path,
+        *,
+        pdf_sha256: str | None = None,
+        summary_model: str | None = None,
+        summary_depth: int | None = None,
+        declined_at: datetime | None = None,
+    ) -> ScreeningRejection:
+        """Persist a screening rejection so interrupted batches can resume."""
+
+        pdf_path = normalize_path(pdf_path)
+        declined_at = declined_at or datetime.now(timezone.utc)
+
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO screening_rejections
+                (
+                    pdf_path,
+                    pdf_sha256,
+                    declined_at,
+                    summary_model,
+                    summary_depth
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(pdf_path) DO UPDATE SET
+                    pdf_sha256 = excluded.pdf_sha256,
+                    declined_at = excluded.declined_at,
+                    summary_model = excluded.summary_model,
+                    summary_depth = excluded.summary_depth
+                """,
+                (
+                    str(pdf_path),
+                    pdf_sha256,
+                    declined_at.isoformat(),
+                    summary_model,
+                    summary_depth,
+                ),
+            )
+
+        return ScreeningRejection(
+            pdf_path=pdf_path,
+            pdf_sha256=pdf_sha256,
+            declined_at=declined_at,
+            summary_model=summary_model,
+            summary_depth=summary_depth,
+        )
+
+    def get_screening_rejection(
+        self,
+        pdf_path: str | Path,
+    ) -> ScreeningRejection | None:
+        """Return a persisted screening rejection for this PDF path, if any."""
+
+        pdf_path = normalize_path(pdf_path)
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM screening_rejections
+            WHERE pdf_path = ?
+            """,
+            (str(pdf_path),),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_screening_rejection(row)
+
+    def delete_screening_rejection(self, pdf_path: str | Path) -> None:
+        """Remove one persisted screening rejection."""
+
+        pdf_path = normalize_path(pdf_path)
+        with self.conn:
+            self.conn.execute(
+                """
+                DELETE FROM screening_rejections
+                WHERE pdf_path = ?
+                """,
+                (str(pdf_path),),
+            )
+
+    def clear_screening_rejections(self) -> None:
+        """Remove all persisted screening rejections."""
+
+        with self.conn:
+            self.conn.execute("DELETE FROM screening_rejections")
+
+    def _row_to_screening_rejection(self, row: sqlite3.Row) -> ScreeningRejection:
+        return ScreeningRejection(
+            pdf_path=normalize_path(row["pdf_path"]),
+            pdf_sha256=row["pdf_sha256"],
+            declined_at=datetime.fromisoformat(row["declined_at"]),
+            summary_model=row["summary_model"],
+            summary_depth=row["summary_depth"],
+        )
+
+    def _row_to_pending_ingest(self, row: sqlite3.Row) -> PendingIngest:
+        return PendingIngest(
+            pdf_path=normalize_path(row["pdf_path"]),
+            pdf_sha256=row["pdf_sha256"],
+            approved_at=datetime.fromisoformat(row["approved_at"]),
+            screening_summary=row["screening_summary"],
+            summary_model=row["summary_model"],
+            summary_depth=row["summary_depth"],
+        )
 
     def insert_document(self, document: Document) -> None:
         with self.conn:

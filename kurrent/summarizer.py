@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -424,6 +424,20 @@ def _normalize_depth(depth: int | None) -> int:
     return max(1, int(depth))
 
 
+
+def human_join(items: Sequence[str]) -> str:
+    """Return a comma-separated English list with a final 'and'."""
+
+    clean_items = [item for item in items if item]
+    if not clean_items:
+        return ""
+    if len(clean_items) == 1:
+        return clean_items[0]
+    if len(clean_items) == 2:
+        return f"{clean_items[0]} and {clean_items[1]}"
+    return ", ".join(clean_items[:-1]) + f", and {clean_items[-1]}"
+
+
 def summarize_pdf_for_screening(
     pdf_path: str | Path,
     *,
@@ -456,7 +470,7 @@ def summarize_pdf_for_screening(
         raise ScreeningSummaryError("No extractable content sections found to summarize.")
 
     if progress_callback is not None:
-        names = ", ".join(excerpt.section_title for excerpt in selected_sections)
+        names = human_join(excerpt.section_title for excerpt in selected_sections)
         progress_callback(f"Summarizing selected sections: {names}...")
 
     messages = _screening_summary_messages(

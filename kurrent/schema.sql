@@ -28,6 +28,24 @@ CREATE TABLE IF NOT EXISTS duplicate_decisions (
     CHECK (decision IN ('not_duplicate'))
 );
 
+
+CREATE TABLE IF NOT EXISTS pending_ingests (
+    pdf_path TEXT PRIMARY KEY,
+    pdf_sha256 TEXT,
+    approved_at TEXT NOT NULL,
+    screening_summary TEXT,
+    summary_model TEXT,
+    summary_depth INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS screening_rejections (
+    pdf_path TEXT PRIMARY KEY,
+    pdf_sha256 TEXT,
+    declined_at TEXT NOT NULL,
+    summary_model TEXT,
+    summary_depth INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS document_pipeline_state (
     doc_id TEXT PRIMARY KEY,
     pipeline_fingerprint TEXT NOT NULL,

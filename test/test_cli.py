@@ -1,9 +1,17 @@
 from pathlib import Path
+import sys
 
 import pytest
 
 from kurrent import cli
 from kurrent import sectioner
+
+
+@pytest.fixture(autouse=True)
+def _fake_ingest_ollama_check(monkeypatch):
+    """Keep ingest tests from depending on a real Ollama service."""
+
+    monkeypatch.setattr(cli, "ensure_ollama_for_screening_summaries", lambda: True)
 
 
 def test_ingest_defaults_to_crossref_metadata():
@@ -804,6 +812,322 @@ def test_ingest_startup_status_lines_are_indented_like_ask(
 
     assert startup_lines
     assert all(line.startswith(" ") for line in startup_lines)
+    assert "[1/1]" not in "\n".join(output_lines)
+    assert "Ingest summary" not in "\n".join(output_lines)
+
+
+def test_ingest_multi_document_with_summary_runs_one_gate_per_document(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """Verify summary-enabled ingest can process multiple PDFs in order."""
+
+    first_pdf = tmp_path / "a.pdf"
+    second_pdf = tmp_path / "b.pdf"
+    first_pdf.write_bytes(b"%PDF-1.4 first\n%%EOF\n")
+    second_pdf.write_bytes(b"%PDF-1.4 second\n%%EOF\n")
+    state_dir = tmp_path / "state"
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.path = path
+            self.pending = []
+
+        def list_pending_ingests(self):
+            return []
+
+        def add_pending_ingest(self, pdf_path, **kwargs):
+            self.pending.append((pdf_path, kwargs))
+
+        def delete_pending_ingest(self, pdf_path):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+    calls = []
+
+    def fake_ingest_one_pdf(**kwargs):
+        calls.append(kwargs["pdf_path"])
+        return cli.IngestOutcome(
+            doc_id=f"doc-{len(calls)}",
+            already_existed=False,
+        )
+
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.state_store",
+        types.SimpleNamespace(StateStore=FakeStateStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.embedder",
+        types.SimpleNamespace(Embedder=FakeEmbedder),
+    )
+    monkeypatch.setattr(cli, "ingest_one_pdf", fake_ingest_one_pdf)
+
+    from kurrent.summarizer import ScreeningSummary
+
+    screen_calls = []
+
+    def fake_screening_gate(pdf_path, **kwargs):
+        screen_calls.append(pdf_path)
+        return ScreeningSummary(text="summary", section_notes=(), depth=2)
+
+    monkeypatch.setattr(cli, "run_screening_summary_gate", fake_screening_gate)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--state-dir",
+            str(state_dir),
+            "ingest",
+            "--local-metadata",
+            str(first_pdf),
+            str(second_pdf),
+        ]
+    )
+
+    assert cli.run_ingest(args) == 0
+
+    assert screen_calls == [first_pdf.resolve(), second_pdf.resolve()]
+    assert calls == [first_pdf.resolve(), second_pdf.resolve()]
+    output = capsys.readouterr().out
+    assert f"[1/2] {first_pdf.resolve()}" in output
+    assert f"[2/2] {second_pdf.resolve()}" in output
+    assert "Ingest summary" in output
+
+
+def test_ingest_multi_document_summary_decline_skips_only_current_pdf(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """Verify declining one screening summary continues to the next PDF."""
+
+    first_pdf = tmp_path / "a.pdf"
+    second_pdf = tmp_path / "b.pdf"
+    first_pdf.write_bytes(b"%PDF-1.4 first\n%%EOF\n")
+    second_pdf.write_bytes(b"%PDF-1.4 second\n%%EOF\n")
+    state_dir = tmp_path / "state"
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.path = path
+            self.pending = []
+
+        def list_pending_ingests(self):
+            return []
+
+        def add_pending_ingest(self, pdf_path, **kwargs):
+            self.pending.append((pdf_path, kwargs))
+
+        def delete_pending_ingest(self, pdf_path):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+    calls = []
+
+    def fake_ingest_one_pdf(**kwargs):
+        calls.append(kwargs["pdf_path"])
+        return cli.IngestOutcome(doc_id=f"doc-{len(calls)}", already_existed=False)
+
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.state_store",
+        types.SimpleNamespace(StateStore=FakeStateStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.embedder",
+        types.SimpleNamespace(Embedder=FakeEmbedder),
+    )
+    monkeypatch.setattr(cli, "ingest_one_pdf", fake_ingest_one_pdf)
+
+    from kurrent.summarizer import ScreeningSummary
+
+    screen_calls = []
+
+    def fake_screening_gate(pdf_path, **kwargs):
+        screen_calls.append(pdf_path)
+        if len(screen_calls) == 1:
+            raise cli.ScreeningSummaryDeclined("no")
+        return ScreeningSummary(text="summary", section_notes=(), depth=2)
+
+    monkeypatch.setattr(cli, "run_screening_summary_gate", fake_screening_gate)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--state-dir",
+            str(state_dir),
+            "ingest",
+            "--local-metadata",
+            str(first_pdf),
+            str(second_pdf),
+        ]
+    )
+
+    assert cli.run_ingest(args) == 0
+
+    assert screen_calls == [first_pdf.resolve(), second_pdf.resolve()]
+    assert calls == [second_pdf.resolve()]
+    output = capsys.readouterr().out
+    assert "Not ingested." in output
+    assert "Ingest summary" in output
+    assert "New documents:     1" in output
+
+
+
+def test_pending_ingest_prompt_continue_processes_before_new_command(monkeypatch, tmp_path, capsys):
+    """Verify pending approvals can be resumed before the new ingest request."""
+
+    import types
+    import sys
+    from pathlib import Path
+    from datetime import datetime, timezone
+    from kurrent import cli
+    from kurrent.state_store import PendingIngest
+
+    pending_pdf = tmp_path / "pending.pdf"
+    new_pdf = tmp_path / "new.pdf"
+    pending_pdf.write_bytes(b"%PDF-1.4 pending\n%%EOF\n")
+    new_pdf.write_bytes(b"%PDF-1.4 new\n%%EOF\n")
+    state_dir = tmp_path / "state"
+    stores = []
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.path = path
+            self.pending = [
+                PendingIngest(
+                    pdf_path=pending_pdf.resolve(),
+                    pdf_sha256="sha-pending",
+                    approved_at=datetime.now(timezone.utc),
+                )
+            ]
+            self.deleted = []
+            stores.append(self)
+
+        def list_pending_ingests(self):
+            return list(self.pending)
+
+        def delete_pending_ingest(self, pdf_path):
+            self.deleted.append(Path(pdf_path).resolve())
+            self.pending = [p for p in self.pending if p.pdf_path != Path(pdf_path).resolve()]
+
+        def clear_pending_ingests(self):
+            self.pending.clear()
+
+        def close(self):
+            pass
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+    calls = []
+
+    def fake_ingest_one_pdf(**kwargs):
+        calls.append((kwargs["pdf_path"], kwargs["summarize_before_ingest"]))
+        return cli.IngestOutcome(doc_id=f"doc-{len(calls)}", already_existed=False)
+
+    monkeypatch.setitem(sys.modules, "kurrent.state_store", types.SimpleNamespace(StateStore=FakeStateStore))
+    monkeypatch.setitem(sys.modules, "kurrent.embedder", types.SimpleNamespace(Embedder=FakeEmbedder))
+    monkeypatch.setattr(cli, "ingest_one_pdf", fake_ingest_one_pdf)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "c")
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "--state-dir", str(state_dir),
+        "ingest", "--no-summary-screening", "--local-metadata", str(new_pdf),
+    ])
+
+    assert cli.run_ingest(args) == 0
+    assert calls == [(pending_pdf.resolve(), False), (new_pdf.resolve(), False)]
+    assert stores[0].deleted == [pending_pdf.resolve()]
+    assert "previously approved" in capsys.readouterr().out
+
+
+def test_multi_document_screening_records_pending_and_removes_after_ingest(monkeypatch, tmp_path):
+    """Verify two-phase screening persists approvals until actual ingest succeeds."""
+
+    import types
+    import sys
+    from kurrent import cli
+    from kurrent.summarizer import ScreeningSummary
+
+    first_pdf = tmp_path / "a.pdf"
+    second_pdf = tmp_path / "b.pdf"
+    first_pdf.write_bytes(b"%PDF-1.4 a\n%%EOF\n")
+    second_pdf.write_bytes(b"%PDF-1.4 b\n%%EOF\n")
+    state_dir = tmp_path / "state"
+    stores = []
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.pending = []
+            self.added = []
+            self.deleted = []
+            stores.append(self)
+
+        def list_pending_ingests(self):
+            return []
+
+        def add_pending_ingest(self, pdf_path, **kwargs):
+            self.added.append(pdf_path.resolve())
+
+        def delete_pending_ingest(self, pdf_path):
+            self.deleted.append(pdf_path.resolve())
+
+        def close(self):
+            pass
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+    def fake_screening_gate(pdf_path, **kwargs):
+        return ScreeningSummary(text=f"summary for {pdf_path.name}", section_notes=(), depth=2)
+
+    ingest_calls = []
+
+    def fake_ingest_one_pdf(**kwargs):
+        ingest_calls.append((kwargs["pdf_path"], kwargs["summarize_before_ingest"]))
+        return cli.IngestOutcome(doc_id=f"doc-{len(ingest_calls)}", already_existed=False)
+
+    monkeypatch.setitem(sys.modules, "kurrent.state_store", types.SimpleNamespace(StateStore=FakeStateStore))
+    monkeypatch.setitem(sys.modules, "kurrent.embedder", types.SimpleNamespace(Embedder=FakeEmbedder))
+    monkeypatch.setattr(cli, "run_screening_summary_gate", fake_screening_gate)
+    monkeypatch.setattr(cli, "ingest_one_pdf", fake_ingest_one_pdf)
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "--state-dir", str(state_dir),
+        "ingest", "--local-metadata", str(first_pdf), str(second_pdf),
+    ])
+
+    assert cli.run_ingest(args) == 0
+    assert stores[0].added == [first_pdf.resolve(), second_pdf.resolve()]
+    assert stores[0].deleted == [first_pdf.resolve(), second_pdf.resolve()]
+    assert ingest_calls == [(first_pdf.resolve(), False), (second_pdf.resolve(), False)]
 
 def test_stats_command_parses_top_authors():
     """Verify that stats accepts a configurable top-author count."""
@@ -1663,6 +1987,36 @@ def test_ingest_accepts_no_summary_flag():
     assert args.summary_depth == 2
 
 
+def test_ingest_accepts_no_summary_screening_alias():
+    """Verify that --no-summary-screening is an alias for --no-summary."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["ingest", "--no-summary-screening", "paper.pdf"])
+
+    assert args.no_summary is True
+    assert args.summary_depth == 2
+
+
+def test_screening_ingest_decision_can_open_pdf_then_accept(monkeypatch, tmp_path):
+    """Verify the screening prompt supports opening the PDF and returning."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    answers = iter(["o", "y"])
+    opened = []
+
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    def fake_open_pdf(path):
+        opened.append(path)
+        return type("OpenResult", (), {"success": True, "message": None})()
+
+    monkeypatch.setattr(cli, "open_pdf", fake_open_pdf)
+
+    assert cli.prompt_screening_ingest_decision(pdf_path) is True
+    assert opened == [pdf_path]
+
+
 def test_summary_flags_are_mutually_exclusive():
     """Verify that summary and no-summary flags cannot conflict."""
 
@@ -1689,3 +2043,438 @@ def test_ingest_bare_summary_depth_flag_does_not_eat_pdf_path():
 
     assert args.summary_depth == 2
     assert args.paths == [Path("paper.pdf")]
+
+
+def test_ingest_summary_prefetcher_computes_quiet_background_summaries(
+    monkeypatch,
+    tmp_path,
+):
+    """Verify multi-document screening summaries can be built in the background."""
+
+    from kurrent.summarizer import ScreeningSummary
+
+    pdf_path = tmp_path / "next.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    calls = []
+
+    def fake_summarize_pdf_for_screening(**kwargs):
+        calls.append(kwargs)
+        return ScreeningSummary(
+            text="background summary",
+            section_notes=(),
+            depth=kwargs["depth"],
+        )
+
+    monkeypatch.setattr(
+        "kurrent.summarizer.summarize_pdf_for_screening",
+        fake_summarize_pdf_for_screening,
+    )
+
+    prefetcher = cli.IngestSummaryPrefetcher(
+        enabled=True,
+        depth=3,
+        model="fake-summary-model",
+        ollama_url="http://example.test",
+        timeout_seconds=12,
+        max_num_ctx=4096,
+    )
+    try:
+        task = prefetcher.submit(pdf_path)
+        assert task is not None
+        summary = task.future.result(timeout=2)
+    finally:
+        prefetcher.shutdown()
+
+    assert summary.text == "background summary"
+    assert summary.depth == 3
+    assert calls
+    assert calls[0]["pdf_path"] == pdf_path.resolve()
+    assert calls[0]["progress_callback"] is None
+
+
+def test_screening_gate_uses_prefetched_summary_and_then_queues_more(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """Verify the current summary can trigger background work before prompting."""
+
+    from concurrent.futures import Future
+    from kurrent.summarizer import ScreeningSummary
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    future = Future()
+    future.set_result(
+        ScreeningSummary(
+            text="already computed",
+            section_notes=(),
+            depth=2,
+        )
+    )
+    task = cli._SummaryPrefetchTask(pdf_path=pdf_path, future=future)
+    queued = []
+
+    def fail_foreground_summary(**_kwargs):
+        raise AssertionError("foreground summary should not be called")
+
+    monkeypatch.setattr(
+        "kurrent.summarizer.summarize_pdf_for_screening",
+        fail_foreground_summary,
+    )
+
+    cli.run_screening_summary_gate(
+        pdf_path,
+        assume_yes=True,
+        depth=2,
+        model="fake-model",
+        ollama_url="http://example.test",
+        timeout_seconds=12,
+        max_num_ctx=4096,
+        summary_prefetch_task=task,
+        on_summary_ready=lambda: queued.append("future summaries queued"),
+    )
+
+    output = capsys.readouterr().out
+    assert "already computed" in output
+    assert queued == ["future summaries queued"]
+
+
+def test_multi_document_screening_records_declines_for_interrupted_batch(monkeypatch, tmp_path, capsys):
+    """Verify declined PDFs are remembered so reruns can skip them after a crash."""
+
+    first_pdf = tmp_path / "a.pdf"
+    second_pdf = tmp_path / "b.pdf"
+    first_pdf.write_bytes(b"%PDF-1.4 first\n%%EOF\n")
+    second_pdf.write_bytes(b"%PDF-1.4 second\n%%EOF\n")
+    state_dir = tmp_path / "state"
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.path = path
+            self.rejections = {}
+            self.added_rejections = []
+            self.added_pending = []
+
+        def list_pending_ingests(self):
+            return []
+
+        def add_pending_ingest(self, pdf_path, **kwargs):
+            self.added_pending.append(pdf_path.resolve())
+
+        def delete_pending_ingest(self, pdf_path):
+            pass
+
+        def add_screening_rejection(self, pdf_path, **kwargs):
+            self.added_rejections.append(pdf_path.resolve())
+            self.rejections[pdf_path.resolve()] = kwargs
+
+        def get_screening_rejection(self, pdf_path):
+            return None
+
+        def delete_screening_rejection(self, pdf_path):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+    stores = []
+
+    def fake_store(path):
+        store = FakeStateStore(path)
+        stores.append(store)
+        return store
+
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.state_store",
+        types.SimpleNamespace(StateStore=fake_store),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.embedder",
+        types.SimpleNamespace(Embedder=FakeEmbedder),
+    )
+    monkeypatch.setattr(cli, "ingest_one_pdf", lambda **kwargs: cli.IngestOutcome(doc_id="doc", already_existed=False))
+
+    from kurrent.summarizer import ScreeningSummary
+
+    def fake_screening_gate(pdf_path, **kwargs):
+        if pdf_path == first_pdf.resolve():
+            raise cli.ScreeningSummaryDeclined("no")
+        return ScreeningSummary(text="summary", section_notes=(), depth=2)
+
+    monkeypatch.setattr(cli, "run_screening_summary_gate", fake_screening_gate)
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "--state-dir", str(state_dir),
+        "ingest", "--local-metadata", str(first_pdf), str(second_pdf),
+    ])
+
+    assert cli.run_ingest(args) == 0
+    assert stores[0].added_rejections == [first_pdf.resolve()]
+    assert stores[0].added_pending == [second_pdf.resolve()]
+    assert "Not ingested." in capsys.readouterr().out
+
+
+def test_multi_document_screening_skips_previously_declined_pdf(monkeypatch, tmp_path, capsys):
+    """Verify rerunning a batch skips PDFs declined in an interrupted screening run."""
+
+    from dataclasses import dataclass
+    from datetime import datetime, timezone
+
+    first_pdf = tmp_path / "a.pdf"
+    second_pdf = tmp_path / "b.pdf"
+    first_pdf.write_bytes(b"%PDF-1.4 first\n%%EOF\n")
+    second_pdf.write_bytes(b"%PDF-1.4 second\n%%EOF\n")
+    state_dir = tmp_path / "state"
+
+    @dataclass
+    class FakeRejection:
+        pdf_path: object
+        pdf_sha256: str | None
+        declined_at: object
+        summary_model: str | None = None
+        summary_depth: int | None = None
+
+    class FakeStateStore:
+        def __init__(self, path):
+            self.path = path
+            self.deleted_rejections = []
+            self.added_pending = []
+
+        def list_pending_ingests(self):
+            return []
+
+        def add_pending_ingest(self, pdf_path, **kwargs):
+            self.added_pending.append(pdf_path.resolve())
+
+        def delete_pending_ingest(self, pdf_path):
+            pass
+
+        def get_screening_rejection(self, pdf_path):
+            if pdf_path.resolve() == first_pdf.resolve():
+                return FakeRejection(
+                    pdf_path=first_pdf.resolve(),
+                    pdf_sha256=None,
+                    declined_at=datetime.now(timezone.utc),
+                )
+            return None
+
+        def delete_screening_rejection(self, pdf_path):
+            self.deleted_rejections.append(pdf_path.resolve())
+
+        def close(self):
+            pass
+
+    class FakeEmbedder:
+        def __init__(self, chroma_path):
+            self.chroma_path = chroma_path
+
+    stores = []
+
+    def fake_store(path):
+        store = FakeStateStore(path)
+        stores.append(store)
+        return store
+
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.state_store",
+        types.SimpleNamespace(StateStore=fake_store),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.embedder",
+        types.SimpleNamespace(Embedder=FakeEmbedder),
+    )
+    monkeypatch.setattr(cli, "ingest_one_pdf", lambda **kwargs: cli.IngestOutcome(doc_id="doc", already_existed=False))
+
+    from kurrent.summarizer import ScreeningSummary
+
+    screen_calls = []
+
+    def fake_screening_gate(pdf_path, **kwargs):
+        screen_calls.append(pdf_path)
+        return ScreeningSummary(text="summary", section_notes=(), depth=2)
+
+    monkeypatch.setattr(cli, "run_screening_summary_gate", fake_screening_gate)
+
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "--state-dir", str(state_dir),
+        "ingest", "--local-metadata", str(first_pdf), str(second_pdf),
+    ])
+
+    assert cli.run_ingest(args) == 0
+    assert screen_calls == [second_pdf.resolve()]
+    assert stores[0].added_pending == [second_pdf.resolve()]
+    output = capsys.readouterr().out
+    assert "Previously declined during screening; skipping." in output
+
+
+def test_screening_prompt_pause_exits_without_keyboard_interrupt(monkeypatch):
+    """Verify the screening prompt has an explicit pause option."""
+
+    prompts = []
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return "p"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    with pytest.raises(cli.ScreeningSummaryPaused):
+        cli.prompt_screening_ingest_decision(Path("paper.pdf"))
+
+    assert prompts == [
+        "Ingest into Kurrent? ([y/n], [o]pen PDF, [p]ause for now) > "
+    ]
+
+
+def test_metadata_text_prompt_uses_colored_prefilled_edit_buffer(monkeypatch):
+    """Verify readline metadata editing sends the field color to the prefilled prompt."""
+
+    calls = []
+
+    monkeypatch.setattr(cli, "metadata_input_readline_available", lambda: True)
+
+    def fake_prefilled(label, current, *, color_value=False):
+        calls.append((label, current, color_value))
+        return "Still Building the Memex"
+
+    monkeypatch.setattr(cli, "prompt_prefilled_metadata_value", fake_prefilled)
+
+    result = cli.prompt_text_field(
+        "title",
+        "Still Building the Memex1",
+        color_value=True,
+    )
+
+    assert result == "Still Building the Memex"
+    assert calls == [("title", "Still Building the Memex1", True)]
+
+
+
+def test_prefilled_metadata_prompt_handles_readline_without_getter(monkeypatch):
+    """Verify readline variants without get_startup_hook still work."""
+
+    class MinimalReadline:
+        def __init__(self):
+            self.hook = None
+            self.inserted = []
+
+        def set_startup_hook(self, hook):
+            self.hook = hook
+
+        def insert_text(self, text):
+            self.inserted.append(text)
+
+    fake_readline = MinimalReadline()
+    monkeypatch.setitem(sys.modules, "readline", fake_readline)
+
+    prompts = []
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        if fake_readline.hook is not None:
+            fake_readline.hook()
+        return "Still Building the Memex"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    result = cli.prompt_prefilled_metadata_value(
+        "title",
+        "Still Building the Memex",
+        color_value=True,
+    )
+
+    assert result == "Still Building the Memex"
+    assert fake_readline.inserted == ["Still Building the Memex"]
+    assert fake_readline.hook is None
+    assert prompts == [f"title: \001{cli.ANSI_RED}\002"]
+
+def test_metadata_prompt_fallback_shows_bracket_value(monkeypatch):
+    """Verify non-readline metadata prompts still show the preserved value."""
+
+    prompts = []
+
+    monkeypatch.setattr(cli, "metadata_input_readline_available", lambda: False)
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    result = cli.prompt_text_field("authors", "Stephen Davies and Harmony Peura1")
+
+    assert result == "Stephen Davies and Harmony Peura1"
+    assert prompts == ["authors [Stephen Davies and Harmony Peura1]: "]
+
+
+def test_ingest_prefetchers_use_daemon_workers():
+    """Verify ingest prefetch workers cannot hold the process open on exit."""
+
+    summary_prefetcher = cli.IngestSummaryPrefetcher(
+        enabled=True,
+        depth=2,
+        model="fake-model",
+        ollama_url="http://example.test",
+        timeout_seconds=1,
+        max_num_ctx=1024,
+    )
+    sectioning_prefetcher = cli.IngestSectioningPrefetcher(enabled=True)
+
+    try:
+        assert isinstance(summary_prefetcher._executor, cli.DaemonThreadPoolExecutor)
+        assert isinstance(sectioning_prefetcher._executor, cli.DaemonThreadPoolExecutor)
+        assert all(thread.daemon for thread in summary_prefetcher._executor._threads)
+        assert all(thread.daemon for thread in sectioning_prefetcher._executor._threads)
+    finally:
+        summary_prefetcher.shutdown()
+        sectioning_prefetcher.shutdown()
+
+
+def test_screening_gate_handles_no_extractable_summary_text(monkeypatch, tmp_path, capsys):
+    """Verify scanned/no-text PDFs do not crash the screening gate."""
+
+    from kurrent.summarizer import ScreeningSummaryError
+
+    pdf_path = tmp_path / "scanned.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    def fake_summarize(**_kwargs):
+        raise ScreeningSummaryError("No extractable content sections found to summarize.")
+
+    monkeypatch.setattr(
+        "kurrent.summarizer.summarize_pdf_for_screening",
+        fake_summarize,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+
+    with pytest.raises(cli.ScreeningSummaryDeclined):
+        cli.run_screening_summary_gate(
+            pdf_path,
+            assume_yes=False,
+            depth=2,
+            model="fake-model",
+            ollama_url="http://example.test",
+            timeout_seconds=1,
+            max_num_ctx=1024,
+        )
+
+    output = capsys.readouterr().out
+    assert "Screening summary unavailable" in output
+    assert "No extractable text was found" in output

@@ -8,11 +8,11 @@
 - [x] embedding into Chroma
 - [x] smarter chunking (section-aware)
 - [x] ingest and store metadata (authors, year, title)
-- [ ] document summaries via Ollama
+- [x] document summaries via Ollama
 - [x] proximity alert detection
 - [ ] user confirmation/rejection of alerts
 - [x] basic search - metadata (wire in to cli.py)
-- [x] basic search - full text (simple LIKE-based) (wire in to cli.py)
+- [x] basic search - full text (simple LIKE-based) (wire in to `cli.py`)
 - [x] semantic search (wire in to cli.py)
 - [x] basic RAG chat over a selected corpus
 - [x] boldface the parts of the chunks that semantically match
@@ -26,6 +26,7 @@
 - [x] list verb
 - [ ] list verb: add doc summaries to list choice output
 - [ ] delete document, duh
+- [ ] add tqdm progress bar while LLM is summarizing / sectioning?
 
 
 ## Bugs
@@ -34,7 +35,9 @@
 
 ## Later
 
-- [ ] metadata quality check, and auto-Crossref if it looks sus (my prev question: "Why can't an LLM check metadata on ingestion like it does sections?")
+- [ ] metadata quality check, and auto-Crossref if it looks sus (my prev
+  question: "Why can't an LLM check metadata on ingestion like it does
+  sections?")
 - [x] PDF annotation/highlighting
 - [ ] automatic source polling
 - [ ] Zotero write-back/import
@@ -54,6 +57,11 @@
 - [ ] external search (Be able to explicitly ask kurrent: "this chunk...what
   else is out there (not currently in kurrent db) that resembles it?"
 
+## Nitpicks
+
+- [ ] not that i'm complaining, but my `test_cli.py` unit test dots are running
+  off the edge of the screen now. can you meaningfully break that file into two
+  or more coherent chunks of unit tests?
 
 # Design decisions
 
@@ -288,3 +296,4 @@ definitions.
 - Prefer source-specific ingestion routes, for example:
   - `kurrent ingest file paper.pdf`
   - `kurrent ingest zotero JSFWJ7G6`
+

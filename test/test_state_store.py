@@ -512,3 +512,76 @@ def test_delete_document_removes_record_and_preserves_other_documents(store):
     assert store.get_document("doc-b") is None
     assert store.get_document("doc-a") is not None
     assert store.ignored_duplicate_pair_count() == 0
+
+
+def test_pending_ingests_round_trip_and_clear(tmp_path):
+    """Verify durable pending ingest approvals survive StateStore reopen."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    db_path = tmp_path / "kurrent.db"
+
+    store = StateStore(db_path)
+    store.add_pending_ingest(
+        pdf_path,
+        pdf_sha256="sha-1",
+        screening_summary="useful summary",
+        summary_model="summary-model",
+        summary_depth=2,
+    )
+    store.close()
+
+    store = StateStore(db_path)
+    try:
+        pending = store.list_pending_ingests()
+        assert len(pending) == 1
+        assert pending[0].pdf_path == pdf_path.resolve()
+        assert pending[0].pdf_sha256 == "sha-1"
+        assert pending[0].screening_summary == "useful summary"
+        assert pending[0].summary_model == "summary-model"
+        assert pending[0].summary_depth == 2
+
+        store.delete_pending_ingest(pdf_path)
+        assert store.list_pending_ingests() == []
+
+        store.add_pending_ingest(pdf_path)
+        assert len(store.list_pending_ingests()) == 1
+        store.clear_pending_ingests()
+        assert store.list_pending_ingests() == []
+    finally:
+        store.close()
+
+def test_screening_rejections_round_trip_and_clear(tmp_path):
+    """Verify durable screening rejections survive StateStore reopen."""
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    db_path = tmp_path / "kurrent.db"
+
+    store = StateStore(db_path)
+    store.add_screening_rejection(
+        pdf_path,
+        pdf_sha256="sha-reject",
+        summary_model="summary-model",
+        summary_depth=2,
+    )
+    store.close()
+
+    store = StateStore(db_path)
+    try:
+        rejection = store.get_screening_rejection(pdf_path)
+        assert rejection is not None
+        assert rejection.pdf_path == pdf_path.resolve()
+        assert rejection.pdf_sha256 == "sha-reject"
+        assert rejection.summary_model == "summary-model"
+        assert rejection.summary_depth == 2
+
+        store.delete_screening_rejection(pdf_path)
+        assert store.get_screening_rejection(pdf_path) is None
+
+        store.add_screening_rejection(pdf_path)
+        assert store.get_screening_rejection(pdf_path) is not None
+        store.clear_screening_rejections()
+        assert store.get_screening_rejection(pdf_path) is None
+    finally:
+        store.close()
