@@ -720,10 +720,10 @@ class StateStore:
     ) -> bool:
         """Return whether the document is known to have no extractable text.
 
-        The optional pipeline_fingerprint argument is accepted for compatibility
-        with older callers, but no-text markings intentionally survive ordinary
-        text-pipeline changes. A future OCR-capable workflow should clear or
-        override this status explicitly when it wants to retry these PDFs.
+        The optional pipeline_fingerprint argument is ignored because no-text
+        markings intentionally survive ordinary text-pipeline changes. A future
+        OCR-capable workflow should clear or override this status explicitly
+        when it wants to retry these PDFs.
         """
 
         row = self.get_document_pipeline_state(doc_id)

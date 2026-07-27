@@ -28,7 +28,7 @@ __all__ = [
 
 PDF_TEXT_EXTRACTOR_VERSION = "layout-aware-pymupdf-v2"
 SECTIONER_VERSION = "sectioner-v4"
-LLM_SECTIONER_VERSION = "ollama-section-headings-v2"
+LLM_SECTIONER_VERSION = "llm-section-headings-v2"
 CHUNKER_ALGORITHM_VERSION = "section-aware-fixed-char-v2"
 PIPELINE_FINGERPRINT_VERSION = "text-pipeline-fingerprint-v1"
 SEMANTIC_INDEX_FINGERPRINT_VERSION = "semantic-index-fingerprint-v1"

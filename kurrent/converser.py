@@ -1,8 +1,8 @@
 """Stateful Level-1 RAG conversation support for kurrent.
 
 This module deliberately keeps retrieval simple: each turn is sent to the
-existing semantic index with only light conversational context, and Ollama is
-asked to synthesize a corpus-grounded research-question assessment
+existing semantic index with only light conversational context, and the
+configured LLM is asked to synthesize a corpus-grounded research-question assessment
 from the retrieved chunks.
 """
 
@@ -13,16 +13,19 @@ import json
 from pathlib import Path
 import re
 from typing import Callable, Iterable, Protocol
-from urllib.error import URLError
-from urllib.request import Request, urlopen
-
 from kurrent.cli_display import (
     collapse_whitespace,
     pages_label,
     section_label,
     source_name_for_hit,
 )
-from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_RAG_LLM
+from kurrent.config import DEFAULT_RAG_LLM
+from kurrent.llm_provider import (
+    LLMCallError,
+    LLMConfigurationError,
+    call_llm_chat as _call_provider_chat,
+    llm_provider_label,
+)
 
 __all__ = [
     "DEFAULT_CONVERSE_TOP_K",
@@ -42,7 +45,7 @@ __all__ = [
     "evidence_sources",
     "format_evidence_packets",
     "build_research_inquiry_messages",
-    "call_ollama_chat",
+    "call_llm_chat",
 ]
 
 DEFAULT_CONVERSE_TOP_K = 8
@@ -72,7 +75,7 @@ class SearcherLike(Protocol):
 class EvidencePacket:
     """One retrieved chunk plus internal provenance for a RAG answer.
 
-    citation is the only source label intended for Ollama-facing prompts. The
+    citation is the only source label intended for LLM-facing prompts. The
     other fields remain available to kurrent for debugging, source navigation,
     tests, and future evidence-inspection commands.
     """
@@ -289,7 +292,7 @@ def source_label_for_hit(hit, document=None) -> str:
 
 
 def citation_for_hit(hit, document=None) -> str:
-    """Return the exact citation phrase Ollama should use for this hit."""
+    """Return the exact citation phrase the LLM should use for this hit."""
 
     citation = source_label_for_hit(hit, document=document)
     pages = pages_label(hit)
@@ -483,12 +486,12 @@ def format_evidence_packets(
     evidence: Iterable[EvidencePacket],
     max_context_chars: int = DEFAULT_CONVERSE_MAX_CONTEXT_CHARS,
 ) -> str:
-    """Format retrieved evidence as minimal JSON for the Ollama prompt.
+    """Format retrieved evidence as minimal JSON for the LLM prompt.
 
     The model sees only the citation string it should use and the excerpt it
     should reason from. Internal kurrent details such as evidence IDs, chunk IDs,
     semantic distances, raw managed filenames, and section labels are omitted
-    from the Ollama-facing prompt.
+    from the LLM-facing prompt.
     """
 
     items: list[dict[str, str]] = []
@@ -523,7 +526,7 @@ def build_research_inquiry_messages(
     state: ConversationState | None = None,
     max_context_chars: int = DEFAULT_CONVERSE_MAX_CONTEXT_CHARS,
 ) -> list[dict[str, str]]:
-    """Build Ollama chat messages for corpus-grounded RQ discovery."""
+    """Build LLM chat messages for corpus-grounded RQ discovery."""
 
     summary = "" if state is None else state.compact_summary().strip()
     evidence_text = format_evidence_packets(
@@ -580,121 +583,43 @@ section unless the user explicitly asks for one.
 TokenCallback = Callable[[str], None]
 
 
-def _call_ollama_chat_nonstreaming(
-    messages: list[dict[str, str]],
-    model: str,
-    ollama_url: str,
-    timeout_seconds: float,
-) -> str:
-    """Call Ollama's chat API without streaming and return final content."""
-
-    api_url = f"{ollama_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "options": {"temperature": 0.2},
-    }
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    with urlopen(request, timeout=timeout_seconds) as response:
-        response_data = json.loads(response.read().decode("utf-8"))
-
-    content = response_data.get("message", {}).get("content", "")
-
-    if not isinstance(content, str) or not content.strip():
-        raise ConverseError("Ollama returned an empty converse response.")
-
-    return content.strip()
-
-
-def _call_ollama_chat_streaming(
-    messages: list[dict[str, str]],
-    model: str,
-    ollama_url: str,
-    timeout_seconds: float,
-    token_callback: TokenCallback,
-) -> str:
-    """Call Ollama's streaming chat API and return accumulated content."""
-
-    api_url = f"{ollama_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "options": {"temperature": 0.2},
-    }
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    parts: list[str] = []
-
-    with urlopen(request, timeout=timeout_seconds) as response:
-        for raw_line in response:
-            raw_line = raw_line.strip()
-
-            if not raw_line:
-                continue
-
-            data = json.loads(raw_line.decode("utf-8"))
-            content = data.get("message", {}).get("content", "")
-
-            if isinstance(content, str) and content:
-                parts.append(content)
-                token_callback(content)
-
-            if data.get("done"):
-                break
-
-    content = "".join(parts)
-
-    if not content.strip():
-        raise ConverseError("Ollama returned an empty converse response.")
-
-    return content.strip()
-
-
-def call_ollama_chat(
+def call_llm_chat(
     messages: list[dict[str, str]],
     model: str = DEFAULT_RAG_LLM,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
     timeout_seconds: float = 120.0,
     token_callback: TokenCallback | None = None,
 ) -> str:
-    """Call Ollama's chat API and return the assistant message content.
+    """Call the configured chat provider and return assistant text.
 
-    When token_callback is provided, use Ollama streaming and call it with each
-    generated text fragment as it arrives. The returned string is still the full
-    accumulated assistant response, so callers can store conversation state.
+    When token_callback is provided, stream text fragments to it as they arrive.
+    The returned string is still the full accumulated assistant response, so
+    callers can store conversation state.
     """
 
     try:
-        if token_callback is not None:
-            return _call_ollama_chat_streaming(
-                messages=messages,
-                model=model,
-                ollama_url=ollama_url,
-                timeout_seconds=timeout_seconds,
-                token_callback=token_callback,
-            )
-
-        return _call_ollama_chat_nonstreaming(
-            messages=messages,
+        return _call_provider_chat(
+            messages,
             model=model,
-            ollama_url=ollama_url,
             timeout_seconds=timeout_seconds,
+            temperature=0.2,
+            stream=token_callback is not None,
+            token_callback=token_callback,
         )
-    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ConverseError(f"Ollama chat unavailable: {type(exc).__name__}: {exc}") from exc
+    except (
+        OSError,
+        TimeoutError,
+        json.JSONDecodeError,
+        LLMConfigurationError,
+        LLMCallError,
+    ) as exc:
+        provider = "LLM"
+        try:
+            provider = llm_provider_label(model)
+        except LLMConfigurationError:
+            pass
+        raise ConverseError(
+            f"{provider} chat unavailable: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 AnswerFunction = Callable[[list[dict[str, str]]], str]
@@ -708,7 +633,6 @@ class ConverseEngine:
         self,
         searcher: SearcherLike,
         model: str = DEFAULT_RAG_LLM,
-        ollama_url: str = DEFAULT_OLLAMA_URL,
         timeout_seconds: float = 120.0,
         top_k: int = DEFAULT_CONVERSE_TOP_K,
         max_distance: float | None = None,
@@ -718,7 +642,6 @@ class ConverseEngine:
     ) -> None:
         self.searcher = searcher
         self.model = model
-        self.ollama_url = ollama_url
         self.timeout_seconds = timeout_seconds
         self.top_k = top_k
         self.max_distance = max_distance
@@ -749,8 +672,8 @@ class ConverseEngine:
         """Retrieve Kurrent evidence and answer one user turn.
 
         progress_callback receives short user-facing status messages between
-        slow stages. token_callback receives live Ollama text fragments when the
-        real Ollama API is used. Both are optional so tests and non-CLI callers
+        slow stages. token_callback receives live LLM text fragments when the
+        provider supports streaming. Both are optional so tests and non-CLI callers
         can use the engine silently.
         """
 
@@ -778,7 +701,16 @@ class ConverseEngine:
         chunk_word = "chunk" if hit_count == 1 else "chunks"
         report(f"Retrieved {hit_count} candidate {chunk_word}.")
 
-        report("Building evidence packet for Ollama..." if hit_count == 1 else "Building evidence packets for Ollama...")
+        provider = "LLM"
+        try:
+            provider = llm_provider_label(self.model)
+        except LLMConfigurationError:
+            pass
+        report(
+            f"Building evidence packet for {provider}..."
+            if hit_count == 1
+            else f"Building evidence packets for {provider}..."
+        )
         evidence = build_evidence_packets(
             hits,
             document_lookup=self._document_for_hit,
@@ -790,14 +722,13 @@ class ConverseEngine:
             max_context_chars=self.max_context_chars,
         )
 
-        report("Asking Ollama for a corpus-grounded assessment...")
+        report(f"Asking {provider} for a corpus-grounded assessment...")
         if self.answer_function is not None:
             assistant_text = self.answer_function(messages)
         else:
-            assistant_text = call_ollama_chat(
+            assistant_text = call_llm_chat(
                 messages,
                 model=self.model,
-                ollama_url=self.ollama_url,
                 timeout_seconds=self.timeout_seconds,
                 token_callback=token_callback,
             )

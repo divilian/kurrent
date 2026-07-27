@@ -10,7 +10,7 @@ from kurrent.converser import (
     build_evidence_packets,
     build_research_inquiry_messages,
     build_retrieval_query,
-    call_ollama_chat,
+    call_llm_chat,
     citation_for_hit,
     evidence_sources,
     format_evidence_packets,
@@ -99,8 +99,8 @@ def test_build_evidence_packets_preserves_source_page_section_and_chunk_provenan
     )
 
 
-def test_format_evidence_packets_sends_only_citation_and_excerpt_to_ollama():
-    """Ollama-facing evidence should omit internal provenance/debug fields."""
+def test_format_evidence_packets_sends_only_citation_and_excerpt_to_llm():
+    """LLM-facing evidence should omit internal provenance/debug fields."""
 
     packets = build_evidence_packets([make_hit()])
     formatted = format_evidence_packets(packets)
@@ -212,7 +212,7 @@ def test_evidence_sources_group_chunks_by_pdf_and_keep_first_page():
 
 
 def test_build_research_inquiry_messages_frames_task_as_literature_assessment():
-    """The Ollama prompt should ask for RQ assessment, not ordinary QA."""
+    """The LLM prompt should ask for RQ assessment, not ordinary QA."""
 
     messages = build_research_inquiry_messages(
         user_text="Has homophily-triggered tie dissolution been studied?",
@@ -330,6 +330,7 @@ def test_converse_engine_reports_progress_between_slow_stages():
     progress_messages = []
     engine = ConverseEngine(
         searcher=FakeSearcher(),
+        model="openai:gpt-4.1-mini",
         answer_function=lambda messages: "answer",
     )
 
@@ -342,48 +343,35 @@ def test_converse_engine_reports_progress_between_slow_stages():
         "Preparing retrieval query...",
         "Searching Kurrent semantic index...",
         "Retrieved 1 candidate chunk.",
-        "Building evidence packet for Ollama...",
-        "Asking Ollama for a corpus-grounded assessment...",
+        "Building evidence packet for OpenAI...",
+        "Asking OpenAI for a corpus-grounded assessment...",
     ]
 
 
-def test_call_ollama_chat_streams_tokens_and_returns_full_answer(monkeypatch):
-    """Streaming Ollama calls should expose live tokens and keep final text."""
+def test_call_llm_chat_streams_tokens_and_returns_full_answer(monkeypatch):
+    """Streaming LLM calls should expose live tokens and keep final text."""
 
     captured = {}
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
+    def fake_provider_chat(messages, **kwargs):
+        captured["messages"] = messages
+        captured.update(kwargs)
+        kwargs["token_callback"]("Closest")
+        kwargs["token_callback"](" evidence")
+        return "Closest evidence"
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def __iter__(self):
-            return iter([
-                b'{"message":{"content":"Closest"},"done":false}\n',
-                b'{"message":{"content":" evidence"},"done":false}\n',
-                b'{"done":true}\n',
-            ])
-
-    def fake_urlopen(request, timeout):
-        captured["payload"] = json.loads(request.data.decode("utf-8"))
-        captured["timeout"] = timeout
-        return FakeResponse()
-
-    monkeypatch.setattr("kurrent.converser.urlopen", fake_urlopen)
+    monkeypatch.setattr("kurrent.converser._call_provider_chat", fake_provider_chat)
 
     tokens = []
-    answer = call_ollama_chat(
+    answer = call_llm_chat(
         [{"role": "user", "content": "hello"}],
-        model="test-model",
-        ollama_url="http://ollama.example",
+        model="ollama:test-model",
         timeout_seconds=12.5,
         token_callback=tokens.append,
     )
 
     assert tokens == ["Closest", " evidence"]
     assert answer == "Closest evidence"
-    assert captured["payload"]["stream"] is True
-    assert captured["payload"]["model"] == "test-model"
-    assert captured["timeout"] == 12.5
+    assert captured["stream"] is True
+    assert captured["model"] == "ollama:test-model"
+    assert captured["timeout_seconds"] == 12.5

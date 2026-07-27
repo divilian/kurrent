@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 import pymupdf
 
 from kurrent.file_utils import is_pdf, silence_mupdf_messages
+from kurrent.config import DEFAULT_SECTION_RECOGNITION_LLM
 from kurrent.pdf_text_extractor import (
     extract_pdf_pages as extract_layout_pdf_pages,
 )
@@ -69,7 +70,7 @@ def llm_sectioning_max_pages() -> int:
     """Return the page-count cutoff for LLM sectioning.
 
     Very large PDFs can produce thousands of heading candidates, which makes
-    per-candidate Ollama sectioning impractical. Keep this configurable for
+    per-candidate LLM sectioning impractical. Keep this configurable for
     experiments, but default to a conservative scholarly-article-friendly cap.
     """
 
@@ -129,6 +130,7 @@ def chunk_document(
     llm_progress_total_callback: Callable[[int], None] | None = None,
     llm_progress_callback: Callable[[int], None] | None = None,
     llm_sectioning_prefetch: LLMSectioningPrefetchResult | None = None,
+    llm_model: str = DEFAULT_SECTION_RECOGNITION_LLM,
 ) -> list[Chunk]:
     """Extract, section, chunk, store, and return chunks for a document.
 
@@ -146,7 +148,7 @@ def chunk_document(
     builder, because they are heading strings rather than LLM candidate IDs.
 
     llm_progress_total_callback and llm_progress_callback are optional hooks
-    used by interactive playgrounds to display Ollama progress.
+    used by interactive playgrounds to display LLM progress.
     """
 
     doc = store.get_document(doc_id)
@@ -212,6 +214,7 @@ def chunk_document(
                 progress_total_callback=llm_progress_total_callback,
                 progress_callback=llm_progress_callback,
                 prefetch_result=llm_sectioning_prefetch,
+                model=llm_model,
             )
     else:
         headings = detect_heading_candidates(doc.pdf_path)
@@ -251,18 +254,19 @@ def compute_llm_sectioning_prefetch(
     progress_total_callback: Callable[[int], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
     quiet: bool = False,
+    model: str = DEFAULT_SECTION_RECOGNITION_LLM,
 ) -> LLMSectioningPrefetchResult:
     """Compute LLM section-heading decisions without needing a doc_id.
 
     This is useful during interactive ingest: while the user reviews metadata,
-    kurrent can quietly ask Ollama to classify heading candidates. The returned
+    kurrent can quietly ask the configured LLM to classify heading candidates. The returned
     candidates/decisions can later be converted into SectionSpan objects once
     the real document record exists.
     """
 
     from kurrent.llm_sectioner import (
         LLMSectioningUnavailableError,
-        select_section_headings_with_ollama,
+        select_section_headings_with_llm,
     )
 
     candidates = detect_heading_candidates_with_context(
@@ -270,11 +274,12 @@ def compute_llm_sectioning_prefetch(
         max_pages=max_pages,
     )
     try:
-        decisions = select_section_headings_with_ollama(
+        decisions = select_section_headings_with_llm(
             candidates,
             progress_total_callback=progress_total_callback,
             progress_callback=progress_callback,
             verbose=not quiet,
+            model=model,
         )
     except LLMSectioningUnavailableError as exc:
         return LLMSectioningPrefetchResult(
@@ -296,6 +301,7 @@ def make_section_spans_with_llm(
     progress_total_callback: Callable[[int], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
     prefetch_result: LLMSectioningPrefetchResult | None = None,
+    model: str = DEFAULT_SECTION_RECOGNITION_LLM,
 ) -> list[SectionSpan]:
     """Detect sections with the LLM-assisted HeadingCandidate pipeline."""
 
@@ -305,6 +311,7 @@ def make_section_spans_with_llm(
             max_pages=max_pages,
             progress_total_callback=progress_total_callback,
             progress_callback=progress_callback,
+            model=model,
         )
 
     if prefetch_result.unavailable_error is not None:

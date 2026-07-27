@@ -5,7 +5,7 @@ from kurrent.metadata_refresher import (
     MetadataRefreshProposal,
     assess_document_metadata,
     metadata_updates_for_document,
-    _metadata_from_ollama_payload,
+    _metadata_from_llm_payload,
 )
 from kurrent.schema import ExtractedMetadata
 from test.factories import make_document
@@ -96,8 +96,8 @@ def test_metadata_updates_can_replace_all_crossref_fields():
     }
 
 
-def test_metadata_from_ollama_payload_sanitizes_bad_values():
-    metadata, confidence, reason = _metadata_from_ollama_payload(
+def test_metadata_from_llm_payload_sanitizes_bad_values():
+    metadata, confidence, reason = _metadata_from_llm_payload(
         {
             "title": "Microsoft Word - manuscript.docx",
             "authors": "design08",
@@ -140,8 +140,8 @@ def test_metadata_updates_name_cases_all_caps_authors():
     }
 
 
-def test_metadata_from_ollama_payload_name_cases_all_caps_authors():
-    metadata, confidence, reason = _metadata_from_ollama_payload(
+def test_metadata_from_llm_payload_name_cases_all_caps_authors():
+    metadata, confidence, reason = _metadata_from_llm_payload(
         {
             "title": "Learning to Classify Text",
             "authors": "WILLIAM W. COHEN and YORAM SINGER",

@@ -8,10 +8,10 @@ from kurrent import sectioner
 
 
 @pytest.fixture(autouse=True)
-def _fake_ingest_ollama_check(monkeypatch):
-    """Keep ingest tests from depending on a real Ollama service."""
+def _fake_ingest_llm_check(monkeypatch):
+    """Keep ingest tests from depending on a real configured LLM service."""
 
-    monkeypatch.setattr(cli, "ensure_ollama_for_screening_summaries", lambda: True)
+    monkeypatch.setattr(cli, "ensure_screening_summary_llm_ready", lambda **_kwargs: True)
 
 
 def test_ingest_defaults_to_crossref_metadata():
@@ -2073,8 +2073,7 @@ def test_ingest_summary_prefetcher_computes_quiet_background_summaries(
     prefetcher = cli.IngestSummaryPrefetcher(
         enabled=True,
         depth=3,
-        model="fake-summary-model",
-        ollama_url="http://example.test",
+        model="ollama:fake-summary-model",
         timeout_seconds=12,
         max_num_ctx=4096,
     )
@@ -2127,8 +2126,7 @@ def test_screening_gate_uses_prefetched_summary_and_then_queues_more(
         pdf_path,
         assume_yes=True,
         depth=2,
-        model="fake-model",
-        ollama_url="http://example.test",
+        model="ollama:fake-model",
         timeout_seconds=12,
         max_num_ctx=4096,
         summary_prefetch_task=task,
@@ -2430,8 +2428,7 @@ def test_ingest_prefetchers_use_daemon_workers():
     summary_prefetcher = cli.IngestSummaryPrefetcher(
         enabled=True,
         depth=2,
-        model="fake-model",
-        ollama_url="http://example.test",
+        model="ollama:fake-model",
         timeout_seconds=1,
         max_num_ctx=1024,
     )
@@ -2470,8 +2467,7 @@ def test_screening_gate_handles_no_extractable_summary_text(monkeypatch, tmp_pat
             assume_yes=False,
             depth=2,
             model="fake-model",
-            ollama_url="http://example.test",
-            timeout_seconds=1,
+                timeout_seconds=1,
             max_num_ctx=1024,
         )
 
@@ -2545,8 +2541,7 @@ def test_screening_reports_already_ingested_pdfs_in_phase_one(monkeypatch, tmp_p
         assume_yes=False,
         use_llm_sectioning=True,
         summary_depth=2,
-        summary_model="fake-model",
-        summary_ollama_url="http://example.test",
+        summary_model="ollama:fake-model",
         summary_timeout=1,
         summary_max_num_ctx=4096,
     )

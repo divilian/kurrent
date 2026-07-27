@@ -225,7 +225,7 @@ def test_handle_converse_command_reports_unknown_command(capsys):
 
 
 def test_streaming_wrapped_printer_wraps_completed_words(capsys):
-    """Live Ollama output should wrap without waiting for the full answer."""
+    """Live LLM output should wrap without waiting for the full answer."""
 
     printer = cli.StreamingWrappedPrinter(width=12)
     printer.write("one two thr")
@@ -323,14 +323,13 @@ def test_open_converse_source_prefers_highlighted_pdf_when_available(monkeypatch
         lambda path, page=None: opened.append((path, page)) or FakeOpenResult(),
     )
 
-    cli.open_converse_source(turn, "1", ollama_model="model-x", ollama_url="http://ollama")
+    cli.open_converse_source(turn, "1", llm_model="ollama:model-x")
 
     assert opened == [(highlighted_path, 3)]
     assert highlight_calls[0]["pdf_path"] == pdf_path
     assert highlight_calls[0]["page_start"] == 3
     assert highlight_calls[0]["research_interest"] == "question"
-    assert highlight_calls[0]["model"] == "model-x"
-    assert highlight_calls[0]["ollama_url"] == "http://ollama"
+    assert highlight_calls[0]["model"] == "ollama:model-x"
     assert highlight_calls[0]["fallback_excerpt"] == "Relevant excerpt."
 
 

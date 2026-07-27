@@ -8,15 +8,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+load_dotenv()
+
 __all__ = [
     "KURRENT_DB_FILENAME",
     "KURRENT_CHROMA_DIRNAME",
     "KURRENT_PDFS_DIRNAME",
     "CROSSREF_REQUEST_INTERVAL_SECONDS",
     "DEFAULT_OLLAMA_URL",
-    "DEFAULT_OLLAMA_SUMMARY_MODEL",
-    "DEFAULT_OLLAMA_SUMMARY_TIMEOUT",
-    "DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX",
+    "DEFAULT_SUMMARY_LLM",
+    "DEFAULT_SUMMARY_LLM_TIMEOUT",
+    "DEFAULT_SUMMARY_LLM_MAX_NUM_CTX",
     "DEFAULT_SUMMARY_DEPTH",
     "DEFAULT_RAG_LLM",
     "DEFAULT_RELEVANCE_LLM",
@@ -34,52 +36,47 @@ KURRENT_CHROMA_DIRNAME = "chroma"
 KURRENT_PDFS_DIRNAME = "pdfs"
 CROSSREF_REQUEST_INTERVAL_SECONDS = 1.0
 
-# Ollama defaults by Kurrent LLM role.
+# Provider-explicit defaults by Kurrent LLM role.
 #
-# KURRENT_OLLAMA_MODEL remains a backward-compatible global fallback, but
-# role-specific environment variables are preferred when different local models
-# make sense for different jobs. For example, RAG answer generation is the most
-# user-visible role and can be made heavier without forcing slower models onto
-# smaller classification/extraction tasks.
+# Role-specific environment variables allow different models for different jobs.
+# For example, RAG answer generation is the most user-visible role and can use a
+# heavier model without forcing slower models onto smaller classification or
+# extraction tasks.
 DEFAULT_OLLAMA_URL = os.environ.get("KURRENT_OLLAMA_URL", "http://127.0.0.1:11434")
-_GLOBAL_OLLAMA_MODEL = os.environ.get("KURRENT_OLLAMA_MODEL")
 
-# The following names assume local Ollama aliases created with commands
-# documented in the project design notes. They are aliases only;
-# prompts/settings remain controlled by Kurrent.
+# The following defaults assume local Ollama aliases created with commands
+# documented in the project design notes. The provider is explicit in every
+# model spec; prompts/settings remain controlled by Kurrent.
 DEFAULT_RAG_LLM = os.environ.get(
     "KURRENT_RAG_LLM",
-    os.environ.get(
-        "KURRENT_CONVERSE_LLM",
-        _GLOBAL_OLLAMA_MODEL or "qwen3:kurrent-rag-8b",
-    ),
+    "ollama:qwen3:kurrent-rag-8b",
 )
 DEFAULT_RELEVANCE_LLM = os.environ.get(
     "KURRENT_RELEVANCE_LLM",
-    _GLOBAL_OLLAMA_MODEL or "llama3.1:kurrent-relevance-8b-instruct-q4_K_M",
+    "ollama:llama3.1:kurrent-relevance-8b-instruct-q4_K_M",
 )
 DEFAULT_METADATA_LLM = os.environ.get(
     "KURRENT_METADATA_LLM",
-    _GLOBAL_OLLAMA_MODEL or "llama3.1:kurrent-metadata-8b-instruct-q4_K_M",
+    "ollama:llama3.1:kurrent-metadata-8b-instruct-q4_K_M",
 )
 DEFAULT_PDF_EXCERPT_LLM = os.environ.get(
     "KURRENT_PDF_EXCERPT_LLM",
-    _GLOBAL_OLLAMA_MODEL or "llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M",
+    "ollama:llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M",
 )
 DEFAULT_SECTION_RECOGNITION_LLM = os.environ.get(
     "KURRENT_SECTION_RECOGNITION_LLM",
-    _GLOBAL_OLLAMA_MODEL or "llama3.2:kurrent-sectioning-3b",
+    "ollama:llama3.2:kurrent-sectioning-3b",
 )
 
-DEFAULT_OLLAMA_SUMMARY_MODEL = os.environ.get(
+DEFAULT_SUMMARY_LLM = os.environ.get(
     "KURRENT_SUMMARY_LLM",
-    _GLOBAL_OLLAMA_MODEL or "qwen2.5:kurrent-summarization-7b",
+    "ollama:qwen2.5:kurrent-summarization-7b",
 )
 
-DEFAULT_OLLAMA_SUMMARY_TIMEOUT = float(
+DEFAULT_SUMMARY_LLM_TIMEOUT = float(
     os.environ.get("KURRENT_SUMMARY_LLM_TIMEOUT", "180")
 )
-DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX = int(
+DEFAULT_SUMMARY_LLM_MAX_NUM_CTX = int(
     os.environ.get("KURRENT_SUMMARY_LLM_NUM_CTX", "16384")
 )
 DEFAULT_SUMMARY_DEPTH = int(

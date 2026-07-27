@@ -2,8 +2,8 @@ import pytest
 
 from kurrent.llm_sectioner import (
     LLMSectioningUnavailableError,
-    OllamaTimeoutError,
-    select_section_headings_with_ollama,
+    LLMTimeoutError,
+    select_section_headings_with_llm,
 )
 from kurrent.sectioner import HeadingCandidate
 
@@ -32,12 +32,12 @@ def test_section_llm_stops_after_repeated_candidate_failures(monkeypatch):
 
     def always_timeout(**_kwargs):
         calls["count"] += 1
-        raise OllamaTimeoutError("timeout")
+        raise LLMTimeoutError("timeout")
 
-    monkeypatch.setattr("kurrent.llm_sectioner._ollama_chat", always_timeout)
+    monkeypatch.setattr("kurrent.llm_sectioner._llm_chat", always_timeout)
 
     with pytest.raises(LLMSectioningUnavailableError):
-        select_section_headings_with_ollama(
+        select_section_headings_with_llm(
             candidates,
             max_consecutive_failures=2,
             timeout_seconds=1,

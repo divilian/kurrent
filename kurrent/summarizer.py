@@ -5,20 +5,20 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import hashlib
-import json
 import math
 import re
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import Request, urlopen
-
 from kurrent.cli_display import collapse_whitespace
 from kurrent.config import (
-    DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
-    DEFAULT_OLLAMA_SUMMARY_MODEL,
-    DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
-    DEFAULT_OLLAMA_URL,
+    DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
+    DEFAULT_SUMMARY_LLM,
+    DEFAULT_SUMMARY_LLM_TIMEOUT,
     DEFAULT_SUMMARY_DEPTH,
+)
+from kurrent.llm_provider import (
+    LLMCallError,
+    LLMConfigurationError,
+    call_llm_chat,
 )
 from kurrent.schema import SectionSpan
 from kurrent.sectioner import (
@@ -76,8 +76,6 @@ class ScreeningSummary:
     depth: int
 
 
-# Backward-compatible name for older tests/imports from the first implementation.
-SectionSummaryNote = ScreeningSectionExcerpt
 
 
 def estimate_tokens(text: str) -> int:
@@ -87,19 +85,19 @@ def estimate_tokens(text: str) -> int:
         return 0
 
     # Four characters per token is intentionally approximate. The goal is not
-    # exact tokenizer parity; it is a conservative guardrail before local
-    # Ollama calls.
+    # exact tokenizer parity; it is a conservative guardrail before LLM
+    # calls.
     return max(1, math.ceil(len(text) / 4))
 
 
 def trim_section_for_summary(
     text: str,
     *,
-    max_num_ctx: int = DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+    max_num_ctx: int = DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
 ) -> tuple[str, bool]:
     """Return section text that fits the summary prompt budget.
 
-    max_num_ctx is an Ollama-style context budget. Kurrent uses a rough
+    max_num_ctx is a context budget for prompt construction. Kurrent uses a rough
     character estimate to avoid adding a tokenizer dependency here. If the
     section is too large, preserve the beginning and end with an explicit
     omission marker between them.
@@ -198,50 +196,27 @@ def screening_sections_for_pdf(
     )
 
 
-def _call_ollama_summary_chat(
+def _call_summary_chat(
     messages: list[dict[str, str]],
     *,
     model: str,
-    ollama_url: str,
     timeout_seconds: float,
     num_ctx: int,
     num_predict: int,
 ) -> str:
-    """Call Ollama's chat API for summarization."""
-
-    api_url = f"{ollama_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "options": {
-            "temperature": 0.2,
-            "num_ctx": num_ctx,
-            "num_predict": num_predict,
-        },
-    }
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    """Call the configured chat provider for summarization."""
 
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ScreeningSummaryError(
-            f"Ollama summary unavailable: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    content = response_data.get("message", {}).get("content", "")
-
-    if not isinstance(content, str) or not content.strip():
-        raise ScreeningSummaryError("Ollama returned an empty summary response.")
-
-    return content.strip()
-
+        return call_llm_chat(
+            messages,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            temperature=0.2,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+        )
+    except (LLMConfigurationError, LLMCallError) as exc:
+        raise ScreeningSummaryError(str(exc)) from exc
 
 def _normalized_text_fingerprint(text: str) -> str:
     normalized = collapse_whitespace(text).lower()
@@ -273,7 +248,7 @@ def select_screening_sections(
     sections: list[SectionSpan],
     *,
     max_sections: int = DEFAULT_SCREENING_SUMMARY_MAX_SECTIONS,
-    max_num_ctx: int = DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+    max_num_ctx: int = DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
 ) -> list[ScreeningSectionExcerpt]:
     """Select a small, representative set of section excerpts for one LLM call.
 
@@ -442,10 +417,9 @@ def summarize_pdf_for_screening(
     pdf_path: str | Path,
     *,
     depth: int | None = None,
-    model: str = DEFAULT_OLLAMA_SUMMARY_MODEL,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    timeout_seconds: float = DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
-    max_num_ctx: int = DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+    model: str = DEFAULT_SUMMARY_LLM,
+    timeout_seconds: float = DEFAULT_SUMMARY_LLM_TIMEOUT,
+    max_num_ctx: int = DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
     llm_sectioning_prefetch=None,
     progress_callback: Callable[[str], None] | None = None,
     answer_function: Callable[[list[dict[str, str]]], str] | None = None,
@@ -481,10 +455,9 @@ def summarize_pdf_for_screening(
     if answer_function is not None:
         summary_text = answer_function(messages)
     else:
-        summary_text = _call_ollama_summary_chat(
+        summary_text = _call_summary_chat(
             messages,
             model=model,
-            ollama_url=ollama_url,
             timeout_seconds=timeout_seconds,
             num_ctx=max_num_ctx,
             num_predict=max(

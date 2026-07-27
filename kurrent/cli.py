@@ -60,12 +60,12 @@ from kurrent.cli_display import (
 )
 from kurrent.config import (
     DEFAULT_METADATA_LLM,
-    DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
-    DEFAULT_OLLAMA_SUMMARY_MODEL,
-    DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
-    DEFAULT_OLLAMA_URL,
+    DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
+    DEFAULT_SUMMARY_LLM,
+    DEFAULT_SUMMARY_LLM_TIMEOUT,
     DEFAULT_RAG_LLM,
     DEFAULT_RELEVANCE_LLM,
+    DEFAULT_SECTION_RECOGNITION_LLM,
     DEFAULT_SUMMARY_DEPTH,
 )
 from kurrent.relevance_judge import (
@@ -244,7 +244,7 @@ def document_pdf_exists(document) -> bool:
 class StreamingWrappedPrinter:
     """Incrementally print streamed text with terminal-width wrapping.
 
-    Ollama streaming chunks do not arrive on word boundaries, so this keeps the
+    LLM streaming chunks do not arrive on word boundaries, so this keeps the
     final partial word buffered until later text or finish() completes it.
     Whitespace is normalized similarly to print_wrapped(): paragraph newlines are
     preserved, while runs of spaces/tabs are collapsed to word separators.
@@ -471,7 +471,6 @@ class IngestSummaryPrefetcher:
         enabled: bool,
         depth: int,
         model: str,
-        ollama_url: str,
         timeout_seconds: float,
         max_num_ctx: int,
         max_workers: int = 1,
@@ -479,7 +478,6 @@ class IngestSummaryPrefetcher:
         self.enabled = enabled
         self.depth = depth
         self.model = model
-        self.ollama_url = ollama_url
         self.timeout_seconds = timeout_seconds
         self.max_num_ctx = max_num_ctx
         self._executor: DaemonThreadPoolExecutor | None = (
@@ -512,7 +510,6 @@ class IngestSummaryPrefetcher:
                 pdf_path=key,
                 depth=self.depth,
                 model=self.model,
-                ollama_url=self.ollama_url,
                 timeout_seconds=self.timeout_seconds,
                 max_num_ctx=self.max_num_ctx,
                 llm_sectioning_prefetch=completed_sectioning_prefetch_result(
@@ -547,8 +544,14 @@ class IngestSummaryPrefetcher:
 class IngestSectioningPrefetcher:
     """Quietly precompute LLM section decisions during interactive ingest."""
 
-    def __init__(self, enabled: bool, max_workers: int = 1):
+    def __init__(
+        self,
+        enabled: bool,
+        model: str = DEFAULT_SECTION_RECOGNITION_LLM,
+        max_workers: int = 1,
+    ):
         self.enabled = enabled
+        self.model = model
         self._executor: DaemonThreadPoolExecutor | None = (
             DaemonThreadPoolExecutor(max_workers=max_workers)
             if enabled
@@ -577,6 +580,7 @@ class IngestSectioningPrefetcher:
                 progress_total_callback=progress.set_total,
                 progress_callback=progress.advance,
                 quiet=True,
+                model=self.model,
             )
 
         future = self._executor.submit(compute)
@@ -627,7 +631,7 @@ def wait_for_sectioning_prefetch(task: _SectioningPrefetchTask | None):
             if progress_bar is None and total is not None and total > 0:
                 progress_bar = tqdm(
                     total=total,
-                    desc="Ollama section candidates",
+                    desc="LLM section candidates",
                     unit="candidate",
                     bar_format=gray_status_text("{l_bar}{bar}{r_bar}"),
                 )
@@ -874,7 +878,7 @@ def review_section_headings(
     """Let the user remove bogus rules-based section-heading candidates.
 
     When LLM-assisted sectioning is enabled, return None so the chunker can
-    run the HeadingCandidate + Ollama pipeline and preserve candidate anchors.
+    run the HeadingCandidate + LLM pipeline and preserve candidate anchors.
     """
 
     if use_llm_sectioning:
@@ -1104,6 +1108,7 @@ def ingest_pdf_with_metadata(
     llm_progress_total_callback=None,
     llm_progress_callback=None,
     llm_sectioning_prefetch=None,
+    llm_model: str = DEFAULT_SECTION_RECOGNITION_LLM,
 ) -> IngestOutcome:
     """Ingest one PDF using already-extracted metadata.
 
@@ -1190,6 +1195,7 @@ def ingest_pdf_with_metadata(
         llm_progress_total_callback=llm_progress_total_callback,
         llm_progress_callback=llm_progress_callback,
         llm_sectioning_prefetch=llm_sectioning_prefetch,
+        llm_model=llm_model,
     )
 
     if chunks is None or chunks:
@@ -1293,7 +1299,6 @@ def run_screening_summary_gate(
     assume_yes: bool,
     depth: int,
     model: str,
-    ollama_url: str,
     timeout_seconds: float,
     max_num_ctx: int,
     sectioning_prefetch_task: _SectioningPrefetchTask | None = None,
@@ -1315,7 +1320,6 @@ def run_screening_summary_gate(
                 pdf_path=pdf_path,
                 depth=depth,
                 model=model,
-                ollama_url=ollama_url,
                 timeout_seconds=timeout_seconds,
                 max_num_ctx=max_num_ctx,
                 llm_sectioning_prefetch=completed_sectioning_prefetch_result(
@@ -1508,7 +1512,6 @@ def screen_pdfs_for_ingest(
     use_llm_sectioning: bool,
     summary_depth: int,
     summary_model: str,
-    summary_ollama_url: str,
     summary_timeout: float,
     summary_max_num_ctx: int,
 ) -> list[Path]:
@@ -1519,7 +1522,6 @@ def screen_pdfs_for_ingest(
         enabled=(len(pdf_paths) > 1),
         depth=summary_depth,
         model=summary_model,
-        ollama_url=summary_ollama_url,
         timeout_seconds=summary_timeout,
         max_num_ctx=summary_max_num_ctx,
     )
@@ -1578,7 +1580,6 @@ def screen_pdfs_for_ingest(
                     assume_yes=assume_yes,
                     depth=summary_depth,
                     model=summary_model,
-                    ollama_url=summary_ollama_url,
                     timeout_seconds=summary_timeout,
                     max_num_ctx=summary_max_num_ctx,
                     sectioning_prefetch_task=None,
@@ -1628,6 +1629,8 @@ def ingest_pdf_paths(
     summarize_before_ingest: bool,
     summary_depth: int,
     pending_paths: set[Path] | None = None,
+    summary_model: str = DEFAULT_SUMMARY_LLM,
+    sectioning_model: str = DEFAULT_SECTION_RECOGNITION_LLM,
 ) -> list[IngestResult]:
     """Ingest paths using the ordinary metadata/chunking pipeline."""
 
@@ -1637,6 +1640,7 @@ def ingest_pdf_paths(
     pending_paths = pending_paths or set()
     sectioning_prefetcher = IngestSectioningPrefetcher(
         enabled=(use_llm_sectioning and not assume_yes),
+        model=sectioning_model,
     )
 
     try:
@@ -1671,10 +1675,10 @@ def ingest_pdf_paths(
                     sectioning_prefetch_task=sectioning_prefetcher.task_for(pdf_path),
                     summarize_before_ingest=summarize_before_ingest,
                     summary_depth=summary_depth,
-                    summary_model=DEFAULT_OLLAMA_SUMMARY_MODEL,
-                    summary_ollama_url=DEFAULT_OLLAMA_URL,
-                    summary_timeout=DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
-                    summary_max_num_ctx=DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+                    summary_model=summary_model,
+                    summary_timeout=DEFAULT_SUMMARY_LLM_TIMEOUT,
+                    summary_max_num_ctx=DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
+                    llm_model=sectioning_model,
                 )
                 results.append(
                     IngestResult(
@@ -1723,10 +1727,10 @@ def ingest_one_pdf(
     on_screening_summary_ready: Callable[[], None] | None = None,
     summarize_before_ingest: bool = True,
     summary_depth: int = DEFAULT_SUMMARY_DEPTH,
-    summary_model: str = DEFAULT_OLLAMA_SUMMARY_MODEL,
-    summary_ollama_url: str = DEFAULT_OLLAMA_URL,
-    summary_timeout: float = DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
-    summary_max_num_ctx: int = DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+    summary_model: str = DEFAULT_SUMMARY_LLM,
+    summary_timeout: float = DEFAULT_SUMMARY_LLM_TIMEOUT,
+    summary_max_num_ctx: int = DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
+    llm_model: str = DEFAULT_SECTION_RECOGNITION_LLM,
 ) -> IngestOutcome:
     """Ingest one PDF through the CLI workflow."""
 
@@ -1775,7 +1779,6 @@ def ingest_one_pdf(
             assume_yes=assume_yes,
             depth=summary_depth,
             model=summary_model,
-            ollama_url=summary_ollama_url,
             timeout_seconds=summary_timeout,
             max_num_ctx=summary_max_num_ctx,
             sectioning_prefetch_task=sectioning_prefetch_task,
@@ -1839,12 +1842,12 @@ def ingest_one_pdf(
             progress_bar = None
 
         if total <= 0:
-            print("No heading candidates will be sent to Ollama.", flush=True)
+            print("No heading candidates will be sent to the configured LLM.", flush=True)
             return
 
         progress_bar = tqdm(
             total=total,
-            desc="Ollama section candidates",
+            desc="LLM section candidates",
             unit="candidate",
             bar_format=gray_status_text("{l_bar}{bar}{r_bar}"),
         )
@@ -1883,6 +1886,7 @@ def ingest_one_pdf(
                 else None
             ),
             llm_sectioning_prefetch=llm_sectioning_prefetch,
+            llm_model=llm_model,
         )
     finally:
         if progress_bar is not None:
@@ -2986,7 +2990,7 @@ def present_chunk_hits(
             print("Please press Enter, or type d or q.")
 
     if displayed == 0 and skipped:
-        print("No chunks survived the Ollama relevance review.")
+        print("No chunks survived the LLM relevance review.")
 
 
 def _debug_source_label(hit) -> str:
@@ -4424,10 +4428,9 @@ def run_search(args: argparse.Namespace) -> int:
                 explanation_buffer = RelevanceJudgmentBuffer(
                     query=query,
                     hits=hits,
-                    model=args.ollama_model,
-                    ollama_url=args.ollama_url,
-                    timeout_seconds=args.ollama_timeout,
-                    max_workers=args.ollama_workers,
+                    model=args.llm_model,
+                    timeout_seconds=args.llm_timeout,
+                    max_workers=args.llm_workers,
                 )
 
             try:
@@ -4798,14 +4801,12 @@ class ConverseHighlightPrefetchCache:
 
     def __init__(
         self,
-        ollama_model: str = DEFAULT_RAG_LLM,
-        ollama_url: str = DEFAULT_OLLAMA_URL,
-        ollama_timeout: float = 45.0,
+        llm_model: str = DEFAULT_RAG_LLM,
+        llm_timeout: float = 45.0,
         max_workers: int = 2,
     ):
-        self.ollama_model = ollama_model
-        self.ollama_url = ollama_url
-        self.ollama_timeout = ollama_timeout
+        self.llm_model = llm_model
+        self.llm_timeout = llm_timeout
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._futures: dict[tuple, Future] = {}
 
@@ -4828,9 +4829,8 @@ class ConverseHighlightPrefetchCache:
             page_start=passage.page_start,
             research_interest=turn.user_text,
             page_end=passage.page_end,
-            model=self.ollama_model,
-            ollama_url=self.ollama_url,
-            timeout_seconds=self.ollama_timeout,
+            model=self.llm_model,
+            timeout_seconds=self.llm_timeout,
             fallback_excerpt=getattr(passage, "excerpt", None),
         )
         self._futures[key] = future
@@ -4914,9 +4914,8 @@ def edit_converse_source_metadata(turn, source_number_text: str, state_store=Non
 def open_converse_source(
     turn,
     source_number_text: str,
-    ollama_model: str = DEFAULT_RAG_LLM,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    ollama_timeout: float = 45.0,
+    llm_model: str = DEFAULT_RAG_LLM,
+    llm_timeout: float = 45.0,
     highlight: bool = True,
     highlight_cache: ConverseHighlightPrefetchCache | None = None,
 ) -> None:
@@ -4975,9 +4974,8 @@ def open_converse_source(
                 page_start=passage.page_start,
                 research_interest=turn.user_text,
                 page_end=passage.page_end,
-                model=ollama_model,
-                ollama_url=ollama_url,
-                timeout_seconds=ollama_timeout,
+                model=llm_model,
+                timeout_seconds=llm_timeout,
                 fallback_excerpt=getattr(passage, "excerpt", None),
             )
 
@@ -5034,9 +5032,8 @@ def is_source_browser_quit(command: str) -> bool:
 
 def browse_converse_sources(
     turn,
-    ollama_model: str = DEFAULT_RAG_LLM,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    ollama_timeout: float = 45.0,
+    llm_model: str = DEFAULT_RAG_LLM,
+    llm_timeout: float = 45.0,
     state_store=None,
 ):
     """Open an interactive source browser for the most recent converse turn."""
@@ -5048,9 +5045,8 @@ def browse_converse_sources(
         return turn
 
     highlight_cache = ConverseHighlightPrefetchCache(
-        ollama_model=ollama_model,
-        ollama_url=ollama_url,
-        ollama_timeout=ollama_timeout,
+        llm_model=llm_model,
+        llm_timeout=llm_timeout,
     )
 
     try:
@@ -5071,9 +5067,8 @@ def browse_converse_sources(
                     open_converse_source(
                         turn,
                         parts[1],
-                        ollama_model=ollama_model,
-                        ollama_url=ollama_url,
-                        ollama_timeout=ollama_timeout,
+                        llm_model=llm_model,
+                        llm_timeout=llm_timeout,
                         highlight_cache=highlight_cache,
                     )
                 else:
@@ -5104,9 +5099,8 @@ def browse_converse_sources(
             open_converse_source(
                 turn,
                 selection,
-                ollama_model=ollama_model,
-                ollama_url=ollama_url,
-                ollama_timeout=ollama_timeout,
+                llm_model=llm_model,
+                llm_timeout=llm_timeout,
                 highlight_cache=highlight_cache,
             )
     finally:
@@ -5116,9 +5110,8 @@ def browse_converse_sources(
 def handle_converse_command(
     command: str,
     last_turn,
-    ollama_model: str = DEFAULT_RAG_LLM,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    ollama_timeout: float = 45.0,
+    llm_model: str = DEFAULT_RAG_LLM,
+    llm_timeout: float = 45.0,
 ) -> bool:
     """Handle a kurrent ask slash command.
 
@@ -5139,9 +5132,8 @@ def handle_converse_command(
     if lowered == "/sources":
         browse_converse_sources(
             last_turn,
-            ollama_model=ollama_model,
-            ollama_url=ollama_url,
-            ollama_timeout=ollama_timeout,
+            llm_model=llm_model,
+            llm_timeout=llm_timeout,
         )
         return True
 
@@ -5155,9 +5147,8 @@ def handle_converse_command(
         open_converse_source(
             last_turn,
             parts[1],
-            ollama_model=ollama_model,
-            ollama_url=ollama_url,
-            ollama_timeout=ollama_timeout,
+            llm_model=llm_model,
+            llm_timeout=llm_timeout,
         )
         return True
 
@@ -5211,9 +5202,8 @@ def run_converse(args: argparse.Namespace) -> int:
         print_gray_status("Starting conversational search engine...")
         engine = ConverseEngine(
             searcher=searcher,
-            model=args.ollama_model,
-            ollama_url=args.ollama_url,
-            timeout_seconds=args.ollama_timeout,
+            model=args.llm_model,
+            timeout_seconds=args.llm_timeout,
             top_k=args.limit,
             max_distance=args.max_distance,
             include_reference_sections=args.include_reference_sections,
@@ -5254,9 +5244,8 @@ def run_converse(args: argparse.Namespace) -> int:
                 if not handle_converse_command(
                     user_text,
                     last_turn,
-                    ollama_model=args.ollama_model,
-                    ollama_url=args.ollama_url,
-                    ollama_timeout=args.ollama_timeout,
+                    llm_model=args.llm_model,
+                    llm_timeout=args.llm_timeout,
                 ):
                     return 0
                 continue
@@ -5310,9 +5299,8 @@ def run_converse(args: argparse.Namespace) -> int:
 
             last_turn = browse_converse_sources(
                 last_turn,
-                ollama_model=args.ollama_model,
-                ollama_url=args.ollama_url,
-                ollama_timeout=args.ollama_timeout,
+                llm_model=args.llm_model,
+                llm_timeout=args.llm_timeout,
                 state_store=store,
             )
             print()
@@ -5434,21 +5422,29 @@ def run_refresh_metadata(args: argparse.Namespace) -> int:
         print_wrapped(f"Documents selected: {len(documents)}")
 
         if args.method in {"auto", "llm"}:
-            print_wrapped(gray_status_text("Checking Ollama availability..."))
+            from kurrent.llm_provider import (
+                LLMConfigurationError,
+                is_ollama_model_spec,
+                validate_llm_model_spec,
+            )
+
             try:
-                started_ollama = ensure_ollama_available(
-                    ollama_url=args.ollama_url,
-                    startup_timeout_seconds=args.ollama_startup_timeout,
-                    progress_callback=lambda message: print_wrapped(
-                        gray_status_text(message)
-                    ),
-                )
-            except MetadataRefreshError as exc:
+                validate_llm_model_spec(args.llm_model)
+                if is_ollama_model_spec(args.llm_model):
+                    print_wrapped(gray_status_text("Checking Ollama availability..."))
+                    started_ollama = ensure_ollama_available(
+                        startup_timeout_seconds=args.llm_startup_timeout,
+                        progress_callback=lambda message: print_wrapped(
+                            gray_status_text(message)
+                        ),
+                    )
+                    if started_ollama:
+                        print_wrapped(gray_status_text("Ollama is ready."))
+                else:
+                    print_wrapped(gray_status_text("OpenAI is configured for metadata extraction."))
+            except (MetadataRefreshError, LLMConfigurationError) as exc:
                 print_usage_error(str(exc))
                 return 2
-
-            if started_ollama:
-                print_wrapped(gray_status_text("Ollama is ready."))
 
         inspected = 0
         skipped_good = 0
@@ -5484,9 +5480,8 @@ def run_refresh_metadata(args: argparse.Namespace) -> int:
                     method=args.method,
                     crossref_mailto=crossref_mailto,
                     crossref_timeout_seconds=args.crossref_timeout,
-                    ollama_model=args.ollama_model,
-                    ollama_url=args.ollama_url,
-                    ollama_timeout_seconds=args.ollama_timeout,
+                    llm_model=args.llm_model,
+                    llm_timeout_seconds=args.llm_timeout,
                     max_pages=args.pages,
                 )
             except Exception as exc:
@@ -5569,18 +5564,33 @@ def run_refresh_metadata(args: argparse.Namespace) -> int:
     finally:
         store.close()
 
-def ensure_ollama_for_screening_summaries() -> bool:
-    """Ensure Ollama is reachable before summary-screening LLM calls."""
+def ensure_screening_summary_llm_ready(
+    model: str = DEFAULT_SUMMARY_LLM,
+) -> bool:
+    """Validate the configured screening-summary LLM provider."""
 
+    from kurrent.llm_provider import (
+        LLMConfigurationError,
+        is_ollama_model_spec,
+        validate_llm_model_spec,
+    )
     from kurrent.metadata_refresher import (
         MetadataRefreshError,
         ensure_ollama_available,
     )
 
+    try:
+        validate_llm_model_spec(model)
+        if not is_ollama_model_spec(model):
+            print_gray_status("OpenAI is configured for screening summaries.")
+            return True
+    except LLMConfigurationError as exc:
+        print_usage_error(str(exc))
+        return False
+
     print_gray_status("Checking Ollama availability for screening summaries...")
     try:
         started_ollama = ensure_ollama_available(
-            ollama_url=DEFAULT_OLLAMA_URL,
             progress_callback=print_gray_status,
         )
     except MetadataRefreshError as exc:
@@ -5591,7 +5601,6 @@ def ensure_ollama_for_screening_summaries() -> bool:
         print_gray_status("Ollama is ready.")
 
     return True
-
 
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""
@@ -5633,6 +5642,8 @@ def run_ingest(args: argparse.Namespace) -> int:
 
     doi_lookup = args.metadata_mode == "crossref"
     crossref_mailto = get_crossref_mailto()
+    summary_model = args.summary_llm
+    sectioning_model = args.sectioning_llm
 
     print_gray_status(f"PDFs selected:           {len(pdf_paths)}")
 
@@ -5691,8 +5702,10 @@ def run_ingest(args: argparse.Namespace) -> int:
             flush=True,
         )
 
-    if args.summary_enabled and not ensure_ollama_for_screening_summaries():
-        return 2
+    if args.summary_enabled:
+        summaries_ready = ensure_screening_summary_llm_ready(model=summary_model)
+        if not summaries_ready:
+            return 2
 
     print()
     print_gray_status("Loading kurrent state store...")
@@ -5743,6 +5756,8 @@ def run_ingest(args: argparse.Namespace) -> int:
                             summarize_before_ingest=False,
                             summary_depth=args.summary_depth,
                             pending_paths={normalize_path(path) for path in pending_paths},
+                            summary_model=summary_model,
+                            sectioning_model=sectioning_model,
                         )
                     )
                 except KeyboardInterrupt:
@@ -5757,10 +5772,9 @@ def run_ingest(args: argparse.Namespace) -> int:
                     assume_yes=args.assume_yes,
                     use_llm_sectioning=not args.rules_based_sections,
                     summary_depth=args.summary_depth,
-                    summary_model=DEFAULT_OLLAMA_SUMMARY_MODEL,
-                    summary_ollama_url=DEFAULT_OLLAMA_URL,
-                    summary_timeout=DEFAULT_OLLAMA_SUMMARY_TIMEOUT,
-                    summary_max_num_ctx=DEFAULT_OLLAMA_SUMMARY_MAX_NUM_CTX,
+                    summary_model=summary_model,
+                    summary_timeout=DEFAULT_SUMMARY_LLM_TIMEOUT,
+                    summary_max_num_ctx=DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
                 )
             except ScreeningSummaryPaused:
                 print_paused_message()
@@ -5797,6 +5811,8 @@ def run_ingest(args: argparse.Namespace) -> int:
                         if args.summary_enabled and len(pdf_paths) > 1
                         else set()
                     ),
+                    summary_model=summary_model,
+                    sectioning_model=sectioning_model,
                 )
             )
         except ScreeningSummaryPaused:
@@ -5901,6 +5917,28 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "use the older rules-based section heading detector instead of "
             "LLM-assisted section recognition"
+        ),
+    )
+    ingest_parser.add_argument(
+        "--summary-LLM",
+        "--summary-llm",
+        dest="summary_llm",
+        default=DEFAULT_SUMMARY_LLM,
+        help=(
+            "LLM model spec for screening summaries. Use ollama:<model> "
+            "for local Ollama or openai:<model> for OpenAI "
+            f"(default: {DEFAULT_SUMMARY_LLM})."
+        ),
+    )
+    ingest_parser.add_argument(
+        "--sectioning-LLM",
+        "--sectioning-llm",
+        dest="sectioning_llm",
+        default=DEFAULT_SECTION_RECOGNITION_LLM,
+        help=(
+            "LLM model spec for section recognition. Use ollama:<model> "
+            "for local Ollama or openai:<model> for OpenAI "
+            f"(default: {DEFAULT_SECTION_RECOGNITION_LLM})."
         ),
     )
     summary_group = ingest_parser.add_mutually_exclusive_group()
@@ -6083,32 +6121,30 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument(
         "--no-explain",
         action="store_true",
-        help="disable background Ollama relevance judging for semantic search hits.",
+        help="disable background LLM relevance judging for semantic search hits.",
     )
     search_parser.add_argument(
-        "--ollama-model",
+        "--relevance-LLM",
+        "--relevance-llm",
+        dest="llm_model",
         default=DEFAULT_RELEVANCE_LLM,
         help=(
-            "Ollama model used for semantic-hit relevance judging "
+            "LLM model spec for semantic-hit relevance judging. Use "
+            "ollama:<model> for local Ollama or openai:<model> for OpenAI "
             f"(default: {DEFAULT_RELEVANCE_LLM})."
         ),
     )
     search_parser.add_argument(
-        "--ollama-url",
-        default=DEFAULT_OLLAMA_URL,
-        help=f"Ollama base URL for relevance judging (default: {DEFAULT_OLLAMA_URL}).",
-    )
-    search_parser.add_argument(
-        "--ollama-timeout",
+        "--llm-timeout",
         type=float,
         default=45.0,
-        help="seconds before one Ollama relevance judgment request times out.",
+        help="seconds before one relevance judgment LLM request times out.",
     )
     search_parser.add_argument(
-        "--ollama-workers",
+        "--llm-workers",
         type=int,
         default=2,
-        help="number of background Ollama explanation workers (default: 2).",
+        help="number of background LLM explanation workers (default: 2).",
     )
     search_parser.add_argument(
         "query",
@@ -6165,8 +6201,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "crossref", "llm"],
         default="auto",
         help=(
-            "metadata repair method: auto tries Crossref first, then Ollama; "
-            "crossref uses DOI/Crossref only; llm uses Ollama only (default: auto)"
+            "metadata repair method: auto tries Crossref first, then the "
+            "configured LLM; crossref uses DOI/Crossref only; llm uses "
+            "the configured LLM only (default: auto)"
         ),
     )
     refresh_metadata_parser.add_argument(
@@ -6182,28 +6219,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds before one Crossref lookup times out (default: 10).",
     )
     refresh_metadata_parser.add_argument(
-        "--ollama-model",
+        "--metadata-LLM",
+        "--metadata-llm",
+        dest="llm_model",
         default=DEFAULT_METADATA_LLM,
-        help=f"Ollama model used for fallback metadata extraction (default: {DEFAULT_METADATA_LLM}).",
+        help=(
+            "LLM model spec for fallback metadata extraction. Use "
+            "ollama:<model> for local Ollama or openai:<model> for OpenAI "
+            f"(default: {DEFAULT_METADATA_LLM})."
+        ),
     )
     refresh_metadata_parser.add_argument(
-        "--ollama-url",
-        default=DEFAULT_OLLAMA_URL,
-        help=f"Ollama base URL for fallback metadata extraction (default: {DEFAULT_OLLAMA_URL}).",
-    )
-    refresh_metadata_parser.add_argument(
-        "--ollama-timeout",
+        "--llm-timeout",
         type=float,
         default=60.0,
-        help="seconds before one Ollama metadata extraction request times out.",
+        help="seconds before one metadata-extraction LLM request times out.",
     )
     refresh_metadata_parser.add_argument(
-        "--ollama-startup-timeout",
+        "--llm-startup-timeout",
         type=float,
         default=20.0,
         help=(
-            "seconds to wait for Ollama to become reachable after attempting "
-            "to start 'ollama serve' (default: 20)"
+            "seconds to wait for local Ollama to become reachable when the "
+            "selected metadata LLM uses ollama:<model> (default: 20)"
         ),
     )
     refresh_metadata_parser.add_argument(
@@ -6262,47 +6300,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --debug, scan document metadata and current chunks for REGEX; repeatable.",
     )
     ask_parser.add_argument(
-        "--ollama-RAG-model",
-        dest="ollama_model",
+        "--RAG-LLM",
+        "--rag-llm",
+        dest="llm_model",
         default=DEFAULT_RAG_LLM,
         help=(
-            "Ollama model used for RAG answers "
+            "LLM model spec for RAG answers. Use ollama:<model> for local "
+            "Ollama or openai:<model> for OpenAI "
             f"(default: {DEFAULT_RAG_LLM}). This affects only Kurrent's "
-            "RAG interface; see config.py to change which Ollama model is "
-            "used for Kurrent's non-RAG LLM functions."
+            "RAG interface; role-specific environment variables configure "
+            "Kurrent's non-RAG LLM functions."
         ),
     )
     ask_parser.add_argument(
-        "--ollama-model",
-        dest="ollama_model",
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS,
-    )
-    ask_parser.add_argument(
-        "--ollama-RAG-url",
-        dest="ollama_url",
-        default=DEFAULT_OLLAMA_URL,
-        help=f"Ollama base URL for RAG answers (default: {DEFAULT_OLLAMA_URL}).",
-    )
-    ask_parser.add_argument(
-        "--ollama-url",
-        dest="ollama_url",
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS,
-    )
-    ask_parser.add_argument(
-        "--ollama-RAG-timeout",
-        dest="ollama_timeout",
+        "--llm-timeout",
+        dest="llm_timeout",
         type=float,
         default=120.0,
-        help="seconds before one Ollama RAG answer request times out.",
-    )
-    ask_parser.add_argument(
-        "--ollama-timeout",
-        dest="ollama_timeout",
-        type=float,
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS,
+        help="seconds before one RAG answer LLM request times out.",
     )
     ask_parser.add_argument(
         "research_question",
@@ -6325,6 +6340,13 @@ def main(argv: list[str] | None = None) -> int:
     except CliUsageError as exc:
         print_usage_error(str(exc))
         return 2
+    except Exception as exc:
+        from kurrent.llm_provider import LLMConfigurationError
+
+        if isinstance(exc, LLMConfigurationError):
+            print_usage_error(str(exc))
+            return 2
+        raise
 
 
 if __name__ == "__main__":

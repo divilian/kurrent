@@ -21,6 +21,7 @@ from kurrent.file_utils import (
 from kurrent.metadata_extractor import extract_metadata
 from kurrent.state_store import StateStore
 from kurrent.chunker import chunk_document, chunker_version
+from kurrent.config import DEFAULT_SECTION_RECOGNITION_LLM
 from kurrent.pipeline import current_text_pipeline_fingerprint
 
 __all__ = [
@@ -46,6 +47,7 @@ def ingest_pdf(
     use_llm_sectioning: bool = True,
     llm_progress_total_callback: Callable[[int], None] | None = None,
     llm_progress_callback: Callable[[int], None] | None = None,
+    llm_model: str = DEFAULT_SECTION_RECOGNITION_LLM,
 ) -> str:
     """Ingest a PDF into kurrent and return its kurrent ID.
 
@@ -60,7 +62,7 @@ def ingest_pdf(
     reviewed_headings is None.
 
     llm_progress_total_callback and llm_progress_callback are optional hooks
-    used by interactive playgrounds to display Ollama progress.
+    used by interactive playgrounds to display LLM progress.
     """
 
     path = normalize_path(path)
@@ -107,6 +109,7 @@ def ingest_pdf(
         use_llm_sectioning=use_llm_sectioning,
         llm_progress_total_callback=llm_progress_total_callback,
         llm_progress_callback=llm_progress_callback,
+        llm_model=llm_model,
     )
 
     if embedder is not None and (chunks is None or chunks):
@@ -155,7 +158,7 @@ def ingest_pdfs_recursively(
     batch continues.
 
     use_llm_sectioning controls the automatic sectioning path used for each
-    PDF. Search-oriented playgrounds can pass False to avoid slow Ollama calls
+    PDF. Search-oriented playgrounds can pass False to avoid slow LLM calls
     when LLM-quality sections are not the point of the playground.
     """
 

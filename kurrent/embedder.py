@@ -80,7 +80,7 @@ class Embedder:
     
     Example:
     
-      kurrent_chunks__index_semantic-index-fingerprint-v1_extractor_layout-aware-pymupdf-v2_sectioner_sectioner-v4_llm_sectioner_ollama-section-headings-v2_chunker_section-aware-fixed-char-v2_target_chars_2000__sentence-transformers_all-MiniLM-L6-v2
+      kurrent_chunks__index_semantic-index-fingerprint-v1_extractor_layout-aware-pymupdf-v2_sectioner_sectioner-v4_llm_sectioner_llm-section-headings-v2_chunker_section-aware-fixed-char-v2_target_chars_2000__sentence-transformers_all-MiniLM-L6-v2
     
     Components:
     
@@ -100,7 +100,7 @@ class Embedder:
       Rules-based section detection pipeline and version. Section boundaries
       affect chunk boundaries and chunk metadata.
     
-    - llm_sectioner_ollama-section-headings-v2
+    - llm_sectioner_llm-section-headings-v2
       LLM-assisted section heading detector and version. LLM heading choices
       can affect section boundaries, so they are part of the fingerprint.
     

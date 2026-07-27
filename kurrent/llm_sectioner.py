@@ -1,6 +1,6 @@
 """LLM-assisted section recognition.
 
-This module asks a local Ollama model to choose real section headings from
+This module asks a configured LLM model to choose real section headings from
 kurrent-generated heading candidates. The LLM does not locate headings from
 scratch; it only selects from anchored candidate_id values.
 
@@ -36,32 +36,34 @@ import re
 import socket
 import sys
 from typing import Any
-from urllib import error, request
-
-from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_SECTION_RECOGNITION_LLM
+from kurrent.config import DEFAULT_SECTION_RECOGNITION_LLM
+from kurrent.llm_provider import (
+    LLMCallError,
+    LLMConfigurationError,
+    call_llm_chat,
+)
 from kurrent.sectioner import HeadingCandidate, parse_section_heading
 
 __all__ = [
-    "DEFAULT_OLLAMA_URL",
-    "DEFAULT_OLLAMA_MODEL",
-    "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
-    "DEFAULT_OLLAMA_SINGLETON_TIMEOUT_SECONDS",
-    "DEFAULT_OLLAMA_NUM_PREDICT",
-    "DEFAULT_OLLAMA_BATCH_SIZE",
-    "OllamaTimeoutError",
+    "DEFAULT_LLM_MODEL",
+    "DEFAULT_LLM_TIMEOUT_SECONDS",
+    "DEFAULT_LLM_SINGLETON_TIMEOUT_SECONDS",
+    "DEFAULT_LLM_NUM_PREDICT",
+    "DEFAULT_LLM_BATCH_SIZE",
+    "LLMTimeoutError",
     "LLMSectioningUnavailableError",
     "SectionHeadingDecision",
     "candidate_to_prompt_dict",
     "filtered_candidates",
-    "select_section_headings_with_ollama",
+    "select_section_headings_with_llm",
 ]
 
-DEFAULT_OLLAMA_MODEL = DEFAULT_SECTION_RECOGNITION_LLM
-DEFAULT_OLLAMA_TIMEOUT_SECONDS = 120
-DEFAULT_OLLAMA_SINGLETON_TIMEOUT_SECONDS = 30
-DEFAULT_OLLAMA_NUM_PREDICT = 512
-DEFAULT_OLLAMA_BATCH_SIZE = 1
-DEFAULT_OLLAMA_MAX_CONSECUTIVE_FAILURES = 2
+DEFAULT_LLM_MODEL = DEFAULT_SECTION_RECOGNITION_LLM
+DEFAULT_LLM_TIMEOUT_SECONDS = 120
+DEFAULT_LLM_SINGLETON_TIMEOUT_SECONDS = 30
+DEFAULT_LLM_NUM_PREDICT = 512
+DEFAULT_LLM_BATCH_SIZE = 1
+DEFAULT_LLM_MAX_CONSECUTIVE_FAILURES = 2
 
 
 COMMON_HEADING_TITLES = {
@@ -173,16 +175,16 @@ MODEL_OR_LEGEND_WORDS = {
 }
 
 
-class OllamaTimeoutError(RuntimeError):
-    """Raised when Ollama does not answer before the request timeout."""
+class LLMTimeoutError(RuntimeError):
+    """Raised when the configured LLM does not answer before the request timeout."""
 
 
 class LLMSectioningUnavailableError(RuntimeError):
-    """Raised when Ollama failures make LLM sectioning impractical."""
+    """Raised when LLM failures make sectioning impractical."""
 
 
 class _HeadingCandidateFailedError(RuntimeError):
-    """Raised internally when one candidate cannot be classified by Ollama."""
+    """Raised internally when one candidate cannot be classified by the LLM."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -874,7 +876,7 @@ def _extract_json_payload(response_text: str) -> str:
     response_text = _strip_code_fence(response_text).strip()
 
     if not response_text:
-        raise ValueError("Ollama returned an empty response.")
+        raise ValueError("LLM returned an empty response.")
 
     if response_text[0] in "{[":
         return response_text
@@ -1160,18 +1162,15 @@ def _dedupe_decisions(
     return deduped
 
 
-def _ollama_chat(
+def _llm_chat(
     prompt: str,
     model: str,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
     temperature: float = 0.0,
-    timeout_seconds: int = DEFAULT_OLLAMA_TIMEOUT_SECONDS,
-    num_predict: int = DEFAULT_OLLAMA_NUM_PREDICT,
+    timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+    num_predict: int = DEFAULT_LLM_NUM_PREDICT,
     use_json_format: bool = True,
 ) -> str:
-    """Call Ollama's /api/chat endpoint and return response text."""
-
-    url = ollama_url.rstrip("/") + "/api/chat"
+    """Call the configured chat provider and return response text."""
 
     if use_json_format:
         system_content = (
@@ -1184,66 +1183,34 @@ def _ollama_chat(
             "Follow the requested output format exactly."
         )
 
-    payload: dict[str, Any] = {
-        "model": model,
-        "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": num_predict,
+    messages = [
+        {
+            "role": "system",
+            "content": system_content,
         },
-        "messages": [
-            {
-                "role": "system",
-                "content": system_content,
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-    }
-
-    if use_json_format:
-        payload["format"] = "json"
-
-    data = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
 
     try:
-        with request.urlopen(req, timeout=timeout_seconds) as response:
-            response_payload = json.loads(response.read().decode("utf-8"))
-    except TimeoutError as exc:
-        raise OllamaTimeoutError(
-            "Ollama timed out while selecting section headings."
-        ) from exc
-    except socket.timeout as exc:
-        raise OllamaTimeoutError(
-            "Ollama timed out while selecting section headings."
-        ) from exc
-    except error.URLError as exc:
-        raise RuntimeError(f"Could not reach Ollama at {url}: {exc}") from exc
-
-    try:
-        content = response_payload["message"]["content"]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unexpected Ollama response payload: {response_payload!r}"
-        ) from exc
-
-    if content is None:
-        raise ValueError(
-            f"Ollama returned no message content: {response_payload!r}"
+        return call_llm_chat(
+            messages,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            temperature=temperature,
+            json_format=use_json_format,
+            num_predict=num_predict,
         )
+    except TimeoutError as exc:
+        raise LLMTimeoutError(
+            "LLM timed out while selecting section headings."
+        ) from exc
+    except (LLMConfigurationError, LLMCallError) as exc:
+        raise RuntimeError(str(exc)) from exc
 
-    return str(content)
-
-
-def _save_ollama_timeout_debug_file(
+def _save_llm_timeout_debug_file(
     prompt: str,
     candidates: list[HeadingCandidate],
     model: str,
@@ -1255,15 +1222,15 @@ def _save_ollama_timeout_debug_file(
 
     debug_dir = Path(
         os.environ.get(
-            "KURRENT_OLLAMA_DEBUG_DIR",
-            str(Path.home() / ".kurrent" / "debug" / "ollama_timeouts"),
+            "KURRENT_LLM_DEBUG_DIR",
+            str(Path.home() / ".kurrent" / "debug" / "llm_timeouts"),
         )
     )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     candidate_ids = [candidate.candidate_id for candidate in candidates]
     id_text = "-".join(str(candidate_id) for candidate_id in candidate_ids)
-    filename = f"ollama_timeout_{timestamp}_{fallback_kind}_{id_text}.json"
+    filename = f"llm_timeout_{timestamp}_{fallback_kind}_{id_text}.json"
 
     payload = {
         "timestamp_utc": timestamp,
@@ -1284,7 +1251,7 @@ def _save_ollama_timeout_debug_file(
         )
     except OSError as exc:
         print(
-            "Warning: could not save Ollama timeout debug file: "
+            "Warning: could not save LLM timeout debug file: "
             f"{exc}",
             file=sys.stderr,
         )
@@ -1309,7 +1276,6 @@ def _build_singleton_yes_no_prompt(candidate: HeadingCandidate) -> str:
 def _singleton_yes_no_fallback(
     candidate: HeadingCandidate,
     model: str,
-    ollama_url: str,
     temperature: float,
     timeout_seconds: int,
 ) -> list[SectionHeadingDecision]:
@@ -1318,17 +1284,16 @@ def _singleton_yes_no_fallback(
     prompt = _build_singleton_yes_no_prompt(candidate)
 
     try:
-        response_text = _ollama_chat(
+        response_text = _llm_chat(
             prompt=prompt,
             model=model,
-            ollama_url=ollama_url,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             num_predict=16,
             use_json_format=False,
         )
-    except OllamaTimeoutError:
-        _save_ollama_timeout_debug_file(
+    except LLMTimeoutError:
+        _save_llm_timeout_debug_file(
             prompt=prompt,
             candidates=[candidate],
             model=model,
@@ -1362,7 +1327,6 @@ def _singleton_yes_no_fallback(
 def _select_heading_batch_with_timeout_fallback(
     candidates: list[HeadingCandidate],
     model: str,
-    ollama_url: str,
     temperature: float,
     timeout_seconds: int,
     singleton_timeout_seconds: int,
@@ -1374,7 +1338,7 @@ def _select_heading_batch_with_timeout_fallback(
 
     The default batch size is now one candidate, which makes each prompt and
     each expected JSON response very small. This function still supports larger
-    experimental batches via KURRENT_OLLAMA_SECTION_BATCH_SIZE. If a batch
+    experimental batches via KURRENT_LLM_SECTION_BATCH_SIZE. If a batch
     times out or returns malformed/truncated JSON, the same payload is retried
     once. If it fails again, the batch is bisected. A failing singleton falls
     back to a simple non-JSON YES/NO prompt and is skipped if that also fails.
@@ -1399,10 +1363,9 @@ def _select_heading_batch_with_timeout_fallback(
 
     for attempt_number in range(1, 3):
         try:
-            response_text = _ollama_chat(
+            response_text = _llm_chat(
                 prompt=prompt,
                 model=model,
-                ollama_url=ollama_url,
                 temperature=temperature,
                 timeout_seconds=effective_timeout,
                 num_predict=effective_num_predict,
@@ -1422,9 +1385,9 @@ def _select_heading_batch_with_timeout_fallback(
                     for candidate in candidates
                 },
             )
-        except OllamaTimeoutError:
+        except LLMTimeoutError:
             last_failure = "timeout"
-            _save_ollama_timeout_debug_file(
+            _save_llm_timeout_debug_file(
                 prompt=prompt,
                 candidates=candidates,
                 model=model,
@@ -1434,7 +1397,7 @@ def _select_heading_batch_with_timeout_fallback(
             )
         except ValueError as exc:
             last_failure = "malformed JSON"
-            _save_ollama_timeout_debug_file(
+            _save_llm_timeout_debug_file(
                 prompt=prompt,
                 candidates=candidates,
                 model=model,
@@ -1445,7 +1408,7 @@ def _select_heading_batch_with_timeout_fallback(
 
             if attempt_number == 2 and verbose:
                 print(
-                    "Warning: Ollama returned malformed/truncated JSON while "
+                    "Warning: the configured LLM returned malformed/truncated JSON while "
                     "selecting section headings for "
                     f"{len(candidates)} candidate(s): {exc}",
                     file=sys.stderr,
@@ -1454,7 +1417,7 @@ def _select_heading_batch_with_timeout_fallback(
         if attempt_number == 1:
             if verbose:
                 print(
-                    "Warning: Ollama failed while selecting section headings "
+                    "Warning: the configured LLM failed while selecting section headings "
                     f"for {len(candidates)} candidate(s) ({last_failure}); "
                     "retrying the same payload once.",
                     file=sys.stderr,
@@ -1466,7 +1429,7 @@ def _select_heading_batch_with_timeout_fallback(
 
         if verbose:
             print(
-                "Warning: Ollama failed twice on a single heading candidate; "
+                "Warning: the configured LLM failed twice on a single heading candidate; "
                 "trying simpler non-JSON YES/NO fallback for "
                 f"candidate_id={candidate.candidate_id} on page {candidate.page}: "
                 f"{_candidate_text_for_filtering(candidate)!r}",
@@ -1476,7 +1439,6 @@ def _select_heading_batch_with_timeout_fallback(
         yes_no_decisions = _singleton_yes_no_fallback(
             candidate=candidate,
             model=model,
-            ollama_url=ollama_url,
             temperature=temperature,
             timeout_seconds=effective_timeout,
         )
@@ -1493,7 +1455,7 @@ def _select_heading_batch_with_timeout_fallback(
                 file=sys.stderr,
             )
         raise _HeadingCandidateFailedError(
-            "Ollama could not classify heading candidate "
+            "The configured LLM could not classify heading candidate "
             f"candidate_id={candidate.candidate_id} on page {candidate.page}."
         )
 
@@ -1503,7 +1465,7 @@ def _select_heading_batch_with_timeout_fallback(
 
     if verbose:
         print(
-            "Warning: Ollama failed twice while selecting section headings "
+            "Warning: the configured LLM failed twice while selecting section headings "
             f"for {len(candidates)} candidates ({last_failure}); retrying as "
             f"{len(left)} + {len(right)} candidates.",
             file=sys.stderr,
@@ -1513,7 +1475,6 @@ def _select_heading_batch_with_timeout_fallback(
         _select_heading_batch_with_timeout_fallback(
             candidates=left,
             model=model,
-            ollama_url=ollama_url,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             singleton_timeout_seconds=singleton_timeout_seconds,
@@ -1524,7 +1485,6 @@ def _select_heading_batch_with_timeout_fallback(
         + _select_heading_batch_with_timeout_fallback(
             candidates=right,
             model=model,
-            ollama_url=ollama_url,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             singleton_timeout_seconds=singleton_timeout_seconds,
@@ -1541,7 +1501,7 @@ def _drop_reference_entry_decisions(
 ) -> list[SectionHeadingDecision]:
     """Drop accepted decisions that are actually bibliography entries.
 
-    The deterministic pre-filter should prevent these from reaching Ollama, but
+    The deterministic pre-filter should prevent these from reaching the configured LLM, but
     this post-filter provides a second guard. It is especially useful once a
     real References heading has been accepted: any later "section" that looks
     like a numbered bibliography entry should not create a new SectionSpan.
@@ -1583,10 +1543,9 @@ def _drop_reference_entry_decisions(
 
     return kept
 
-def select_section_headings_with_ollama(
+def select_section_headings_with_llm(
     candidates: list[HeadingCandidate],
     model: str | None = None,
-    ollama_url: str | None = None,
     temperature: float = 0.0,
     batch_size: int | None = None,
     timeout_seconds: int | None = None,
@@ -1597,15 +1556,15 @@ def select_section_headings_with_ollama(
     progress_callback: Callable[[int], None] | None = None,
     verbose: bool = True,
 ) -> list[SectionHeadingDecision]:
-    """Ask Ollama to select real section headings from candidates.
+    """Ask the configured LLM to select real section headings from candidates.
 
-    Candidates are sent one at a time by default. This keeps local Ollama
+    Candidates are sent one at a time by default. This keeps LLM
     prompts and JSON responses small, which is usually more reliable than
     asking for one large JSON list of section-heading decisions.
 
     If progress_total_callback is provided, it receives the number of filtered
-    candidates that will be sent to Ollama. If progress_callback is provided,
-    it receives the number of candidates completed after each Ollama batch.
+    candidates that will be sent to the configured LLM. If progress_callback is provided,
+    it receives the number of candidates completed after each LLM batch.
     With the default batch size of 1, this means one progress update per
     candidate.
     """
@@ -1618,46 +1577,45 @@ def select_section_headings_with_ollama(
     if not candidates:
         return []
 
-    model = model or DEFAULT_OLLAMA_MODEL
-    ollama_url = ollama_url or DEFAULT_OLLAMA_URL
+    model = model or DEFAULT_LLM_MODEL
 
     if batch_size is None:
         batch_size = int(
             os.environ.get(
-                "KURRENT_OLLAMA_SECTION_BATCH_SIZE",
-                DEFAULT_OLLAMA_BATCH_SIZE,
+                "KURRENT_LLM_SECTION_BATCH_SIZE",
+                DEFAULT_LLM_BATCH_SIZE,
             )
         )
 
     if timeout_seconds is None:
         timeout_seconds = int(
             os.environ.get(
-                "KURRENT_OLLAMA_TIMEOUT_SECONDS",
-                DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+                "KURRENT_LLM_TIMEOUT_SECONDS",
+                DEFAULT_LLM_TIMEOUT_SECONDS,
             )
         )
 
     if singleton_timeout_seconds is None:
         singleton_timeout_seconds = int(
             os.environ.get(
-                "KURRENT_OLLAMA_SINGLETON_TIMEOUT_SECONDS",
-                DEFAULT_OLLAMA_SINGLETON_TIMEOUT_SECONDS,
+                "KURRENT_LLM_SINGLETON_TIMEOUT_SECONDS",
+                DEFAULT_LLM_SINGLETON_TIMEOUT_SECONDS,
             )
         )
 
     if num_predict is None:
         num_predict = int(
             os.environ.get(
-                "KURRENT_OLLAMA_NUM_PREDICT",
-                DEFAULT_OLLAMA_NUM_PREDICT,
+                "KURRENT_LLM_NUM_PREDICT",
+                DEFAULT_LLM_NUM_PREDICT,
             )
         )
 
     if max_consecutive_failures is None:
         max_consecutive_failures = int(
             os.environ.get(
-                "KURRENT_OLLAMA_MAX_CONSECUTIVE_SECTION_FAILURES",
-                DEFAULT_OLLAMA_MAX_CONSECUTIVE_FAILURES,
+                "KURRENT_LLM_MAX_CONSECUTIVE_SECTION_FAILURES",
+                DEFAULT_LLM_MAX_CONSECUTIVE_FAILURES,
             )
         )
 
@@ -1669,7 +1627,6 @@ def select_section_headings_with_ollama(
             batch_decisions = _select_heading_batch_with_timeout_fallback(
                 candidates=batch,
                 model=model,
-                ollama_url=ollama_url,
                 temperature=temperature,
                 timeout_seconds=timeout_seconds,
                 singleton_timeout_seconds=singleton_timeout_seconds,
@@ -1686,13 +1643,13 @@ def select_section_headings_with_ollama(
                 continue
 
             raise LLMSectioningUnavailableError(
-                "Ollama failed on "
+                "The configured LLM failed on "
                 f"{consecutive_failures} consecutive section-heading candidate(s); "
                 "falling back to rules-based sectioning for this document."
             ) from exc
         except RuntimeError as exc:
             raise LLMSectioningUnavailableError(
-                "Ollama was unavailable while selecting section headings; "
+                "The configured LLM was unavailable while selecting section headings; "
                 "falling back to rules-based sectioning for this document."
             ) from exc
 

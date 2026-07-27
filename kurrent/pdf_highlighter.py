@@ -16,14 +16,17 @@ import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Callable, Iterable
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from kurrent.cli_display import collapse_whitespace
-from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_PDF_EXCERPT_LLM
+from kurrent.config import DEFAULT_PDF_EXCERPT_LLM
+from kurrent.llm_provider import (
+    LLMCallError,
+    LLMConfigurationError,
+    call_llm_chat,
+)
 
-DEFAULT_OLLAMA_MODEL = DEFAULT_PDF_EXCERPT_LLM
+DEFAULT_EXCERPT_LLM = DEFAULT_PDF_EXCERPT_LLM
 DEFAULT_HIGHLIGHT_TIMEOUT_SECONDS = 45.0
 DEFAULT_MAX_PAGE_TEXT_CHARS = 12_000
 DEFAULT_MIN_MATCH_SCORE = 0.72
@@ -172,7 +175,7 @@ def _truncate_word_count(text: str, min_words: int, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
-def _ollama_excerpt_messages(
+def _excerpt_messages(
     page_text: str,
     research_interest: str,
     evidence_excerpt: str | None = None,
@@ -238,15 +241,14 @@ Return exactly this JSON shape:
     ]
 
 
-def select_relevant_excerpt_with_ollama(
+def select_relevant_excerpt_with_llm(
     page_text: str,
     research_interest: str,
-    model: str = DEFAULT_OLLAMA_MODEL,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
+    model: str = DEFAULT_EXCERPT_LLM,
     timeout_seconds: float = DEFAULT_HIGHLIGHT_TIMEOUT_SECONDS,
     evidence_excerpt: str | None = None,
 ) -> str | None:
-    """Ask Ollama for an exact relevant excerpt copied from page_text."""
+    """Ask the configured LLM for an exact relevant excerpt copied from page_text."""
 
     page_text = collapse_whitespace(page_text)
     research_interest = collapse_whitespace(research_interest)
@@ -254,32 +256,21 @@ def select_relevant_excerpt_with_ollama(
     if not page_text or not research_interest:
         return None
 
-    payload = {
-        "model": model,
-        "messages": _ollama_excerpt_messages(
-            page_text,
-            research_interest,
-            evidence_excerpt=evidence_excerpt,
-        ),
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0, "num_predict": 300},
-    }
-    api_url = f"{ollama_url.rstrip('/')}/api/chat"
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, TimeoutError, json.JSONDecodeError):
+        content = call_llm_chat(
+            _excerpt_messages(
+                page_text,
+                research_interest,
+                evidence_excerpt=evidence_excerpt,
+            ),
+            model=model,
+            timeout_seconds=timeout_seconds,
+            temperature=0,
+            json_format=True,
+            num_predict=300,
+        )
+    except (LLMConfigurationError, LLMCallError, json.JSONDecodeError):
         return None
-
-    content = response_data.get("message", {}).get("content", "")
 
     if not isinstance(content, str) or not content.strip():
         return None
@@ -407,7 +398,6 @@ def _select_excerpt_for_page(
     fallback_excerpt: str | None,
     excerpt_selector: ExcerptSelector | None,
     model: str,
-    ollama_url: str,
     timeout_seconds: float,
 ) -> str | None:
     """Select a short excerpt to highlight on one page."""
@@ -415,11 +405,10 @@ def _select_excerpt_for_page(
     if excerpt_selector is not None:
         excerpt = excerpt_selector(page_text, research_interest)
     else:
-        excerpt = select_relevant_excerpt_with_ollama(
+        excerpt = select_relevant_excerpt_with_llm(
             page_text,
             research_interest,
             model=model,
-            ollama_url=ollama_url,
             timeout_seconds=timeout_seconds,
             evidence_excerpt=fallback_excerpt,
         )
@@ -498,8 +487,7 @@ def create_highlighted_pdf_for_research_interest(
     page_start: int | None,
     research_interest: str,
     page_end: int | None = None,
-    model: str = DEFAULT_OLLAMA_MODEL,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
+    model: str = DEFAULT_EXCERPT_LLM,
     timeout_seconds: float = DEFAULT_HIGHLIGHT_TIMEOUT_SECONDS,
     fallback_excerpt: str | None = None,
     excerpt_selector: ExcerptSelector | None = None,
@@ -591,7 +579,6 @@ def create_highlighted_pdf_for_research_interest(
                 fallback_excerpt=fallback_excerpt,
                 excerpt_selector=excerpt_selector,
                 model=model,
-                ollama_url=ollama_url,
                 timeout_seconds=timeout_seconds,
             )
 

@@ -1,4 +1,4 @@
-"""Ollama-based relevance judgments for semantic chunk search results."""
+"""LLM-based relevance judgments for semantic chunk search results."""
 
 from __future__ import annotations
 
@@ -6,31 +6,29 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as Futur
 from dataclasses import dataclass
 import json
 import re
-from urllib.error import URLError
-from urllib.request import Request, urlopen
-
 from kurrent.cli_display import (
     collapse_whitespace,
     pages_label,
     section_label,
     source_name_for_hit,
 )
-from kurrent.config import DEFAULT_OLLAMA_URL, DEFAULT_RELEVANCE_LLM
+from kurrent.config import DEFAULT_RELEVANCE_LLM
+from kurrent.llm_provider import (
+    LLMCallError,
+    LLMConfigurationError,
+    call_llm_chat,
+)
 
 __all__ = [
-    "DEFAULT_OLLAMA_URL",
-    "DEFAULT_OLLAMA_MODEL",
+    "DEFAULT_RELEVANCE_LLM",
     "RelevanceJudgment",
     "judge_chunk_relevance",
     "RelevanceJudgmentBuffer",
 ]
 
-DEFAULT_OLLAMA_MODEL = DEFAULT_RELEVANCE_LLM
-
-
 @dataclass(frozen=True, slots=True)
 class RelevanceJudgment:
-    """Ollama judgment of whether a candidate chunk satisfies a semantic query."""
+    """LLM judgment of whether a candidate chunk satisfies a semantic query."""
 
     relevant: bool | None
     explanation: str
@@ -40,42 +38,28 @@ class RelevanceJudgment:
     error: str | None = None
 
 
-def _ollama_chat_json(
+def _llm_chat_json(
     messages: list[dict[str, str]],
     model: str,
-    ollama_url: str,
     timeout_seconds: float,
 ) -> dict:
-    """Call Ollama's chat API and return parsed JSON content."""
+    """Call the configured chat provider and return parsed JSON content."""
 
-    api_url = f"{ollama_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0},
-    }
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    content = call_llm_chat(
+        messages,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        temperature=0,
+        json_format=True,
     )
 
-    with urlopen(request, timeout=timeout_seconds) as response:
-        response_data = json.loads(response.read().decode("utf-8"))
-
-    content = response_data.get("message", {}).get("content", "")
-
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("Ollama returned an empty relevance judgment.")
+    if not content.strip():
+        raise ValueError("LLM returned an empty relevance judgment.")
 
     return json.loads(content)
 
-
 def _build_relevance_judgment_prompt(query: str, hit) -> list[dict[str, str]]:
-    """Build a compact Ollama prompt for judging one semantic hit."""
+    """Build a compact LLM prompt for judging one semantic hit."""
 
     source = source_name_for_hit(hit) or "unknown source"
     section = section_label(hit) or "unknown section"
@@ -152,7 +136,7 @@ Return exactly this JSON shape:
 
 
 def _clean_judgment_explanation(text: str) -> str:
-    """Remove repetitive Ollama lead-ins from a relevance explanation."""
+    """Remove repetitive LLM lead-ins from a relevance explanation."""
 
     text = collapse_whitespace(text)
     text = re.sub(
@@ -211,24 +195,29 @@ def judge_chunk_relevance(
     query: str,
     hit,
     model: str,
-    ollama_url: str,
     timeout_seconds: float,
 ) -> RelevanceJudgment:
-    """Ask Ollama whether a semantic chunk hit truly satisfies the query."""
+    """Ask the configured LLM whether a semantic chunk hit truly satisfies the query."""
 
     try:
-        data = _ollama_chat_json(
+        data = _llm_chat_json(
             _build_relevance_judgment_prompt(query, hit),
             model=model,
-            ollama_url=ollama_url,
             timeout_seconds=timeout_seconds,
         )
-    except (OSError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+    except (
+        OSError,
+        TimeoutError,
+        json.JSONDecodeError,
+        ValueError,
+        LLMConfigurationError,
+        LLMCallError,
+    ) as exc:
         return RelevanceJudgment(
             relevant=None,
             relevance=None,
             answers_query=None,
-            explanation="Ollama relevance judgment unavailable.",
+            explanation="LLM relevance judgment unavailable.",
             error=f"{type(exc).__name__}: {exc}",
         )
 
@@ -257,7 +246,7 @@ def judge_chunk_relevance(
             relevance=relevance,
             answers_query=answers_query,
             missing_concepts=missing_concepts,
-            explanation="Ollama returned no usable relevance explanation.",
+            explanation="LLM returned no usable relevance explanation.",
             error="Missing explanation field.",
         )
 
@@ -271,14 +260,13 @@ def judge_chunk_relevance(
 
 
 class RelevanceJudgmentBuffer:
-    """Background producer for Ollama relevance judgments."""
+    """Background producer for LLM relevance judgments."""
 
     def __init__(
         self,
         query: str,
         hits,
         model: str,
-        ollama_url: str,
         timeout_seconds: float = 45.0,
         max_workers: int = 2,
     ) -> None:
@@ -291,7 +279,6 @@ class RelevanceJudgmentBuffer:
                 query,
                 hit,
                 model,
-                ollama_url,
                 timeout_seconds,
             )
 

@@ -5,7 +5,7 @@ looks obviously bad or incomplete, then proposes better metadata using this
 order of evidence:
 
 1. DOI found in existing metadata or early PDF text, resolved through Crossref.
-2. Ollama extraction from early PDF text when Crossref is unavailable/incomplete.
+2. LLM extraction from early PDF text when Crossref is unavailable/incomplete.
 
 The public functions return proposed updates separately from applying them so
 CLI callers can support dry-run, interactive review, and batch apply modes.
@@ -35,6 +35,11 @@ from kurrent.metadata_extractor import (
     looks_like_bad_title,
 )
 from kurrent.config import DEFAULT_METADATA_LLM, DEFAULT_OLLAMA_URL
+from kurrent.llm_provider import (
+    LLMCallError,
+    LLMConfigurationError,
+    call_llm_chat,
+)
 from kurrent.schema import Document, ExtractedMetadata
 
 __all__ = [
@@ -44,7 +49,7 @@ __all__ = [
     "MetadataRefreshResult",
     "assess_document_metadata",
     "metadata_updates_for_document",
-    "extract_metadata_with_ollama",
+    "extract_metadata_with_llm",
     "propose_metadata_refresh",
     "apply_metadata_refresh",
     "ensure_ollama_available",
@@ -55,7 +60,6 @@ RefreshMethod = Literal["auto", "crossref", "llm"]
 MetadataSource = Literal["crossref", "llm", "none"]
 ProgressCallback = Callable[[str], None]
 
-DEFAULT_OLLAMA_MODEL = DEFAULT_METADATA_LLM
 
 CURRENT_YEAR_CEILING = 2100
 BAD_AUTHOR_VALUES = {
@@ -295,7 +299,7 @@ def _best_doi_for_document(document: Document, early_text: str) -> str | None:
 
 
 
-def _ollama_metadata_messages(page_text: str) -> list[dict[str, str]]:
+def _llm_metadata_messages(page_text: str) -> list[dict[str, str]]:
     system_message = (
         "You extract bibliographic metadata from academic paper first-page text. "
         "Return JSON only. Do not invent missing values."
@@ -397,38 +401,24 @@ def ensure_ollama_available(
     )
 
 
-def _call_ollama_json(
+def _call_llm_json(
     messages: list[dict[str, str]],
     model: str,
-    ollama_url: str,
     timeout_seconds: float,
 ) -> dict:
-    api_url = f"{ollama_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0, "num_predict": 300},
-    }
-    request = Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    content = call_llm_chat(
+        messages,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        temperature=0,
+        json_format=True,
+        num_predict=300,
     )
 
-    with urlopen(request, timeout=timeout_seconds) as response:
-        response_data = json.loads(response.read().decode("utf-8"))
-
-    content = response_data.get("message", {}).get("content", "")
-
     if not isinstance(content, str) or not content.strip():
-        raise MetadataRefreshError("Ollama returned empty metadata JSON.")
+        raise MetadataRefreshError("LLM returned empty metadata JSON.")
 
     return json.loads(content)
-
-
 
 def _int_or_none(value: object) -> int | None:
     if value is None:
@@ -446,13 +436,13 @@ def _int_or_none(value: object) -> int | None:
 
 
 
-def _metadata_from_ollama_payload(payload: dict) -> tuple[ExtractedMetadata, str, str]:
+def _metadata_from_llm_payload(payload: dict) -> tuple[ExtractedMetadata, str, str]:
     title = clean_title_metadata_text(payload.get("title"))
     authors = clean_author_metadata_text(payload.get("authors"))
     doi = clean_metadata_text(payload.get("doi"))
     year = _int_or_none(payload.get("year"))
     confidence = clean_metadata_text(payload.get("confidence")) or "low"
-    reason = clean_metadata_text(payload.get("reason")) or "Ollama metadata extraction."
+    reason = clean_metadata_text(payload.get("reason")) or "LLM metadata extraction."
 
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
@@ -475,14 +465,13 @@ def _metadata_from_ollama_payload(payload: dict) -> tuple[ExtractedMetadata, str
 
 
 
-def extract_metadata_with_ollama(
+def extract_metadata_with_llm(
     pdf_path: str | Path,
-    model: str = DEFAULT_OLLAMA_MODEL,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
+    model: str = DEFAULT_METADATA_LLM,
     timeout_seconds: float = 60.0,
     max_pages: int = 3,
 ) -> MetadataRefreshProposal:
-    """Ask Ollama to infer bibliographic metadata from early PDF text."""
+    """Ask the configured LLM to infer bibliographic metadata from early PDF text."""
 
     page_text = extract_text_from_first_pages(pdf_path, max_pages=max_pages)
 
@@ -495,18 +484,25 @@ def extract_metadata_with_ollama(
         )
 
     try:
-        payload = _call_ollama_json(
-            _ollama_metadata_messages(page_text),
+        payload = _call_llm_json(
+            _llm_metadata_messages(page_text),
             model=model,
-            ollama_url=ollama_url,
             timeout_seconds=timeout_seconds,
         )
-    except (OSError, URLError, TimeoutError, json.JSONDecodeError, MetadataRefreshError) as exc:
+    except (
+        OSError,
+        URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        MetadataRefreshError,
+        LLMConfigurationError,
+        LLMCallError,
+    ) as exc:
         raise MetadataRefreshError(
-            f"Ollama metadata extraction failed: {type(exc).__name__}: {exc}"
+            f"LLM metadata extraction failed: {type(exc).__name__}: {exc}"
         ) from exc
 
-    metadata, confidence, reason = _metadata_from_ollama_payload(payload)
+    metadata, confidence, reason = _metadata_from_llm_payload(payload)
 
     return MetadataRefreshProposal(
         metadata=metadata,
@@ -561,9 +557,8 @@ def propose_metadata_refresh(
     method: RefreshMethod = "auto",
     crossref_mailto: str | None = None,
     crossref_timeout_seconds: float = 10.0,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    ollama_timeout_seconds: float = 60.0,
+    llm_model: str = DEFAULT_METADATA_LLM,
+    llm_timeout_seconds: float = 60.0,
     max_pages: int = 3,
 ) -> MetadataRefreshProposal:
     """Propose improved metadata for one document."""
@@ -595,11 +590,10 @@ def propose_metadata_refresh(
             )
 
     if method in {"auto", "llm"}:
-        return extract_metadata_with_ollama(
+        return extract_metadata_with_llm(
             document.pdf_path,
-            model=ollama_model,
-            ollama_url=ollama_url,
-            timeout_seconds=ollama_timeout_seconds,
+            model=llm_model,
+            timeout_seconds=llm_timeout_seconds,
             max_pages=max_pages,
         )
 
@@ -639,9 +633,8 @@ def refresh_documents_metadata(
     method: RefreshMethod = "auto",
     crossref_mailto: str | None = None,
     crossref_timeout_seconds: float = 10.0,
-    ollama_model: str = DEFAULT_OLLAMA_MODEL,
-    ollama_url: str = DEFAULT_OLLAMA_URL,
-    ollama_timeout_seconds: float = 60.0,
+    llm_model: str = DEFAULT_METADATA_LLM,
+    llm_timeout_seconds: float = 60.0,
     max_pages: int = 3,
     include_apparently_good: bool = False,
     apply: bool = False,
@@ -675,9 +668,8 @@ def refresh_documents_metadata(
                 method=method,
                 crossref_mailto=crossref_mailto,
                 crossref_timeout_seconds=crossref_timeout_seconds,
-                ollama_model=ollama_model,
-                ollama_url=ollama_url,
-                ollama_timeout_seconds=ollama_timeout_seconds,
+                llm_model=llm_model,
+                llm_timeout_seconds=llm_timeout_seconds,
                 max_pages=max_pages,
             )
             replace_all = replace_all_crossref and proposal.source == "crossref"

@@ -5,6 +5,100 @@ Processes text files and PDFs, gives summaries, allows the user to identify and
 preserve relationships between them, and provides an interactive RAG chat
 interface to probe their contents.
 
+## Installation
+
+Clone the repo, create and activate a Python environment, and install Kurrent in
+editable mode:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
+
+Create your local environment file from the visible template:
+
+```bash
+cp dot_env.example .env
+```
+
+The defaults in `dot_env.example` are local Ollama defaults. Copying the file
+is enough if the listed Ollama models are installed locally. Otherwise, edit
+`.env` to use the Ollama models or aliases available on your machine. Also edit
+`.env` when you want a different state directory or OpenAI-backed LLM roles.
+
+Run the test suite with:
+
+```bash
+python -m pytest
+```
+
+For a faster local development pass, run:
+
+```bash
+python -m pytest -m "not slow"
+```
+
+## LLM configuration
+
+Kurrent reads configuration from `.env` using the variables documented in
+`dot_env.example`. Each LLM-backed role has its own model setting so different
+jobs can use different models.
+
+For a local Ollama-only setup, use settings like these:
+
+```bash
+KURRENT_RAG_LLM=ollama:qwen3:kurrent-rag-8b
+KURRENT_RELEVANCE_LLM=ollama:llama3.1:kurrent-relevance-8b-instruct-q4_K_M
+KURRENT_METADATA_LLM=ollama:llama3.1:kurrent-metadata-8b-instruct-q4_K_M
+KURRENT_PDF_EXCERPT_LLM=ollama:llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M
+KURRENT_SECTION_RECOGNITION_LLM=ollama:llama3.2:kurrent-sectioning-3b
+KURRENT_SUMMARY_LLM=ollama:qwen2.5:kurrent-summarization-7b
+```
+
+LLM model strings must include an explicit provider prefix:
+
+```text
+ollama:<model-name>
+openai:<model-name>
+```
+
+For example, `ollama:qwen3:kurrent-rag-8b` uses a local Ollama model, while
+`openai:gpt-4.1-mini` uses OpenAI. To use OpenAI for any role, provide an API
+key and set that role to an OpenAI model spec:
+
+```bash
+OPENAI_KEY=sk-...
+
+KURRENT_RAG_LLM=openai:gpt-4.1-mini
+KURRENT_RELEVANCE_LLM=openai:gpt-4.1-mini
+KURRENT_SUMMARY_LLM=openai:gpt-4.1-mini
+```
+
+You can also mix providers. For example, this configuration uses OpenAI for
+interactive RAG and relevance judging, while keeping metadata extraction,
+PDF excerpt selection, section recognition, and screening summaries local:
+
+```bash
+OPENAI_KEY=sk-...
+
+KURRENT_RAG_LLM=openai:gpt-4.1-mini
+KURRENT_RELEVANCE_LLM=openai:gpt-4.1-mini
+KURRENT_METADATA_LLM=ollama:llama3.1:kurrent-metadata-8b-instruct-q4_K_M
+KURRENT_PDF_EXCERPT_LLM=ollama:llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M
+KURRENT_SECTION_RECOGNITION_LLM=ollama:llama3.2:kurrent-sectioning-3b
+KURRENT_SUMMARY_LLM=ollama:qwen2.5:kurrent-summarization-7b
+```
+
+Command-line switches override `.env` values and use the same explicit model-spec
+format:
+
+```bash
+kurrent ask --rag-llm openai:gpt-4.1-mini "What does my corpus say about reciprocity?"
+kurrent search --relevance-llm openai:gpt-4.1-mini "bounded confidence"
+kurrent ingest --summary-llm openai:gpt-4.1-mini paper.pdf
+```
+
 ## Design Overview
 
 kurrent is a local-first, command-line tool for helping a researcher manage
@@ -19,7 +113,7 @@ PDF → chunks → embeddings → proximity alerts → user confirmation → per
 ```
 
 kurrent ingests academic PDFs, chunks their text, embeds those chunks into
-Chroma, summarizes documents with a local Ollama model, and detects
+Chroma, summarizes documents with configured LLM providers, and detects
 semantically similar passages across papers. These machine-suggested
 similarities are called **proximity alerts** (PAs). When the user confirms one,
 it becomes a durable semantic **confirmed link** (CL) between chunks from two
@@ -32,8 +126,7 @@ kurrent uses multiple storage layers, each with a distinct responsibility:
 - SQLite: canonical application database for durable kurrent state
 - Chroma: vector index for chunk embeddings and similarity search
 - PDFs: original source files, managed according to storage mode
-- Ollama: local LLM backend for summaries, PA explanations, and RAG answers
-
+- LLM provider: explicit local Ollama or remote OpenAI model specs
 
 SQLite stores:
 
@@ -120,8 +213,6 @@ For example, for Zotero, we envision:
 This leaves room for future integrations with Mendeley, EndNote, OneNote,
 filesystem folders, or other systems.
 
-
-
 ### Use Cases
 
 The major use cases are:
@@ -141,14 +232,12 @@ executables.
 Examples:
 
 ```bash
-kurrent ingest file paper.pdf
-kurrent ingest zotero JSFWJ7G6
-kurrent chat --all
-kurrent chat --docs smith2020 jones2023
+kurrent ingest SmithWesson1948.pdf
+kurrent ingest -y directory-with-pdfs
+kurrent list
+kurrent stats
 kurrent search "bounded confidence"
-kurrent links smith2020
-kurrent sources check
-kurrent sources review
+kurrent ask "How is homophily defined?"
 ```
 
 This keeps kurrent conceptually unified while allowing distinct workflows.
@@ -160,7 +249,7 @@ kurrent owns the research graph.
 Chroma owns vector retrieval.
 SQLite owns durable application state.
 Zotero or another library manager may own some PDFs.
-Ollama supplies local language-model intelligence.
+LLM providers supply language-model intelligence through explicit model specs such as ollama:<model> or openai:<model>.
 ```
 
 ## Running tests

@@ -1,0 +1,43 @@
+# Copy this file to .env, then edit .env for your machine:
+#
+#   cp dot_env.example .env
+
+# Kurrent state. This directory holds kurrent.db, Chroma data, and managed PDFs.
+KURRENT_STATE_DIR=~/.kurrent/default
+
+# Local Ollama server URL. Used only when an LLM role is set to ollama:<model>.
+KURRENT_OLLAMA_URL=http://127.0.0.1:11434
+
+# OpenAI is optional. Leave this empty unless an LLM role uses openai:<model>
+# or an OpenAI chat-completions URL.
+OPENAI_KEY=
+
+# Provider-explicit LLM defaults. These local Ollama aliases are reasonable
+# defaults for running Kurrent fully locally.
+KURRENT_RAG_LLM=ollama:qwen3:kurrent-rag-8b
+KURRENT_RELEVANCE_LLM=ollama:llama3.1:kurrent-relevance-8b-instruct-q4_K_M
+KURRENT_METADATA_LLM=ollama:llama3.1:kurrent-metadata-8b-instruct-q4_K_M
+KURRENT_PDF_EXCERPT_LLM=ollama:llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M
+KURRENT_SECTION_RECOGNITION_LLM=ollama:llama3.2:kurrent-sectioning-3b
+KURRENT_SUMMARY_LLM=ollama:qwen2.5:kurrent-summarization-7b
+
+# To use OpenAI for a role, replace that role with an explicit OpenAI spec:
+#
+#   OPENAI_KEY=sk-...
+#   KURRENT_RAG_LLM=openai:gpt-4.1-mini
+#   KURRENT_SUMMARY_LLM=openai:gpt-4.1-mini
+
+# Screening summaries.
+KURRENT_SUMMARY_DEPTH=2
+KURRENT_SUMMARY_LLM_TIMEOUT=180
+KURRENT_SUMMARY_LLM_NUM_CTX=16384
+
+# LLM-assisted section recognition.
+KURRENT_LLM_TIMEOUT_SECONDS=120
+KURRENT_LLM_SINGLETON_TIMEOUT_SECONDS=30
+KURRENT_LLM_NUM_PREDICT=512
+KURRENT_LLM_SECTION_BATCH_SIZE=1
+KURRENT_LLM_MAX_CONSECUTIVE_SECTION_FAILURES=2
+
+# Optional Crossref mailto address for polite DOI metadata lookup.
+KURRENT_CROSSREF_MAILTO=

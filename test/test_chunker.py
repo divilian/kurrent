@@ -353,7 +353,7 @@ def test_huge_pdf_guard_can_be_disabled_with_zero_cutoff(monkeypatch, tmp_path):
     assert cutoff == 0
 
 
-def test_make_section_spans_with_llm_falls_back_after_repeated_ollama_failures(
+def test_make_section_spans_with_llm_falls_back_after_repeated_llm_failures(
     tmp_path,
     monkeypatch,
     capsys,
@@ -390,12 +390,12 @@ def test_make_section_spans_with_llm_falls_back_after_repeated_ollama_failures(
 
     def fail_section_llm(*_args, **_kwargs):
         raise LLMSectioningUnavailableError(
-            "Ollama failed on repeated section-heading candidates; "
+            "The configured LLM failed on repeated section-heading candidates; "
             "falling back to rules-based sectioning for this document."
         )
 
     monkeypatch.setattr(
-        "kurrent.llm_sectioner.select_section_headings_with_ollama",
+        "kurrent.llm_sectioner.select_section_headings_with_llm",
         fail_section_llm,
     )
 
@@ -409,11 +409,11 @@ def test_make_section_spans_with_llm_falls_back_after_repeated_ollama_failures(
     assert "falling back to rules-based sectioning" in capsys.readouterr().err
 
 
-def test_make_section_spans_with_llm_uses_prefetched_decisions_without_ollama(
+def test_make_section_spans_with_llm_uses_prefetched_decisions_without_llm_call(
     tmp_path,
     monkeypatch,
 ):
-    """Verify background section decisions can be consumed without re-calling Ollama."""
+    """Verify background section decisions can be consumed without re-calling the LLM."""
 
     from kurrent.chunker import LLMSectioningPrefetchResult
     from kurrent.llm_sectioner import SectionHeadingDecision
@@ -449,10 +449,10 @@ def test_make_section_spans_with_llm_uses_prefetched_decisions_without_ollama(
     ]
 
     def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("prefetched decisions should avoid Ollama")
+        raise AssertionError("prefetched decisions should avoid an LLM call")
 
     monkeypatch.setattr(
-        "kurrent.llm_sectioner.select_section_headings_with_ollama",
+        "kurrent.llm_sectioner.select_section_headings_with_llm",
         fail_if_called,
     )
 

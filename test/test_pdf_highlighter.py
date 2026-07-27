@@ -120,10 +120,10 @@ def test_long_fallback_excerpt_is_not_highlighted_directly_when_selector_fails(t
     assert "No relevant excerpt" in result.message
 
 
-def test_ollama_prompt_anchors_highlight_to_specific_evidence_excerpt():
+def test_llm_prompt_anchors_highlight_to_specific_evidence_excerpt():
     """The default LLM selector should receive the specific source evidence."""
 
-    messages = pdf_highlighter._ollama_excerpt_messages(
+    messages = pdf_highlighter._excerpt_messages(
         page_text="Page paragraph one. Page paragraph two.",
         research_interest="personal knowledge bases",
         evidence_excerpt="Specific evidence chunk for passage 1b.",
