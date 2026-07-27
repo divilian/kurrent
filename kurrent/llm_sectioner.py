@@ -1169,6 +1169,7 @@ def _llm_chat(
     timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
     num_predict: int = DEFAULT_LLM_NUM_PREDICT,
     use_json_format: bool = True,
+    max_retries: int | None = None,
 ) -> str:
     """Call the configured chat provider and return response text."""
 
@@ -1202,13 +1203,14 @@ def _llm_chat(
             temperature=temperature,
             json_format=use_json_format,
             num_predict=num_predict,
+            max_retries=max_retries,
         )
     except TimeoutError as exc:
         raise LLMTimeoutError(
             "LLM timed out while selecting section headings."
         ) from exc
     except (LLMConfigurationError, LLMCallError) as exc:
-        raise RuntimeError(str(exc)) from exc
+        raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
 
 def _save_llm_timeout_debug_file(
     prompt: str,
@@ -1278,6 +1280,7 @@ def _singleton_yes_no_fallback(
     model: str,
     temperature: float,
     timeout_seconds: int,
+    max_retries: int | None = None,
 ) -> list[SectionHeadingDecision]:
     """Try a non-JSON YES/NO fallback for a single candidate."""
 
@@ -1291,6 +1294,7 @@ def _singleton_yes_no_fallback(
             timeout_seconds=timeout_seconds,
             num_predict=16,
             use_json_format=False,
+            max_retries=max_retries,
         )
     except LLMTimeoutError:
         _save_llm_timeout_debug_file(
@@ -1331,6 +1335,7 @@ def _select_heading_batch_with_timeout_fallback(
     timeout_seconds: int,
     singleton_timeout_seconds: int,
     num_predict: int,
+    max_retries: int | None = None,
     depth: int = 0,
     verbose: bool = True,
 ) -> list[SectionHeadingDecision]:
@@ -1370,6 +1375,7 @@ def _select_heading_batch_with_timeout_fallback(
                 timeout_seconds=effective_timeout,
                 num_predict=effective_num_predict,
                 use_json_format=True,
+                max_retries=max_retries,
             )
 
             if len(candidates) == 1:
@@ -1441,6 +1447,7 @@ def _select_heading_batch_with_timeout_fallback(
             model=model,
             temperature=temperature,
             timeout_seconds=effective_timeout,
+            max_retries=max_retries,
         )
 
         if yes_no_decisions:
@@ -1479,6 +1486,7 @@ def _select_heading_batch_with_timeout_fallback(
             timeout_seconds=timeout_seconds,
             singleton_timeout_seconds=singleton_timeout_seconds,
             num_predict=num_predict,
+            max_retries=max_retries,
             depth=depth + 1,
             verbose=verbose,
         )
@@ -1489,6 +1497,7 @@ def _select_heading_batch_with_timeout_fallback(
             timeout_seconds=timeout_seconds,
             singleton_timeout_seconds=singleton_timeout_seconds,
             num_predict=num_predict,
+            max_retries=max_retries,
             depth=depth + 1,
             verbose=verbose,
         )
@@ -1552,6 +1561,7 @@ def select_section_headings_with_llm(
     singleton_timeout_seconds: int | None = None,
     num_predict: int | None = None,
     max_consecutive_failures: int | None = None,
+    llm_call_max_retries: int | None = None,
     progress_total_callback: Callable[[int], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
     verbose: bool = True,
@@ -1631,6 +1641,7 @@ def select_section_headings_with_llm(
                 timeout_seconds=timeout_seconds,
                 singleton_timeout_seconds=singleton_timeout_seconds,
                 num_predict=num_predict,
+                max_retries=llm_call_max_retries,
                 verbose=verbose,
             )
         except _HeadingCandidateFailedError as exc:
@@ -1644,13 +1655,13 @@ def select_section_headings_with_llm(
 
             raise LLMSectioningUnavailableError(
                 "The configured LLM failed on "
-                f"{consecutive_failures} consecutive section-heading candidate(s); "
-                "falling back to rules-based sectioning for this document."
+                f"{consecutive_failures} consecutive section-heading candidate(s): "
+                f"{exc}; falling back to rules-based sectioning for this document."
             ) from exc
         except RuntimeError as exc:
             raise LLMSectioningUnavailableError(
-                "The configured LLM was unavailable while selecting section headings; "
-                "falling back to rules-based sectioning for this document."
+                "The configured LLM was unavailable while selecting section headings: "
+                f"{exc}; falling back to rules-based sectioning for this document."
             ) from exc
 
         consecutive_failures = 0

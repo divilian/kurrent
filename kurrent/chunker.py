@@ -255,6 +255,7 @@ def compute_llm_sectioning_prefetch(
     progress_callback: Callable[[int], None] | None = None,
     quiet: bool = False,
     model: str = DEFAULT_SECTION_RECOGNITION_LLM,
+    llm_call_max_retries: int | None = None,
 ) -> LLMSectioningPrefetchResult:
     """Compute LLM section-heading decisions without needing a doc_id.
 
@@ -280,6 +281,7 @@ def compute_llm_sectioning_prefetch(
             progress_callback=progress_callback,
             verbose=not quiet,
             model=model,
+            llm_call_max_retries=llm_call_max_retries,
         )
     except LLMSectioningUnavailableError as exc:
         return LLMSectioningPrefetchResult(
@@ -305,6 +307,8 @@ def make_section_spans_with_llm(
 ) -> list[SectionSpan]:
     """Detect sections with the LLM-assisted HeadingCandidate pipeline."""
 
+    had_background_prefetch = prefetch_result is not None
+
     if prefetch_result is None:
         prefetch_result = compute_llm_sectioning_prefetch(
             pdf_path=pdf_path,
@@ -313,6 +317,41 @@ def make_section_spans_with_llm(
             progress_callback=progress_callback,
             model=model,
         )
+
+    if prefetch_result.unavailable_error is not None and had_background_prefetch:
+        from kurrent.llm_sectioner import (
+            LLMSectioningUnavailableError,
+            select_section_headings_with_llm,
+        )
+
+        try:
+            retry_decisions = select_section_headings_with_llm(
+                list(prefetch_result.candidates),
+                progress_total_callback=progress_total_callback,
+                progress_callback=progress_callback,
+                verbose=True,
+                model=model,
+                llm_call_max_retries=1,
+            )
+            return make_section_spans_from_llm_decisions(
+                pdf_path=pdf_path,
+                doc_id=doc_id,
+                candidates=prefetch_result.candidates,
+                decisions=retry_decisions,
+            )
+        except LLMSectioningUnavailableError as exc:
+            print(
+                "Warning: background LLM sectioning prefetch failed: "
+                f"{prefetch_result.unavailable_error} Foreground retry also failed: "
+                f"{exc}",
+                file=sys.stderr,
+            )
+            headings = detect_heading_candidates(pdf_path)
+            return make_section_spans_from_headings(
+                pdf_path=pdf_path,
+                doc_id=doc_id,
+                headings=headings,
+            )
 
     if prefetch_result.unavailable_error is not None:
         print(

@@ -472,3 +472,76 @@ def test_make_section_spans_with_llm_uses_prefetched_decisions_without_llm_call(
         "INTRODUCTION",
         "MODEL",
     ]
+
+
+def test_make_section_spans_with_llm_retries_failed_background_prefetch(
+    tmp_path,
+    monkeypatch,
+):
+    """Verify a failed background prefetch gets one foreground retry."""
+
+    from kurrent.chunker import LLMSectioningPrefetchResult
+    from kurrent.llm_sectioner import SectionHeadingDecision
+    from kurrent.sectioner import HeadingCandidate
+    import kurrent.chunker as chunker
+
+    pdf_path = write_pdf(
+        tmp_path / "paper.pdf",
+        ["I. INTRODUCTION\nThis is body text.\nII. MODEL\nMore body text."],
+    )
+
+    candidates = [
+        HeadingCandidate(
+            candidate_id=0,
+            line_index=0,
+            page=1,
+            line_text="I. INTRODUCTION",
+            previous_lines=[],
+            next_lines=["This is body text."],
+            features={},
+            candidate_text="I. INTRODUCTION",
+        ),
+        HeadingCandidate(
+            candidate_id=1,
+            line_index=2,
+            page=1,
+            line_text="II. MODEL",
+            previous_lines=["This is body text."],
+            next_lines=["More body text."],
+            features={},
+            candidate_text="II. MODEL",
+        ),
+    ]
+
+    captured = {}
+
+    def retry_section_llm(candidates_arg, **kwargs):
+        captured["candidates"] = list(candidates_arg)
+        captured["llm_call_max_retries"] = kwargs.get("llm_call_max_retries")
+        return [
+            SectionHeadingDecision(0, "I", "INTRODUCTION"),
+            SectionHeadingDecision(1, "II", "MODEL"),
+        ]
+
+    monkeypatch.setattr(
+        "kurrent.llm_sectioner.select_section_headings_with_llm",
+        retry_section_llm,
+    )
+
+    sections = chunker.make_section_spans_with_llm(
+        pdf_path=pdf_path,
+        doc_id="doc-1",
+        prefetch_result=LLMSectioningPrefetchResult(
+            candidates=candidates,
+            decisions=[],
+            unavailable_error="OpenAI HTTP 500 for gpt-4.1-mini: temporary problem",
+        ),
+        model="openai:gpt-4.1-mini",
+    )
+
+    assert [section.section_title for section in sections] == [
+        "INTRODUCTION",
+        "MODEL",
+    ]
+    assert captured["candidates"] == candidates
+    assert captured["llm_call_max_retries"] == 1

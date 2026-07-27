@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import json
 import os
 import re
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse, urlunparse
@@ -42,6 +43,23 @@ class LLMConfigurationError(RuntimeError):
 
 class LLMCallError(RuntimeError):
     """Raised when a configured LLM provider call fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        retryable: bool = False,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.retryable = retryable
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,12 +245,158 @@ def validate_llm_model_spec(model: str | None) -> LLMModelSpec:
     return spec
 
 
+
+def _configured_llm_max_retries() -> int:
+    raw_value = os.environ.get("KURRENT_LLM_MAX_RETRIES", "2")
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return 2
+
+
+def _configured_retry_initial_seconds() -> float:
+    raw_value = os.environ.get("KURRENT_LLM_RETRY_INITIAL_SECONDS", "1.0")
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return 1.0
+
+
+def _configured_retry_max_seconds() -> float:
+    raw_value = os.environ.get("KURRENT_LLM_RETRY_MAX_SECONDS", "8.0")
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return 8.0
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    return status_code in {408, 409, 429} or 500 <= status_code <= 599
+
+
+def _parse_retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
+def _response_header(headers: object, name: str) -> str | None:
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)  # type: ignore[attr-defined]
+    except Exception:
+        value = None
+    if value is None:
+        try:
+            value = headers.get(name.lower())  # type: ignore[attr-defined]
+        except Exception:
+            value = None
+    if value is None:
+        return None
+    return str(value)
+
+
+def _extract_error_message_from_body(body: str) -> str:
+    text = body.strip()
+    if not text:
+        return ""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return text[:500]
+
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict):
+        parts: list[str] = []
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            parts.append(message.strip())
+        error_type = error.get("type")
+        if isinstance(error_type, str) and error_type.strip():
+            parts.append(f"type={error_type.strip()}")
+        code = error.get("code")
+        if isinstance(code, str) and code.strip():
+            parts.append(f"code={code.strip()}")
+        if parts:
+            return "; ".join(parts)
+
+    return text[:500]
+
+
+def _http_error_message(
+    exc: HTTPError,
+    *,
+    provider_label: str,
+    model: str,
+) -> tuple[str, bool, float | None]:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        body = ""
+
+    detail = _extract_error_message_from_body(body) or str(exc.reason)
+    retryable = _is_retryable_http_status(exc.code)
+    request_id = _response_header(exc.headers, "x-request-id")
+    retry_after = _parse_retry_after_seconds(
+        _response_header(exc.headers, "retry-after")
+    )
+
+    message = f"{provider_label} HTTP {exc.code} for {model}: {detail}"
+    if request_id:
+        message += f" (request_id={request_id})"
+    return message, retryable, retry_after
+
+
+def _raise_http_llm_call_error(
+    exc: HTTPError,
+    *,
+    provider_label: str,
+    model: str,
+) -> None:
+    message, retryable, retry_after = _http_error_message(
+        exc,
+        provider_label=provider_label,
+        model=model,
+    )
+    raise LLMCallError(
+        message,
+        provider=provider_label,
+        model=model,
+        retryable=retryable,
+        status_code=exc.code,
+        retry_after_seconds=retry_after,
+    ) from exc
+
+
+def _raise_transient_llm_call_error(
+    exc: BaseException,
+    *,
+    provider_label: str,
+    model: str,
+) -> None:
+    raise LLMCallError(
+        f"{provider_label} call failed for {model}: {type(exc).__name__}: {exc}",
+        provider=provider_label,
+        model=model,
+        retryable=True,
+    ) from exc
+
+
 def _request_json(
     url: str,
     payload: dict[str, Any],
     *,
     timeout_seconds: float,
     headers: dict[str, str] | None = None,
+    provider_label: str = "LLM",
+    model: str = "",
 ) -> dict[str, Any]:
     request = Request(
         url,
@@ -248,16 +412,18 @@ def _request_json(
         with urlopen(request, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        detail = exc.reason
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
-            if body:
-                detail = body[:500]
-        except Exception:
-            pass
-        raise LLMCallError(f"HTTP {exc.code}: {detail}") from exc
+        _raise_http_llm_call_error(
+            exc,
+            provider_label=provider_label,
+            model=model,
+        )
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise LLMCallError(f"{type(exc).__name__}: {exc}") from exc
+        _raise_transient_llm_call_error(
+            exc,
+            provider_label=provider_label,
+            model=model,
+        )
+    raise AssertionError("unreachable")
 
 
 def _call_ollama_chat(
@@ -272,7 +438,7 @@ def _call_ollama_chat(
     num_ctx: int | None,
     num_predict: int | None,
 ) -> str:
-    url = f"{ollama_url.rstrip('/')}/api/chat"
+    url = f"{DEFAULT_OLLAMA_URL.rstrip('/')}/api/chat"
     options: dict[str, Any] = {"temperature": temperature}
     if num_ctx is not None:
         options["num_ctx"] = num_ctx
@@ -293,10 +459,17 @@ def _call_ollama_chat(
             url,
             payload,
             timeout_seconds=timeout_seconds,
+            provider_label="Ollama",
+            model=model,
         )
         content = response_data.get("message", {}).get("content", "")
         if not isinstance(content, str) or not content.strip():
-            raise LLMCallError("Ollama returned an empty response.")
+            raise LLMCallError(
+                f"Ollama returned an empty response for {model}.",
+                provider="Ollama",
+                model=model,
+                retryable=True,
+            )
         return content.strip()
 
     request = Request(
@@ -321,12 +494,27 @@ def _call_ollama_chat(
                         token_callback(content)
                 if data.get("done"):
                     break
+    except HTTPError as exc:
+        _raise_http_llm_call_error(
+            exc,
+            provider_label="Ollama",
+            model=model,
+        )
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise LLMCallError(f"{type(exc).__name__}: {exc}") from exc
+        _raise_transient_llm_call_error(
+            exc,
+            provider_label="Ollama",
+            model=model,
+        )
 
     content = "".join(parts)
     if not content.strip():
-        raise LLMCallError("Ollama returned an empty response.")
+        raise LLMCallError(
+            f"Ollama returned an empty response for {model}.",
+            provider="Ollama",
+            model=model,
+            retryable=True,
+        )
     return content.strip()
 
 
@@ -375,14 +563,26 @@ def _call_openai_chat(
             payload,
             timeout_seconds=timeout_seconds,
             headers=headers,
+            provider_label="OpenAI",
+            model=model,
         )
         choices = response_data.get("choices", [])
         if not choices:
-            raise LLMCallError("OpenAI returned no choices.")
+            raise LLMCallError(
+                f"OpenAI returned no choices for {model}.",
+                provider="OpenAI",
+                model=model,
+                retryable=True,
+            )
         message = choices[0].get("message", {})
         content = _openai_message_text(message.get("content"))
         if not content.strip():
-            raise LLMCallError("OpenAI returned an empty response.")
+            raise LLMCallError(
+                f"OpenAI returned an empty response for {model}.",
+                provider="OpenAI",
+                model=model,
+                retryable=True,
+            )
         return content.strip()
 
     request = Request(
@@ -418,21 +618,58 @@ def _call_openai_chat(
                     if token_callback is not None:
                         token_callback(content)
     except HTTPError as exc:
-        detail = exc.reason
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
-            if body:
-                detail = body[:500]
-        except Exception:
-            pass
-        raise LLMCallError(f"HTTP {exc.code}: {detail}") from exc
+        _raise_http_llm_call_error(
+            exc,
+            provider_label="OpenAI",
+            model=model,
+        )
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise LLMCallError(f"{type(exc).__name__}: {exc}") from exc
+        _raise_transient_llm_call_error(
+            exc,
+            provider_label="OpenAI",
+            model=model,
+        )
 
     content = "".join(parts)
     if not content.strip():
-        raise LLMCallError("OpenAI returned an empty response.")
+        raise LLMCallError(
+            f"OpenAI returned an empty response for {model}.",
+            provider="OpenAI",
+            model=model,
+            retryable=True,
+        )
     return content.strip()
+
+
+def _sleep_before_retry(exc: LLMCallError, attempt_index: int) -> None:
+    max_delay = _configured_retry_max_seconds()
+    if exc.retry_after_seconds is not None:
+        delay = min(exc.retry_after_seconds, max_delay)
+    else:
+        initial_delay = _configured_retry_initial_seconds()
+        delay = min(initial_delay * (2 ** max(0, attempt_index - 1)), max_delay)
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _call_with_retries(
+    call: Callable[[], str],
+    *,
+    max_retries: int,
+    allow_retries: bool,
+) -> str:
+    for attempt_index in range(max_retries + 1):
+        try:
+            return call()
+        except LLMCallError as exc:
+            if (
+                not allow_retries
+                or not exc.retryable
+                or attempt_index >= max_retries
+            ):
+                raise
+            _sleep_before_retry(exc, attempt_index + 1)
+    raise AssertionError("unreachable")
 
 
 def call_llm_chat(
@@ -446,36 +683,54 @@ def call_llm_chat(
     json_format: bool = False,
     num_ctx: int | None = None,
     num_predict: int | None = None,
+    max_retries: int | None = None,
 ) -> str:
-    """Call the provider implied by ``model`` and return assistant text."""
+    """Call the provider implied by ``model`` and return assistant text.
+
+    Transient provider failures are retried by default. Configuration errors,
+    authentication failures, unknown models, and other non-transient failures
+    are raised immediately with their provider-specific cause.
+    """
 
     spec = resolve_llm_model_spec(model)
+    retry_count = _configured_llm_max_retries() if max_retries is None else max(0, max_retries)
+
+    # Avoid replaying partial tokens to interactive callers. Non-streaming LLM
+    # calls are safe to retry because no partial answer has been emitted.
+    allow_retries = not stream
 
     if spec.provider == "ollama":
-        return _call_ollama_chat(
-            messages,
-            model=spec.model,
-            ollama_url=DEFAULT_OLLAMA_URL,
-            timeout_seconds=timeout_seconds,
-            temperature=temperature,
-            stream=stream,
-            token_callback=token_callback,
-            json_format=json_format,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
+        return _call_with_retries(
+            lambda: _call_ollama_chat(
+                messages,
+                model=spec.model,
+                timeout_seconds=timeout_seconds,
+                temperature=temperature,
+                stream=stream,
+                token_callback=token_callback,
+                json_format=json_format,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+            ),
+            max_retries=retry_count,
+            allow_retries=allow_retries,
         )
 
     if spec.provider == "openai":
-        return _call_openai_chat(
-            messages,
-            model=spec.model,
-            endpoint_url=spec.endpoint_url or _openai_chat_url_from_env(),
-            timeout_seconds=timeout_seconds,
-            temperature=temperature,
-            stream=stream,
-            token_callback=token_callback,
-            json_format=json_format,
-            num_predict=num_predict,
+        return _call_with_retries(
+            lambda: _call_openai_chat(
+                messages,
+                model=spec.model,
+                endpoint_url=spec.endpoint_url or _openai_chat_url_from_env(),
+                timeout_seconds=timeout_seconds,
+                temperature=temperature,
+                stream=stream,
+                token_callback=token_callback,
+                json_format=json_format,
+                num_predict=num_predict,
+            ),
+            max_retries=retry_count,
+            allow_retries=allow_retries,
         )
 
     raise LLMConfigurationError(f"Unsupported LLM provider: {spec.provider!r}")

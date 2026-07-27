@@ -3,6 +3,7 @@ import json
 import pytest
 
 from kurrent.llm_provider import (
+    LLMCallError,
     LLMConfigurationError,
     call_llm_chat,
     get_openai_api_key,
@@ -142,3 +143,102 @@ def test_openai_url_spec_extracts_model_from_query():
 def test_unsupported_remote_url_is_configuration_error():
     with pytest.raises(LLMConfigurationError):
         resolve_llm_model_spec("https://example.com/v1/chat/completions?model=x")
+
+
+def _http_error(status_code, body, *, reason="Error", headers=None):
+    import io
+    from urllib.error import HTTPError
+
+    return HTTPError(
+        "https://api.openai.com/v1/chat/completions",
+        status_code,
+        reason,
+        headers or {},
+        io.BytesIO(body.encode("utf-8")),
+    )
+
+
+def test_openai_transient_http_error_retries(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        if len(calls) < 3:
+            raise _http_error(
+                500,
+                '{"error":{"message":"temporary server trouble","type":"server_error"}}',
+                reason="Internal Server Error",
+            )
+        return FakeResponse(
+            {
+                "choices": [
+                    {"message": {"content": "  recovered answer  "}},
+                ],
+            }
+        )
+
+    monkeypatch.setenv("OPENAI_KEY", "sk-test")
+    monkeypatch.setattr("kurrent.llm_provider.urlopen", fake_urlopen)
+    monkeypatch.setattr("kurrent.llm_provider.time.sleep", lambda _seconds: None)
+
+    content = call_llm_chat(
+        [{"role": "user", "content": "hello"}],
+        model="openai:gpt-4.1-mini",
+        max_retries=2,
+    )
+
+    assert content == "recovered answer"
+    assert len(calls) == 3
+
+
+def test_openai_auth_error_does_not_retry_and_reports_cause(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        raise _http_error(
+            401,
+            '{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}',
+            reason="Unauthorized",
+            headers={"x-request-id": "req_test_123"},
+        )
+
+    monkeypatch.setenv("OPENAI_KEY", "sk-test")
+    monkeypatch.setattr("kurrent.llm_provider.urlopen", fake_urlopen)
+    monkeypatch.setattr("kurrent.llm_provider.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(LLMCallError) as excinfo:
+        call_llm_chat(
+            [{"role": "user", "content": "hello"}],
+            model="openai:gpt-4.1-mini",
+            max_retries=2,
+        )
+
+    message = str(excinfo.value)
+    assert len(calls) == 1
+    assert excinfo.value.retryable is False
+    assert excinfo.value.status_code == 401
+    assert "OpenAI HTTP 401" in message
+    assert "Incorrect API key provided" in message
+    assert "request_id=req_test_123" in message
+
+
+def test_explicit_ollama_chat_uses_local_ollama_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse({"message": {"content": "  local answer  "}})
+
+    monkeypatch.setattr("kurrent.llm_provider.urlopen", fake_urlopen)
+
+    content = call_llm_chat(
+        [{"role": "user", "content": "hello"}],
+        model="ollama:qwen3:kurrent-rag-8b",
+        max_retries=0,
+    )
+
+    assert content == "local answer"
+    assert captured["url"] == "http://127.0.0.1:11434/api/chat"
+    assert captured["payload"]["model"] == "qwen3:kurrent-rag-8b"
