@@ -63,7 +63,7 @@ def test_openai_key_can_come_from_expected_env_name(monkeypatch):
     assert get_openai_api_key() == "sk-test"
 
 
-def test_openai_chat_call_posts_chat_completion_payload(monkeypatch):
+def test_openai_call_posts_responses_payload(monkeypatch):
     captured = {}
 
     def fake_urlopen(request, timeout):
@@ -73,8 +73,14 @@ def test_openai_chat_call_posts_chat_completion_payload(monkeypatch):
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return FakeResponse(
             {
-                "choices": [
-                    {"message": {"content": "  useful answer  "}},
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "  useful answer  "},
+                        ],
+                    },
                 ],
             }
         )
@@ -92,26 +98,28 @@ def test_openai_chat_call_posts_chat_completion_payload(monkeypatch):
     )
 
     assert content == "useful answer"
-    assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+    assert captured["url"] == "https://api.openai.com/v1/responses"
     assert captured["timeout"] == 12.0
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
     assert captured["payload"]["model"] == "gpt-4.1-mini"
-    assert captured["payload"]["messages"] == [
+    assert captured["payload"]["input"] == [
         {"role": "user", "content": "hello"},
     ]
-    assert captured["payload"]["response_format"] == {"type": "json_object"}
-    assert captured["payload"]["max_completion_tokens"] == 100
+    assert captured["payload"]["text"] == {"format": {"type": "json_object"}}
+    assert captured["payload"]["max_output_tokens"] == 100
+    assert captured["payload"]["store"] is False
+    assert "temperature" not in captured["payload"]
 
 
-def test_openai_chat_call_streams_tokens(monkeypatch):
+def test_openai_call_streams_response_tokens(monkeypatch):
     tokens = []
 
     def fake_urlopen(request, timeout):
         return FakeResponse(
             lines=[
-                b'data: {"choices":[{"delta":{"content":"hel"}}]}\n',
-                b'data: {"choices":[{"delta":{"content":"lo"}}]}\n',
-                b"data: [DONE]\n",
+                b'data: {"type":"response.output_text.delta","delta":"hel"}\n',
+                b'data: {"type":"response.output_text.delta","delta":"lo"}\n',
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n',
             ],
         )
 
@@ -132,17 +140,17 @@ def test_openai_chat_call_streams_tokens(monkeypatch):
 
 def test_openai_url_spec_extracts_model_from_query():
     spec = resolve_llm_model_spec(
-        "https://api.openai.com/v1/chat/completions?model=gpt-4.1-mini"
+        "https://api.openai.com/v1/responses?model=gpt-4.1-mini"
     )
 
     assert spec.provider == "openai"
     assert spec.model == "gpt-4.1-mini"
-    assert spec.endpoint_url == "https://api.openai.com/v1/chat/completions"
+    assert spec.endpoint_url == "https://api.openai.com/v1/responses"
 
 
 def test_unsupported_remote_url_is_configuration_error():
     with pytest.raises(LLMConfigurationError):
-        resolve_llm_model_spec("https://example.com/v1/chat/completions?model=x")
+        resolve_llm_model_spec("https://example.com/v1/responses?model=x")
 
 
 def _http_error(status_code, body, *, reason="Error", headers=None):
@@ -150,7 +158,7 @@ def _http_error(status_code, body, *, reason="Error", headers=None):
     from urllib.error import HTTPError
 
     return HTTPError(
-        "https://api.openai.com/v1/chat/completions",
+        "https://api.openai.com/v1/responses",
         status_code,
         reason,
         headers or {},
@@ -171,9 +179,8 @@ def test_openai_transient_http_error_retries(monkeypatch):
             )
         return FakeResponse(
             {
-                "choices": [
-                    {"message": {"content": "  recovered answer  "}},
-                ],
+                "status": "completed",
+                "output_text": "  recovered answer  ",
             }
         )
 

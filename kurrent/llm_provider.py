@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from kurrent.config import DEFAULT_OLLAMA_URL
 
 __all__ = [
-    "DEFAULT_OPENAI_CHAT_URL",
+    "DEFAULT_OPENAI_RESPONSES_URL",
     "LLMCallError",
     "LLMConfigurationError",
     "LLMModelSpec",
@@ -33,8 +33,8 @@ __all__ = [
     "validate_llm_model_spec",
 ]
 
-DEFAULT_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_CHAT_PATH_SUFFIX = "/chat/completions"
+DEFAULT_OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+OPENAI_RESPONSES_PATH_SUFFIX = "/responses"
 
 
 class LLMConfigurationError(RuntimeError):
@@ -91,12 +91,12 @@ def _looks_like_absolute_url(raw: str) -> bool:
     return re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw) is not None
 
 
-def _openai_chat_url_from_env() -> str:
+def _openai_responses_url_from_env() -> str:
     load_dotenv()
     return (
-        os.environ.get("KURRENT_OPENAI_CHAT_URL")
-        or os.environ.get("OPENAI_CHAT_URL")
-        or DEFAULT_OPENAI_CHAT_URL
+        os.environ.get("KURRENT_OPENAI_RESPONSES_URL")
+        or os.environ.get("OPENAI_RESPONSES_URL")
+        or DEFAULT_OPENAI_RESPONSES_URL
     )
 
 
@@ -104,11 +104,11 @@ def _parse_openai_url(raw: str) -> LLMModelSpec:
     parsed = urlparse(raw)
     host = parsed.netloc.lower()
 
-    if "openai" not in host or not parsed.path.endswith(OPENAI_CHAT_PATH_SUFFIX):
+    if "openai" not in host or not parsed.path.endswith(OPENAI_RESPONSES_PATH_SUFFIX):
         raise LLMConfigurationError(
             "Unsupported remote LLM URL. Kurrent currently recognizes OpenAI "
-            "chat-completions URLs such as "
-            "https://api.openai.com/v1/chat/completions?model=gpt-4.1-mini, "
+            "Responses URLs such as "
+            "https://api.openai.com/v1/responses?model=gpt-4.1-mini, "
             "or concise specs such as openai:gpt-4.1-mini."
         )
 
@@ -149,7 +149,7 @@ def resolve_llm_model_spec(model: str | None) -> LLMModelSpec:
     Supported examples:
         ollama:qwen3:kurrent-rag-8b
         openai:gpt-4.1-mini
-        https://api.openai.com/v1/chat/completions?model=gpt-4.1-mini
+        https://api.openai.com/v1/responses?model=gpt-4.1-mini
     """
 
     raw = "" if model is None else str(model).strip()
@@ -168,7 +168,7 @@ def resolve_llm_model_spec(model: str | None) -> LLMModelSpec:
         return LLMModelSpec(
             provider="openai",
             model=openai_model,
-            endpoint_url=_openai_chat_url_from_env(),
+            endpoint_url=_openai_responses_url_from_env(),
             raw=raw,
         )
 
@@ -179,7 +179,7 @@ def resolve_llm_model_spec(model: str | None) -> LLMModelSpec:
         return LLMModelSpec(
             provider="openai",
             model=openai_model,
-            endpoint_url=_openai_chat_url_from_env(),
+            endpoint_url=_openai_responses_url_from_env(),
             raw=raw,
         )
 
@@ -201,7 +201,7 @@ def resolve_llm_model_spec(model: str | None) -> LLMModelSpec:
     if _looks_like_absolute_url(raw):
         raise LLMConfigurationError(
             "Unsupported LLM URL scheme. Use ollama:<model>, openai:<model>, "
-            "openai://<model>, or an OpenAI chat-completions URL with "
+            "openai://<model>, or an OpenAI Responses URL with "
             "?model=<model>."
         )
 
@@ -518,19 +518,129 @@ def _call_ollama_chat(
     return content.strip()
 
 
-def _openai_message_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "".join(parts)
-    return "" if content is None else str(content)
+
+def _openai_responses_input(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return Responses API input messages from Kurrent chat messages."""
+
+    responses_input: list[dict[str, str]] = []
+    for message in messages:
+        role = str(message.get("role", "user")).strip() or "user"
+        content = message.get("content", "")
+        responses_input.append(
+            {
+                "role": role,
+                "content": "" if content is None else str(content),
+            }
+        )
+    return responses_input
 
 
-def _call_openai_chat(
+def _openai_response_error_detail(response_data: dict[str, Any]) -> str:
+    error = response_data.get("error")
+    if not isinstance(error, dict):
+        return ""
+
+    parts: list[str] = []
+    message = error.get("message")
+    if isinstance(message, str) and message.strip():
+        parts.append(message.strip())
+    code = error.get("code")
+    if isinstance(code, str) and code.strip():
+        parts.append(f"code={code.strip()}")
+    return "; ".join(parts)
+
+
+def _openai_response_output_text(response_data: dict[str, Any]) -> str:
+    output_text = response_data.get("output_text")
+    if isinstance(output_text, str):
+        return output_text
+
+    parts: list[str] = []
+    output_items = response_data.get("output", [])
+    if not isinstance(output_items, list):
+        return ""
+
+    for output_item in output_items:
+        if not isinstance(output_item, dict):
+            continue
+        content_items = output_item.get("content", [])
+        if not isinstance(content_items, list):
+            continue
+        for content_item in content_items:
+            if not isinstance(content_item, dict):
+                continue
+            text = content_item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
+def _raise_for_openai_response_status(
+    response_data: dict[str, Any],
+    *,
+    model: str,
+) -> None:
+    status = response_data.get("status")
+    if status in {None, "completed"}:
+        return
+
+    if status == "failed":
+        detail = _openai_response_error_detail(response_data) or "response failed"
+        retryable = "server_error" in detail or "rate_limit" in detail
+        raise LLMCallError(
+            f"OpenAI response failed for {model}: {detail}",
+            provider="OpenAI",
+            model=model,
+            retryable=retryable,
+        )
+
+    if status == "incomplete":
+        incomplete_details = response_data.get("incomplete_details")
+        reason = "unknown reason"
+        if isinstance(incomplete_details, dict) and incomplete_details.get("reason"):
+            reason = str(incomplete_details["reason"])
+        raise LLMCallError(
+            f"OpenAI response incomplete for {model}: {reason}",
+            provider="OpenAI",
+            model=model,
+            retryable=False,
+        )
+
+    raise LLMCallError(
+        f"OpenAI response ended with unexpected status for {model}: {status}",
+        provider="OpenAI",
+        model=model,
+        retryable=True,
+    )
+
+
+def _openai_response_payload(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    temperature: float,
+    stream: bool,
+    json_format: bool,
+    num_predict: int | None,
+) -> dict[str, Any]:
+    # Do not send temperature to OpenAI by default. Some Responses API
+    # models reject the parameter entirely, and Kurrent's provider-neutral
+    # temperature argument is still useful for local Ollama calls.
+    _ = temperature
+    payload: dict[str, Any] = {
+        "model": model,
+        "input": _openai_responses_input(messages),
+        "stream": stream,
+        "store": False,
+    }
+    if num_predict is not None:
+        payload["max_output_tokens"] = num_predict
+    if json_format:
+        payload["text"] = {"format": {"type": "json_object"}}
+    return payload
+
+
+def _call_openai_responses(
     messages: list[dict[str, str]],
     *,
     model: str,
@@ -542,16 +652,14 @@ def _call_openai_chat(
     json_format: bool,
     num_predict: int | None,
 ) -> str:
-    payload: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-        "temperature": temperature,
-    }
-    if num_predict is not None:
-        payload["max_completion_tokens"] = num_predict
-    if json_format:
-        payload["response_format"] = {"type": "json_object"}
+    payload = _openai_response_payload(
+        messages,
+        model=model,
+        temperature=temperature,
+        stream=stream,
+        json_format=json_format,
+        num_predict=num_predict,
+    )
 
     headers = {
         "Authorization": f"Bearer {get_openai_api_key()}",
@@ -566,16 +674,8 @@ def _call_openai_chat(
             provider_label="OpenAI",
             model=model,
         )
-        choices = response_data.get("choices", [])
-        if not choices:
-            raise LLMCallError(
-                f"OpenAI returned no choices for {model}.",
-                provider="OpenAI",
-                model=model,
-                retryable=True,
-            )
-        message = choices[0].get("message", {})
-        content = _openai_message_text(message.get("content"))
+        _raise_for_openai_response_status(response_data, model=model)
+        content = _openai_response_output_text(response_data)
         if not content.strip():
             raise LLMCallError(
                 f"OpenAI returned an empty response for {model}.",
@@ -608,15 +708,33 @@ def _call_openai_chat(
                 if data_text == "[DONE]":
                     break
                 data = json.loads(data_text)
-                choices = data.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content", "")
-                if isinstance(content, str) and content:
-                    parts.append(content)
-                    if token_callback is not None:
-                        token_callback(content)
+                event_type = data.get("type")
+                if event_type == "response.output_text.delta":
+                    content = data.get("delta", "")
+                    if isinstance(content, str) and content:
+                        parts.append(content)
+                        if token_callback is not None:
+                            token_callback(content)
+                elif event_type == "response.failed":
+                    response_data = data.get("response", {})
+                    if isinstance(response_data, dict):
+                        _raise_for_openai_response_status(response_data, model=model)
+                    raise LLMCallError(
+                        f"OpenAI streaming response failed for {model}.",
+                        provider="OpenAI",
+                        model=model,
+                        retryable=True,
+                    )
+                elif event_type == "response.incomplete":
+                    response_data = data.get("response", {})
+                    if isinstance(response_data, dict):
+                        _raise_for_openai_response_status(response_data, model=model)
+                    raise LLMCallError(
+                        f"OpenAI streaming response incomplete for {model}.",
+                        provider="OpenAI",
+                        model=model,
+                        retryable=False,
+                    )
     except HTTPError as exc:
         _raise_http_llm_call_error(
             exc,
@@ -718,10 +836,10 @@ def call_llm_chat(
 
     if spec.provider == "openai":
         return _call_with_retries(
-            lambda: _call_openai_chat(
+            lambda: _call_openai_responses(
                 messages,
                 model=spec.model,
-                endpoint_url=spec.endpoint_url or _openai_chat_url_from_env(),
+                endpoint_url=spec.endpoint_url or _openai_responses_url_from_env(),
                 timeout_seconds=timeout_seconds,
                 temperature=temperature,
                 stream=stream,

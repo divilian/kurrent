@@ -26,12 +26,12 @@
 - [x] list verb
 - [ ] list verb: add doc summaries to list choice output
 - [ ] delete document, duh
-- [ ] add tqdm progress bar while LLM is summarizing / sectioning?
+- [x] add tqdm progress bar while LLM is summarizing / sectioning?
 - [ ] after proposing a research question, immediately feed that novel rq back
   into kurrent to verify
-- [ ] Alternatives to local Ollama for the corpus-grounded assessment (an API
+- [x] Alternatives to local Ollama for the corpus-grounded assessment (an API
   key, etc)
-- [ ] Add command-line switch to skip summary for ingest
+- [x] Add command-line switch to skip summary for ingest
 
 
 ## Bugs
