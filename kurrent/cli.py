@@ -3898,13 +3898,67 @@ def print_list_document_summary(document) -> None:
 def prompt_list_document_action(document=None, state_store=None) -> str:
     """Prompt for actions on one selected document."""
 
-    return prompt_document_result_action(
-        document_hit_from_stored_document(document) if document is not None else None,
-        state_store,
+    parts = ["[Enter] next", "[i]nfo"]
+    hit = (
+        document_hit_from_stored_document(document)
+        if document is not None
+        else None
     )
 
+    if hit is not None and pdf_exists_for_result(hit, state_store):
+        parts.append("[o]pen PDF")
 
-def browse_list_document(entries: list[tuple[str, object]], start_index: int, store) -> None:
+    parts.extend(["[e]dit metadata", "[d]elete", "[q]uit"])
+    prompt = ", ".join(parts) + " > "
+
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        print()
+        return "q"
+
+
+def prompt_delete_document_confirmation(document) -> bool:
+    """Confirm deletion of one document from Kurrent state."""
+
+    title = document.title or "(untitled)"
+    try:
+        response = input(
+            f"Delete '{title}' from Kurrent? [y/N] > "
+        ).strip().lower()
+    except EOFError:
+        print()
+        return False
+
+    return response in {"y", "yes"}
+
+
+def delete_document_from_kurrent(
+    store,
+    chroma_path: Path,
+    doc_id: str,
+) -> None:
+    """Delete one document from Kurrent state, leaving its PDF on disk."""
+
+    try:
+        from kurrent.embedder import Embedder
+
+        embedder = Embedder(chroma_path)
+        embedder.delete_document(doc_id)
+    except Exception as exc:
+        print_wrapped(
+            f"Warning: could not delete Chroma entries for {doc_id}: {exc}"
+        )
+
+    store.delete_document(doc_id)
+
+
+def browse_list_document(
+    entries: list[tuple[str, object]],
+    start_index: int,
+    store,
+    chroma_path: Path,
+) -> None:
     """Browse selected documents; q returns to the document list."""
 
     index = start_index
@@ -3921,15 +3975,20 @@ def browse_list_document(entries: list[tuple[str, object]], start_index: int, st
                 index += 1
                 break
 
-            if choice == "d":
-                print_document_detail(hit, index + 1, len(entries), state_store=store)
+            if choice == "i":
+                print_document_detail(
+                    hit,
+                    index + 1,
+                    len(entries),
+                    state_store=store,
+                )
                 continue
 
             if choice == "o":
                 if pdf_exists_for_result(hit, store):
                     open_document_pdf(document, purpose="PDF")
                 else:
-                    print("Please press Enter, or type d, e, or q.")
+                    print("Please press Enter, or type i, e, d, or q.")
                 continue
 
             if choice == "e":
@@ -3942,13 +4001,30 @@ def browse_list_document(entries: list[tuple[str, object]], start_index: int, st
                     print_list_document_summary(document)
                 continue
 
+            if choice == "d":
+                if not prompt_delete_document_confirmation(document):
+                    print("Deletion canceled.")
+                    continue
+
+                delete_document_from_kurrent(
+                    store,
+                    chroma_path,
+                    document.doc_id,
+                )
+                entries.pop(index)
+                print_wrapped(
+                    "Deleted document from Kurrent state. "
+                    "Source PDF file left on disk."
+                )
+                return
+
             if is_quit_command(choice):
                 return
 
             if pdf_exists_for_result(hit, store):
-                print("Please press Enter, or type d, o, e, or q.")
+                print("Please press Enter, or type i, o, e, d, or q.")
             else:
-                print("Please press Enter, or type d, e, or q.")
+                print("Please press Enter, or type i, e, d, or q.")
 
 
 def run_list(args: argparse.Namespace) -> int:
@@ -3995,7 +4071,92 @@ def run_list(args: argparse.Namespace) -> int:
                 print(green_menu_text(f"Choose a number from 1 to {len(entries)}, or q to quit."))
                 continue
 
-            browse_list_document(entries, selection - 1, store)
+            browse_list_document(
+                entries,
+                selection - 1,
+                store,
+                state_paths.chroma_path,
+            )
+    finally:
+        store.close()
+
+    return 0
+
+
+def prompt_delete_document_selection(entries) -> int | None:
+    """Prompt for the document number to delete, or None to quit."""
+
+    while True:
+        try:
+            choice = input(
+                "Delete which document? (number, or q to quit) > "
+            )
+        except EOFError:
+            print()
+            return None
+
+        lowered = choice.strip().lower()
+        if is_quit_command(lowered):
+            return None
+
+        try:
+            selection = int(lowered)
+        except ValueError:
+            print(f"Type a document number from 1 to {len(entries)}, or q.")
+            continue
+
+        if 1 <= selection <= len(entries):
+            return selection - 1
+
+        print(f"Choose a number from 1 to {len(entries)}, or q to quit.")
+
+
+def run_delete(args: argparse.Namespace) -> int:
+    """Interactively delete one document from Kurrent state."""
+
+    from kurrent.config import get_kurrent_state_paths
+    from kurrent.state_store import StateStore
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    if not state_paths.sqlite_path.exists():
+        raise CliUsageError(
+            "No kurrent SQLite database exists yet. Ingest PDFs first, or "
+            "pass --state-dir pointing to an existing kurrent state "
+            "directory. "
+            f"Expected database: {state_paths.sqlite_path}"
+        )
+
+    store = StateStore(state_paths.sqlite_path)
+
+    try:
+        entries = default_document_list_entries(store.list_documents())
+        print()
+        print_document_list(entries)
+
+        if not entries:
+            return 0
+
+        selection = prompt_delete_document_selection(entries)
+        if selection is None:
+            return 0
+
+        document = entries[selection][1]
+        print_list_document_summary(document)
+
+        if not prompt_delete_document_confirmation(document):
+            print("Deletion canceled.")
+            return 0
+
+        delete_document_from_kurrent(
+            store,
+            state_paths.chroma_path,
+            document.doc_id,
+        )
+        print_wrapped(
+            "Deleted document from Kurrent state. "
+            "Source PDF file left on disk."
+        )
     finally:
         store.close()
 
@@ -6067,6 +6228,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="list documents by title and year.",
     )
     list_parser.set_defaults(func=run_list, list_mode="tag")
+
+    delete_parser = subparsers.add_parser(
+        "delete",
+        help="delete one ingested document from Kurrent state",
+    )
+    delete_parser.set_defaults(func=run_delete)
 
     stats_parser = subparsers.add_parser(
         "stats",

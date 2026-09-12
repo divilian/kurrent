@@ -1451,6 +1451,60 @@ def test_list_command_parses_display_aliases():
         assert args.list_mode == "title"
 
 
+def test_delete_command_parses():
+    """Verify the standalone delete command is available."""
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["delete"])
+
+    assert args.command == "delete"
+    assert args.func is cli.run_delete
+
+
+def test_list_document_prompt_uses_delete_key(monkeypatch, tmp_path):
+    """Verify list reserves d for delete and keeps details as info."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import Document
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    document = Document(
+        doc_id="doc-1",
+        pdf_sha256="sha-1",
+        storage_mode="external",
+        pdf_path=pdf_path,
+        ingested_at=datetime.now(timezone.utc),
+        title="A Mechanistic Model of Gossip",
+        authors="Mari Kawakatsu",
+        year=2024,
+    )
+    prompts = []
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return "q"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert cli.prompt_list_document_action(document) == "q"
+    assert "[i]nfo" in prompts[0]
+    assert "[d]elete" in prompts[0]
+    assert "[d]etails" not in prompts[0]
+
+
+def test_delete_confirmation_defaults_to_cancel(monkeypatch, tmp_path):
+    """Verify deletion requires an explicit yes response."""
+
+    from types import SimpleNamespace
+
+    document = SimpleNamespace(title="Paper to Keep")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+
+    assert cli.prompt_delete_document_confirmation(document) is False
+
+
 def test_document_list_entries_format_tags_authors_and_titles(tmp_path):
     """Verify kurrent list display modes use the requested sort labels."""
 
@@ -1601,6 +1655,201 @@ def test_list_open_pdf_returns_to_same_action_prompt_without_editing(
     output = capsys.readouterr().out
     assert output.count("A Mechanistic Model of Gossip") == 1
     assert f"Opened PDF: {pdf_path}" in output
+
+
+def test_list_delete_removes_selected_document_but_keeps_pdf(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    """Verify list deletion removes Kurrent state and keeps the PDF."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import Document
+    from kurrent.state_store import StateStore
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    store = StateStore(state_dir / "kurrent.db")
+
+    try:
+        store.insert_document(
+            Document(
+                doc_id="doc-1",
+                pdf_sha256="sha-1",
+                storage_mode="external",
+                pdf_path=pdf_path,
+                ingested_at=datetime.now(timezone.utc),
+                title="A Mechanistic Model of Gossip",
+                authors="Mari Kawakatsu",
+                year=2024,
+            )
+        )
+    finally:
+        store.close()
+
+    deleted = []
+
+    def fake_delete(store, chroma_path, doc_id):
+        deleted.append((chroma_path, doc_id))
+        store.delete_document(doc_id)
+
+    responses = iter(["1", "d", "y", "q"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+    monkeypatch.setattr(cli, "delete_document_from_kurrent", fake_delete)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--state-dir", str(state_dir), "list"])
+
+    assert cli.run_list(args) == 0
+    assert deleted == [(state_dir / "chroma", "doc-1")]
+    assert pdf_path.exists()
+
+    store = StateStore(state_dir / "kurrent.db")
+    try:
+        assert store.get_document("doc-1") is None
+    finally:
+        store.close()
+
+    output = capsys.readouterr().out
+    assert "Deleted document from Kurrent state." in output
+    assert "Source PDF file left on disk." in output
+
+
+def test_delete_command_removes_selected_document_but_keeps_pdf(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    """Verify standalone delete selects, confirms, and removes one paper."""
+
+    from datetime import datetime, timezone
+
+    from kurrent.schema import Document
+    from kurrent.state_store import StateStore
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    first_pdf = tmp_path / "first.pdf"
+    second_pdf = tmp_path / "second.pdf"
+    first_pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    second_pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    store = StateStore(state_dir / "kurrent.db")
+
+    try:
+        store.insert_document(
+            Document(
+                doc_id="doc-1",
+                pdf_sha256="sha-1",
+                storage_mode="external",
+                pdf_path=first_pdf,
+                ingested_at=datetime.now(timezone.utc),
+                title="First Paper",
+                authors="Alice Alpha",
+                year=2020,
+            )
+        )
+        store.insert_document(
+            Document(
+                doc_id="doc-2",
+                pdf_sha256="sha-2",
+                storage_mode="external",
+                pdf_path=second_pdf,
+                ingested_at=datetime.now(timezone.utc),
+                title="Second Paper",
+                authors="Bob Beta",
+                year=2021,
+            )
+        )
+    finally:
+        store.close()
+
+    deleted = []
+
+    def fake_delete(store, chroma_path, doc_id):
+        deleted.append((chroma_path, doc_id))
+        store.delete_document(doc_id)
+
+    responses = iter(["2", "y"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+    monkeypatch.setattr(cli, "delete_document_from_kurrent", fake_delete)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--state-dir", str(state_dir), "delete"])
+
+    assert cli.run_delete(args) == 0
+    assert deleted == [(state_dir / "chroma", "doc-2")]
+    assert first_pdf.exists()
+    assert second_pdf.exists()
+
+    store = StateStore(state_dir / "kurrent.db")
+    try:
+        assert store.get_document("doc-1") is not None
+        assert store.get_document("doc-2") is None
+    finally:
+        store.close()
+
+    output = capsys.readouterr().out
+    assert "1. alpha2020" in output
+    assert "2. beta2021" in output
+    assert "Second Paper" in output
+    assert "Deleted document from Kurrent state." in output
+
+
+def test_delete_document_from_kurrent_removes_chroma_and_database_state(
+    tmp_path,
+    monkeypatch,
+):
+    """Verify shared deletion removes vectors and SQLite state."""
+
+    from datetime import datetime, timezone
+    import types
+
+    from kurrent.schema import Document
+    from kurrent.state_store import StateStore
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    store = StateStore(tmp_path / "kurrent.db")
+    store.insert_document(
+        Document(
+            doc_id="doc-1",
+            pdf_sha256="sha-1",
+            storage_mode="external",
+            pdf_path=pdf_path,
+            ingested_at=datetime.now(timezone.utc),
+            title="Paper",
+            authors="Alice Alpha",
+            year=2020,
+        )
+    )
+    chroma_path = tmp_path / "chroma"
+    calls = []
+
+    class FakeEmbedder:
+        def __init__(self, path):
+            calls.append(("init", path))
+
+        def delete_document(self, doc_id):
+            calls.append(("delete", doc_id))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "kurrent.embedder",
+        types.SimpleNamespace(Embedder=FakeEmbedder),
+    )
+
+    try:
+        cli.delete_document_from_kurrent(store, chroma_path, "doc-1")
+        assert store.get_document("doc-1") is None
+    finally:
+        store.close()
+
+    assert calls == [("init", chroma_path), ("delete", "doc-1")]
+    assert pdf_path.exists()
 
 
 def test_title_listing_capitalizes_after_moving_leading_article():
