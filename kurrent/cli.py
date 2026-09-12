@@ -5602,6 +5602,46 @@ def ensure_screening_summary_llm_ready(
 
     return True
 
+def ensure_sectioning_llm_ready(
+    model: str = DEFAULT_SECTION_RECOGNITION_LLM,
+) -> bool:
+    """Validate the configured section-recognition LLM provider."""
+
+    from kurrent.llm_provider import (
+        LLMConfigurationError,
+        is_ollama_model_spec,
+        validate_llm_model_spec,
+    )
+    from kurrent.metadata_refresher import (
+        MetadataRefreshError,
+        ensure_ollama_available,
+    )
+
+    try:
+        validate_llm_model_spec(model)
+        if not is_ollama_model_spec(model):
+            return True
+    except LLMConfigurationError as exc:
+        print_usage_error(str(exc))
+        return False
+
+    print_gray_status(
+        "Checking Ollama availability for section recognition..."
+    )
+    try:
+        started_ollama = ensure_ollama_available(
+            progress_callback=print_gray_status,
+        )
+    except MetadataRefreshError as exc:
+        print_usage_error(str(exc))
+        return False
+
+    if started_ollama:
+        print_gray_status("Ollama is ready.")
+
+    return True
+
+
 def run_ingest(args: argparse.Namespace) -> int:
     """Run the kurrent ingest command."""
 
@@ -5705,6 +5745,11 @@ def run_ingest(args: argparse.Namespace) -> int:
     if args.summary_enabled:
         summaries_ready = ensure_screening_summary_llm_ready(model=summary_model)
         if not summaries_ready:
+            return 2
+
+    if not args.rules_based_sections:
+        sectioning_ready = ensure_sectioning_llm_ready(model=sectioning_model)
+        if not sectioning_ready:
             return 2
 
     print()

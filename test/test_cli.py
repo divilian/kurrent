@@ -12,6 +12,11 @@ def _fake_ingest_llm_check(monkeypatch):
     """Keep ingest tests from depending on a real configured LLM service."""
 
     monkeypatch.setattr(cli, "ensure_screening_summary_llm_ready", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        cli,
+        "ensure_sectioning_llm_ready",
+        lambda **_kwargs: True,
+    )
 
 
 def test_ingest_defaults_to_crossref_metadata():
@@ -773,6 +778,12 @@ def test_ingest_startup_status_lines_are_indented_like_ask(
         types.SimpleNamespace(Embedder=FakeEmbedder),
     )
     monkeypatch.setattr(cli, "ingest_one_pdf", fake_ingest_one_pdf)
+    sectioning_models = []
+    monkeypatch.setattr(
+        cli,
+        "ensure_sectioning_llm_ready",
+        lambda **kwargs: sectioning_models.append(kwargs["model"]) or True,
+    )
 
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -786,6 +797,7 @@ def test_ingest_startup_status_lines_are_indented_like_ask(
     )
 
     assert cli.run_ingest(args) == 0
+    assert sectioning_models == [args.sectioning_llm]
 
     output_lines = capsys.readouterr().out.splitlines()
     startup_lines = [
