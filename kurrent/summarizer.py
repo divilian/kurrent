@@ -14,13 +14,15 @@ from kurrent.config import (
     DEFAULT_SUMMARY_LLM,
     DEFAULT_SUMMARY_LLM_TIMEOUT,
     DEFAULT_SUMMARY_DEPTH,
+    DEFAULT_SUMMARIZE_LLM,
 )
 from kurrent.llm_provider import (
     LLMCallError,
     LLMConfigurationError,
     call_llm_chat,
+    resolve_llm_model_spec,
 )
-from kurrent.schema import SectionSpan
+from kurrent.schema import Chunk, SectionSpan
 from kurrent.sectioner import (
     detect_heading_candidates,
     is_reference_section_title,
@@ -33,8 +35,10 @@ __all__ = [
     "DEFAULT_SCREENING_SUMMARY_OUTPUT_TOKENS_PER_DEPTH_UNIT",
     "DEFAULT_SCREENING_SUMMARY_MAX_SECTIONS",
     "ScreeningSummaryError",
+    "DocumentSummaryError",
     "ScreeningSectionExcerpt",
     "ScreeningSummary",
+    "DocumentSummary",
     "estimate_tokens",
     "trim_section_for_summary",
     "is_obvious_non_content_section",
@@ -43,6 +47,7 @@ __all__ = [
     "select_screening_sections",
     "clean_screening_summary_text",
     "summarize_pdf_for_screening",
+    "summarize_document_chunks",
 ]
 
 DEFAULT_SCREENING_SUMMARY_OUTPUT_TOKENS_PER_DEPTH_UNIT = 190
@@ -56,6 +61,10 @@ COMBINED_SECTION_SEPARATOR = "\n\n---\n\n"
 
 class ScreeningSummaryError(RuntimeError):
     """Raised when a screening summary cannot be generated."""
+
+
+class DocumentSummaryError(RuntimeError):
+    """Raised when a deliberate document summary cannot be generated."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +83,14 @@ class ScreeningSummary:
     text: str
     section_notes: tuple[ScreeningSectionExcerpt, ...]
     depth: int
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentSummary:
+    """A deliberate summary generated from all substantive stored chunks."""
+
+    text: str
+    source_chunk_count: int
 
 
 
@@ -471,4 +488,341 @@ def summarize_pdf_for_screening(
         text=clean_screening_summary_text(summary_text, depth),
         section_notes=tuple(selected_sections),
         depth=depth,
+    )
+
+
+def _is_obvious_non_content_title(title: str | None) -> bool:
+    """Return whether a stored chunk belongs to obvious back matter."""
+
+    if title is None:
+        return False
+
+    normalized = normalize_section_title(title)
+    if is_reference_section_title(title):
+        return True
+
+    return normalized in {
+        "acknowledgment",
+        "acknowledgments",
+        "acknowledgement",
+        "acknowledgements",
+        "funding",
+        "author contributions",
+        "competing interests",
+        "conflict of interest",
+        "conflicts of interest",
+    }
+
+
+def _chunk_summary_source(chunk: Chunk) -> str:
+    """Return one stored chunk with compact section/page provenance."""
+
+    if chunk.section_title and chunk.section_title.strip():
+        section_name = chunk.section_title.strip()
+    elif chunk.section_number and chunk.section_number.strip():
+        section_name = f"Section {chunk.section_number.strip()}"
+    elif chunk.section_index is None:
+        section_name = "front matter"
+    else:
+        section_name = f"section {chunk.section_index + 1}"
+
+    if chunk.page_start is None:
+        page_label = ""
+    elif chunk.page_end is None or chunk.page_end == chunk.page_start:
+        page_label = f", page {chunk.page_start}"
+    else:
+        page_label = f", pages {chunk.page_start}-{chunk.page_end}"
+
+    return f"[{section_name}{page_label}]\n{chunk.text.strip()}"
+
+
+def _batch_summary_sources(
+    source_texts: Sequence[str],
+    *,
+    max_tokens: int,
+) -> list[str]:
+    """Pack source texts into context-sized batches without dropping any."""
+
+    batches: list[str] = []
+    current: list[str] = []
+    current_tokens = 0
+
+    for source_text in source_texts:
+        source_tokens = estimate_tokens(source_text) + 10
+        if current and current_tokens + source_tokens > max_tokens:
+            batches.append(COMBINED_SECTION_SEPARATOR.join(current))
+            current = []
+            current_tokens = 0
+
+        current.append(source_text)
+        current_tokens += source_tokens
+
+    if current:
+        batches.append(COMBINED_SECTION_SEPARATOR.join(current))
+
+    return batches
+
+
+def _document_identity_text(
+    *,
+    title: str | None,
+    authors: str | None,
+    year: int | None,
+) -> str:
+    """Return compact document metadata for deliberate-summary prompts."""
+
+    parts = []
+    if title:
+        parts.append(f"Title: {title}")
+    if authors:
+        parts.append(f"Authors: {authors}")
+    if year is not None:
+        parts.append(f"Year: {year}")
+    return "\n".join(parts)
+
+
+def _document_notes_messages(
+    source_text: str,
+    *,
+    identity: str,
+) -> list[dict[str, str]]:
+    """Build a prompt for detailed notes over one document segment."""
+
+    system = (
+        "You prepare faithful research notes from scholarly documents. "
+        "Capture substantive claims, arguments, methods, evidence, results, "
+        "qualifications, and limitations that are actually present. Do not "
+        "invent missing details or add outside knowledge."
+    )
+    user = f"""
+Prepare detailed notes on this portion of a document so another model can later
+write a complete summary of the whole document. Preserve important specifics
+rather than merely naming topics. Be concise enough to avoid repetition, but do
+not omit a substantive point just because it seems secondary. Do not evaluate
+whether the document is useful or relevant to the reader.
+
+{identity}
+
+<document portion>
+{source_text}
+</document portion>
+""".strip()
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def _document_summary_messages(
+    source_text: str,
+    *,
+    identity: str,
+    source_is_notes: bool,
+) -> list[dict[str, str]]:
+    """Build the final deliberate-summary prompt."""
+
+    source_label = "detailed notes" if source_is_notes else "document text"
+    system = (
+        "You write accurate, substantial summaries of scholarly documents. "
+        "Be concrete and genre-agnostic. Do not assume an empirical-paper "
+        "structure, and do not invent claims, methods, evidence, or results."
+    )
+    user = f"""
+Write a complete, readable summary of this document from the {source_label}
+below. This is a deliberate post-ingest summary, not a quick screening blurb.
+Cover the document's central purpose or argument and the important substantive
+material needed to understand what it does. Include specific methods, models,
+evidence, findings, qualifications, and limitations when they are present.
+Preserve important distinctions and disagreements rather than flattening them.
+
+Use several coherent prose paragraphs when the material supports them. A short
+list is acceptable only when the document itself has genuinely distinct items
+that are clearer as a list. Do not use Markdown headings or bold formatting.
+Do not discuss Kurrent, the summarization process, or whether the document is
+relevant to the reader. Do not add outside knowledge.
+
+{identity}
+
+<source material>
+{source_text}
+</source material>
+""".strip()
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def _call_document_summary_chat(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    timeout_seconds: float,
+    num_ctx: int,
+    num_predict: int,
+    answer_function: Callable[[list[dict[str, str]]], str] | None,
+) -> str:
+    """Call the configured LLM and normalize deliberate-summary failures."""
+
+    try:
+        if answer_function is not None:
+            return answer_function(messages)
+
+        provider = resolve_llm_model_spec(model).provider
+        output_tokens = num_predict
+        if provider == "openai":
+            output_tokens = max(4_000, num_predict * 4)
+
+        try:
+            return call_llm_chat(
+                messages,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                temperature=0.2,
+                num_ctx=num_ctx,
+                num_predict=output_tokens,
+            )
+        except LLMCallError as exc:
+            if (
+                provider != "openai"
+                or exc.provider != "OpenAI"
+                or not str(exc).endswith(": max_output_tokens")
+            ):
+                raise
+
+            return call_llm_chat(
+                messages,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                temperature=0.2,
+                num_ctx=num_ctx,
+                num_predict=output_tokens * 2,
+            )
+    except (LLMConfigurationError, LLMCallError) as exc:
+        raise DocumentSummaryError(str(exc)) from exc
+
+
+def summarize_document_chunks(
+    chunks: Sequence[Chunk],
+    *,
+    title: str | None = None,
+    authors: str | None = None,
+    year: int | None = None,
+    model: str = DEFAULT_SUMMARIZE_LLM,
+    timeout_seconds: float = DEFAULT_SUMMARY_LLM_TIMEOUT,
+    max_num_ctx: int = DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
+    progress_callback: Callable[[str], None] | None = None,
+    answer_function: Callable[[list[dict[str, str]]], str] | None = None,
+) -> DocumentSummary:
+    """Generate a deliberate summary from all substantive stored chunks.
+
+    Short documents are summarized in one call. Longer documents are first
+    converted to detailed notes in context-sized batches, then synthesized.
+    """
+
+    content_chunks = [
+        chunk
+        for chunk in chunks
+        if chunk.text.strip()
+        and not _is_obvious_non_content_title(chunk.section_title)
+    ]
+    if not content_chunks:
+        raise DocumentSummaryError(
+            "No substantive stored chunks were found to summarize."
+        )
+
+    source_texts = [_chunk_summary_source(chunk) for chunk in content_chunks]
+    input_budget = max(1_000, max_num_ctx - 2_500)
+    batches = _batch_summary_sources(
+        source_texts,
+        max_tokens=input_budget,
+    )
+    identity = _document_identity_text(
+        title=title,
+        authors=authors,
+        year=year,
+    )
+
+    if len(batches) == 1:
+        if progress_callback is not None:
+            progress_callback("Writing complete summary...")
+        summary_text = _call_document_summary_chat(
+            _document_summary_messages(
+                batches[0],
+                identity=identity,
+                source_is_notes=False,
+            ),
+            model=model,
+            timeout_seconds=timeout_seconds,
+            num_ctx=max_num_ctx,
+            num_predict=1_800,
+            answer_function=answer_function,
+        )
+        return DocumentSummary(
+            text=clean_screening_summary_text(summary_text),
+            source_chunk_count=len(content_chunks),
+        )
+
+    notes: list[str] = []
+    for index, batch in enumerate(batches, start=1):
+        if progress_callback is not None:
+            progress_callback(
+                f"Summarizing document part {index} of {len(batches)}..."
+            )
+        notes.append(
+            _call_document_summary_chat(
+                _document_notes_messages(batch, identity=identity),
+                model=model,
+                timeout_seconds=timeout_seconds,
+                num_ctx=max_num_ctx,
+                num_predict=1_000,
+                answer_function=answer_function,
+            )
+        )
+
+    while (
+        estimate_tokens(COMBINED_SECTION_SEPARATOR.join(notes))
+        > input_budget
+    ):
+        note_batches = _batch_summary_sources(
+            notes,
+            max_tokens=input_budget,
+        )
+        condensed_notes: list[str] = []
+        for index, note_batch in enumerate(note_batches, start=1):
+            if progress_callback is not None:
+                progress_callback(
+                    "Condensing summary notes part "
+                    f"{index} of {len(note_batches)}..."
+                )
+            condensed_notes.append(
+                _call_document_summary_chat(
+                    _document_notes_messages(note_batch, identity=identity),
+                    model=model,
+                    timeout_seconds=timeout_seconds,
+                    num_ctx=max_num_ctx,
+                    num_predict=1_000,
+                    answer_function=answer_function,
+                )
+            )
+        notes = condensed_notes
+
+    if progress_callback is not None:
+        progress_callback("Writing complete summary...")
+
+    summary_text = _call_document_summary_chat(
+        _document_summary_messages(
+            COMBINED_SECTION_SEPARATOR.join(notes),
+            identity=identity,
+            source_is_notes=True,
+        ),
+        model=model,
+        timeout_seconds=timeout_seconds,
+        num_ctx=max_num_ctx,
+        num_predict=1_800,
+        answer_function=answer_function,
+    )
+    return DocumentSummary(
+        text=clean_screening_summary_text(summary_text),
+        source_chunk_count=len(content_chunks),
     )

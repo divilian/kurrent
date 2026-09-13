@@ -2819,3 +2819,104 @@ def test_screening_reports_already_ingested_pdfs_in_phase_one(monkeypatch, tmp_p
     assert approved == [third_pdf.resolve()]
     assert fake_store.deleted_pending == [first_pdf.resolve(), second_pdf.resolve()]
     assert fake_store.added_pending == [third_pdf.resolve()]
+
+
+def test_elapsed_summary_progress_reports_elapsed_time(capsys):
+    times = iter([10.0, 13.4, 13.4, 18.9])
+    progress = cli.ElapsedSummaryProgress(
+        "OpenAI",
+        interactive=False,
+        clock=lambda: next(times),
+    )
+
+    progress("Summarizing document part 1 of 2...")
+    progress("Writing complete summary...")
+    progress.finish()
+
+    output = capsys.readouterr().out
+    assert "Summarizing document part 1 of 2 with OpenAI..." in output
+    assert "✓ Summarized document part 1 of 2 with OpenAI (3s)" in output
+    assert "Writing complete summary with OpenAI..." in output
+    assert "✓ Wrote complete summary with OpenAI (5s)" in output
+
+
+def test_summarize_has_independent_llm_default_and_override():
+    from kurrent.config import DEFAULT_SUMMARIZE_LLM
+
+    parser = cli.build_parser()
+
+    default_args = parser.parse_args(["summarize"])
+    override_args = parser.parse_args(
+        ["summarize", "--summary-llm", "openai:gpt-5.6-luna"]
+    )
+
+    assert default_args.summary_llm == DEFAULT_SUMMARIZE_LLM
+    assert override_args.summary_llm == "openai:gpt-5.6-luna"
+
+
+def test_run_summarize_uses_stored_chunks(monkeypatch, tmp_path, capsys):
+    from kurrent.config import DEFAULT_SUMMARIZE_LLM
+    from kurrent.state_store import StateStore
+    from kurrent.summarizer import DocumentSummary
+    from test.factories import make_chunk, make_document
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    store = StateStore(state_dir / "kurrent.db")
+    document = make_document(
+        doc_id="doc-summary",
+        pdf_path=tmp_path / "paper.pdf",
+        title="Paper to Summarize",
+        authors="David Anzola",
+        year=2026,
+    )
+    chunk = make_chunk(
+        document.doc_id,
+        0,
+        "Substantive stored text.",
+        section_title="Introduction",
+    )
+    store.insert_document(document)
+    store.insert_chunks([chunk])
+    store.close()
+
+    monkeypatch.setattr(
+        cli,
+        "ensure_document_summary_llm_ready",
+        lambda _model: True,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "1")
+    calls = []
+
+    def fake_summarize(chunks, **kwargs):
+        calls.append((chunks, kwargs))
+        return DocumentSummary(
+            text="A deliberately complete summary.",
+            source_chunk_count=len(chunks),
+        )
+
+    monkeypatch.setattr(
+        "kurrent.summarizer.summarize_document_chunks",
+        fake_summarize,
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--state-dir",
+            str(state_dir),
+            "summarize",
+            "--summary-llm",
+            DEFAULT_SUMMARIZE_LLM,
+        ]
+    )
+
+    assert cli.run_summarize(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Paper to Summarize" in output
+    assert "Complete summary" in output
+    assert "A deliberately complete summary." in output
+    assert calls[0][0][0].text == "Substantive stored text."
+    assert calls[0][1]["title"] == "Paper to Summarize"
+    assert calls[0][1]["model"] == DEFAULT_SUMMARIZE_LLM

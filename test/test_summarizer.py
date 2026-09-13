@@ -233,3 +233,190 @@ def test_screening_summary_progress_uses_and_for_final_section(monkeypatch):
     assert progress[-1] == (
         "Summarizing selected sections: front matter, Introduction, Methods, and Results..."
     )
+
+
+def test_deliberate_summary_uses_all_substantive_chunks_in_one_call():
+    from test.factories import make_chunk
+
+    chunks = [
+        make_chunk(
+            "doc",
+            0,
+            "The paper introduces a network model.",
+            section_title="Introduction",
+        ),
+        make_chunk(
+            "doc",
+            1,
+            "The model produces a cooperation result.",
+            section_title="Results",
+        ),
+        make_chunk(
+            "doc",
+            2,
+            "1. Someone. 2020.",
+            section_title="References",
+        ),
+    ]
+    calls = []
+
+    def fake_answer(messages):
+        calls.append(messages)
+        return "A complete summary."
+
+    result = summarizer.summarize_document_chunks(
+        chunks,
+        title="A Paper",
+        authors="A. Author",
+        year=2026,
+        answer_function=fake_answer,
+    )
+
+    assert result.text == "A complete summary."
+    assert result.source_chunk_count == 2
+    assert len(calls) == 1
+    prompt = calls[0][-1]["content"]
+    assert "The paper introduces a network model." in prompt
+    assert "The model produces a cooperation result." in prompt
+    assert "Someone. 2020" not in prompt
+    assert "Title: A Paper" in prompt
+    assert "This is a deliberate post-ingest summary" in prompt
+
+
+def test_deliberate_summary_batches_long_documents_before_synthesis():
+    from test.factories import make_chunk
+
+    chunks = [
+        make_chunk(
+            "doc",
+            0,
+            "A" * 3000,
+            section_title="First",
+        ),
+        make_chunk(
+            "doc",
+            1,
+            "B" * 3000,
+            section_title="Second",
+        ),
+    ]
+    calls = []
+    progress = []
+
+    def fake_answer(messages):
+        calls.append(messages)
+        prompt = messages[-1]["content"]
+        if "<document portion>" in prompt:
+            if "AAAA" in prompt:
+                return "Notes from first part."
+            return "Notes from second part."
+        return "Final synthesized summary."
+
+    result = summarizer.summarize_document_chunks(
+        chunks,
+        max_num_ctx=3500,
+        progress_callback=progress.append,
+        answer_function=fake_answer,
+    )
+
+    assert result.text == "Final synthesized summary."
+    assert result.source_chunk_count == 2
+    assert len(calls) == 3
+    assert progress == [
+        "Summarizing document part 1 of 2...",
+        "Summarizing document part 2 of 2...",
+        "Writing complete summary...",
+    ]
+    final_prompt = calls[-1][-1]["content"]
+    assert "Notes from first part." in final_prompt
+    assert "Notes from second part." in final_prompt
+    assert "detailed notes" in final_prompt
+
+
+def test_deliberate_openai_summary_retries_output_limit_with_larger_budget(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_call_llm_chat(messages, **kwargs):
+        calls.append(kwargs["num_predict"])
+        if len(calls) == 1:
+            raise summarizer.LLMCallError(
+                "OpenAI response incomplete for gpt-5.6-luna: "
+                "max_output_tokens",
+                provider="OpenAI",
+                model="gpt-5.6-luna",
+            )
+        return "Detailed notes."
+
+    monkeypatch.setattr(summarizer, "call_llm_chat", fake_call_llm_chat)
+
+    result = summarizer._call_document_summary_chat(
+        [{"role": "user", "content": "Summarize this part."}],
+        model="openai:gpt-5.6-luna",
+        timeout_seconds=120.0,
+        num_ctx=32_768,
+        num_predict=1_000,
+        answer_function=None,
+    )
+
+    assert result == "Detailed notes."
+    assert calls == [4_000, 8_000]
+
+
+def test_deliberate_summary_reports_note_condensation_calls():
+    from test.factories import make_chunk
+
+    chunks = [
+        make_chunk("doc", 0, "A" * 3000, section_title="First"),
+        make_chunk("doc", 1, "B" * 3000, section_title="Second"),
+    ]
+    progress = []
+    call_count = 0
+
+    def fake_answer(messages):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            return "N" * 3000
+        if call_count <= 4:
+            return "Condensed notes."
+        return "Final summary."
+
+    result = summarizer.summarize_document_chunks(
+        chunks,
+        max_num_ctx=3500,
+        progress_callback=progress.append,
+        answer_function=fake_answer,
+    )
+
+    assert result.text == "Final summary."
+    assert progress == [
+        "Summarizing document part 1 of 2...",
+        "Summarizing document part 2 of 2...",
+        "Condensing summary notes part 1 of 2...",
+        "Condensing summary notes part 2 of 2...",
+        "Writing complete summary...",
+    ]
+
+
+def test_deliberate_ollama_summary_keeps_existing_output_budget(monkeypatch):
+    calls = []
+
+    def fake_call_llm_chat(messages, **kwargs):
+        calls.append(kwargs["num_predict"])
+        return "Detailed notes."
+
+    monkeypatch.setattr(summarizer, "call_llm_chat", fake_call_llm_chat)
+
+    result = summarizer._call_document_summary_chat(
+        [{"role": "user", "content": "Summarize this part."}],
+        model="ollama:qwen2.5:kurrent-summarization-7b",
+        timeout_seconds=120.0,
+        num_ctx=32_768,
+        num_predict=1_000,
+        answer_function=None,
+    )
+
+    assert result == "Detailed notes."
+    assert calls == [1_000]

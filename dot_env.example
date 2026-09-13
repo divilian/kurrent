@@ -20,14 +20,17 @@ KURRENT_METADATA_LLM=ollama:llama3.1:kurrent-metadata-8b-instruct-q4_K_M
 KURRENT_PDF_EXCERPT_LLM=ollama:llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M
 KURRENT_SECTION_RECOGNITION_LLM=ollama:llama3.2:kurrent-sectioning-3b
 KURRENT_SUMMARY_LLM=ollama:qwen2.5:kurrent-summarization-7b
+KURRENT_SUMMARIZE_LLM=ollama:qwen2.5:kurrent-summarization-7b
 
 # To use OpenAI for a role, replace that role with an explicit OpenAI spec:
 #
 #   OPENAI_KEY=sk-...
 #   KURRENT_RAG_LLM=openai:gpt-4.1-mini
 #   KURRENT_SUMMARY_LLM=openai:gpt-4.1-mini
+#   KURRENT_SUMMARIZE_LLM=openai:gpt-4.1-mini
 
-# Screening summaries.
+# Summary calls. Screening and deliberate summaries have separate models above,
+# but share these timeout/context defaults.
 KURRENT_SUMMARY_DEPTH=2
 KURRENT_SUMMARY_LLM_TIMEOUT=180
 KURRENT_SUMMARY_LLM_NUM_CTX=16384

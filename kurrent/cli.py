@@ -7,6 +7,7 @@ Currently supported:
     kurrent ingest --local-metadata file.pdf
     kurrent ingest directoryOfPdfs
     kurrent ingest -y directoryOfPdfs
+    kurrent summarize
     kurrent search QUERY...
     kurrent search --metadata QUERY...
     kurrent search --text QUERY...
@@ -67,6 +68,7 @@ from kurrent.config import (
     DEFAULT_RELEVANCE_LLM,
     DEFAULT_SECTION_RECOGNITION_LLM,
     DEFAULT_SUMMARY_DEPTH,
+    DEFAULT_SUMMARIZE_LLM,
 )
 from kurrent.relevance_judge import (
     RelevanceJudgment,
@@ -225,6 +227,127 @@ def print_gray_status(message: str) -> None:
     # leading whitespace away for prose paragraphs.
     print(f" {gray_status_text(message)}")
     sys.stdout.flush()
+
+
+class ElapsedSummaryProgress:
+    """Show an in-place spinner and elapsed time for long summary calls."""
+
+    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def __init__(
+        self,
+        provider_label: str,
+        *,
+        interactive: bool | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.provider_label = provider_label
+        if interactive is None:
+            interactive = bool(
+                sys.stdout is not None and sys.stdout.isatty()
+            )
+        self._interactive = interactive
+        self._clock = clock or time.monotonic
+        self._message: str | None = None
+        self._started_at: float | None = None
+        self._stop_event: threading.Event | None = None
+        self._thread: threading.Thread | None = None
+
+    def __call__(self, message: str) -> None:
+        self.finish()
+        self._message = message
+        self._started_at = self._clock()
+
+        if not self._interactive:
+            print_gray_status(self._active_message(message))
+            return
+
+        self._stop_event = threading.Event()
+        self._render_spinner(self._SPINNER_FRAMES[0])
+        self._thread = threading.Thread(
+            target=self._spin,
+            name="kurrent-summary-spinner",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def finish(self, *, success: bool = True) -> None:
+        if self._message is None or self._started_at is None:
+            return
+
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join()
+
+        elapsed = max(0, int(self._clock() - self._started_at))
+        if success:
+            message = self._completed_message(self._message)
+            self._write_status_line(f"✓ {message} ({elapsed}s)")
+        elif self._interactive:
+            self._clear_status_line()
+
+        self._message = None
+        self._started_at = None
+        self._stop_event = None
+        self._thread = None
+
+    def _spin(self) -> None:
+        assert self._stop_event is not None
+        frame_index = 1
+        while not self._stop_event.wait(0.1):
+            frame = self._SPINNER_FRAMES[
+                frame_index % len(self._SPINNER_FRAMES)
+            ]
+            self._render_spinner(frame)
+            frame_index += 1
+
+    def _render_spinner(self, frame: str) -> None:
+        assert self._message is not None
+        assert self._started_at is not None
+        elapsed = max(0, int(self._clock() - self._started_at))
+        message = self._active_message(self._message)
+        self._write_status_line(
+            f"{frame} {message} {elapsed}s",
+            end="",
+        )
+
+    def _write_status_line(
+        self,
+        message: str,
+        *,
+        end: str = "\n",
+    ) -> None:
+        if not self._interactive:
+            print_gray_status(message)
+            return
+
+        visible_message = f" {message}"
+        padding = " " * max(0, terminal_width() - len(visible_message))
+        sys.stdout.write(
+            f"\r {gray_status_text(message)}{padding}{end}"
+        )
+        sys.stdout.flush()
+
+    def _clear_status_line(self) -> None:
+        sys.stdout.write("\r" + (" " * terminal_width()) + "\r")
+        sys.stdout.flush()
+
+    def _active_message(self, message: str) -> str:
+        base = message.rstrip(".")
+        return f"{base} with {self.provider_label}..."
+
+    def _completed_message(self, message: str) -> str:
+        base = message.rstrip(".")
+        if base.startswith("Summarizing document part "):
+            base = "Summarized" + base[len("Summarizing"):]
+        elif base.startswith("Condensing summary notes part "):
+            base = "Condensed" + base[len("Condensing"):]
+        elif base == "Writing complete summary":
+            base = "Wrote complete summary"
+        else:
+            base = f"Finished {base}"
+        return f"{base} with {self.provider_label}"
 
 
 def document_pdf_exists(document) -> bool:
@@ -4163,6 +4286,176 @@ def run_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def prompt_summary_document_selection(entries) -> int | None:
+    """Prompt for the document number to summarize, or None to quit."""
+
+    while True:
+        try:
+            choice = input(
+                "Summarize which document? (number, or q to quit) > "
+            )
+        except EOFError:
+            print()
+            return None
+
+        lowered = choice.strip().lower()
+        if is_quit_command(lowered):
+            return None
+
+        try:
+            selection = int(lowered)
+        except ValueError:
+            print(
+                f"Type a document number from 1 to {len(entries)}, or q."
+            )
+            continue
+
+        if 1 <= selection <= len(entries):
+            return selection - 1
+
+        print(
+            f"Choose a number from 1 to {len(entries)}, or q to quit."
+        )
+
+
+def ensure_document_summary_llm_ready(
+    model: str = DEFAULT_SUMMARIZE_LLM,
+) -> bool:
+    """Validate the configured deliberate-summary LLM provider."""
+
+    from kurrent.llm_provider import (
+        LLMConfigurationError,
+        is_ollama_model_spec,
+        validate_llm_model_spec,
+    )
+    from kurrent.metadata_refresher import (
+        MetadataRefreshError,
+        ensure_ollama_available,
+    )
+
+    try:
+        validate_llm_model_spec(model)
+        if not is_ollama_model_spec(model):
+            print_gray_status(
+                "OpenAI is configured for complete document summaries."
+            )
+            return True
+    except LLMConfigurationError as exc:
+        print_usage_error(str(exc))
+        return False
+
+    print_gray_status(
+        "Checking Ollama availability for complete document summaries..."
+    )
+    try:
+        started_ollama = ensure_ollama_available(
+            progress_callback=print_gray_status,
+        )
+    except MetadataRefreshError as exc:
+        print_usage_error(str(exc))
+        return False
+
+    if started_ollama:
+        print_gray_status("Ollama is ready.")
+
+    return True
+
+
+def run_summarize(args: argparse.Namespace) -> int:
+    """Interactively generate a complete summary of one ingested document."""
+
+    from kurrent.chunker import chunker_version
+    from kurrent.config import get_kurrent_state_paths
+    from kurrent.state_store import StateStore
+    from kurrent.summarizer import (
+        DocumentSummaryError,
+        summarize_document_chunks,
+    )
+
+    state_paths = get_kurrent_state_paths(args.state_dir)
+
+    if not state_paths.sqlite_path.exists():
+        raise CliUsageError(
+            "No kurrent SQLite database exists yet. Ingest PDFs first, or "
+            "pass --state-dir pointing to an existing kurrent state "
+            "directory. "
+            f"Expected database: {state_paths.sqlite_path}"
+        )
+
+    store = StateStore(state_paths.sqlite_path)
+
+    try:
+        entries = default_document_list_entries(store.list_documents())
+        print()
+        print_document_list(entries)
+
+        if not entries:
+            return 0
+
+        selection = prompt_summary_document_selection(entries)
+        if selection is None:
+            return 0
+
+        document = entries[selection][1]
+        print_list_document_summary(document)
+
+        chunks = store.get_chunks_for_document(
+            doc_id=document.doc_id,
+            chunker_version=chunker_version(),
+        )
+        if not chunks:
+            print_usage_error(
+                "No current stored chunks were found for this document. "
+                "Re-ingest it before running `kurrent summarize`."
+            )
+            return 2
+
+        if not ensure_document_summary_llm_ready(args.summary_llm):
+            return 2
+
+        from kurrent.llm_provider import resolve_llm_model_spec
+
+        progress_display = None
+        progress_callback = print_gray_status
+        if resolve_llm_model_spec(args.summary_llm).provider == "openai":
+            progress_display = ElapsedSummaryProgress("OpenAI")
+            progress_callback = progress_display
+
+        try:
+            summary = summarize_document_chunks(
+                chunks,
+                title=document.title,
+                authors=document.authors,
+                year=document.year,
+                model=args.summary_llm,
+                timeout_seconds=DEFAULT_SUMMARY_LLM_TIMEOUT,
+                max_num_ctx=DEFAULT_SUMMARY_LLM_MAX_NUM_CTX,
+                progress_callback=progress_callback,
+            )
+        except DocumentSummaryError as exc:
+            if progress_display is not None:
+                progress_display.finish(success=False)
+            print_usage_error(
+                f"Could not generate a complete summary: {exc}"
+            )
+            return 1
+        except BaseException:
+            if progress_display is not None:
+                progress_display.finish(success=False)
+            raise
+        else:
+            if progress_display is not None:
+                progress_display.finish()
+
+        print()
+        print("Complete summary")
+        print("----------------")
+        print_wrapped(summary.text)
+        return 0
+    finally:
+        store.close()
+
+
 def run_stats(args: argparse.Namespace) -> int:
     """Print summary statistics for the current Kurrent database."""
 
@@ -6234,6 +6527,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete one ingested document from Kurrent state",
     )
     delete_parser.set_defaults(func=run_delete)
+
+    summarize_parser = subparsers.add_parser(
+        "summarize",
+        help="generate a complete summary of one ingested document",
+    )
+    summarize_parser.add_argument(
+        "--summary-LLM",
+        "--summary-llm",
+        dest="summary_llm",
+        default=DEFAULT_SUMMARIZE_LLM,
+        help=(
+            "LLM model spec for deliberate document summaries. Use "
+            "ollama:<model> for local Ollama or openai:<model> for OpenAI "
+            f"(default: {DEFAULT_SUMMARIZE_LLM})."
+        ),
+    )
+    summarize_parser.set_defaults(func=run_summarize)
 
     stats_parser = subparsers.add_parser(
         "stats",

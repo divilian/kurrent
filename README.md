@@ -54,6 +54,7 @@ KURRENT_METADATA_LLM=ollama:llama3.1:kurrent-metadata-8b-instruct-q4_K_M
 KURRENT_PDF_EXCERPT_LLM=ollama:llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M
 KURRENT_SECTION_RECOGNITION_LLM=ollama:llama3.2:kurrent-sectioning-3b
 KURRENT_SUMMARY_LLM=ollama:qwen2.5:kurrent-summarization-7b
+KURRENT_SUMMARIZE_LLM=ollama:qwen2.5:kurrent-summarization-7b
 ```
 
 LLM model strings must include an explicit provider prefix:
@@ -73,11 +74,13 @@ OPENAI_KEY=sk-...
 KURRENT_RAG_LLM=openai:gpt-4.1-mini
 KURRENT_RELEVANCE_LLM=openai:gpt-4.1-mini
 KURRENT_SUMMARY_LLM=openai:gpt-4.1-mini
+KURRENT_SUMMARIZE_LLM=openai:gpt-4.1-mini
 ```
 
 You can also mix providers. For example, this configuration uses OpenAI for
-interactive RAG and relevance judging, while keeping metadata extraction,
-PDF excerpt selection, section recognition, and screening summaries local:
+interactive RAG, relevance judging, and deliberate summaries, while keeping
+metadata extraction, PDF excerpt selection, section recognition, and screening
+summaries local:
 
 ```bash
 OPENAI_KEY=sk-...
@@ -88,6 +91,7 @@ KURRENT_METADATA_LLM=ollama:llama3.1:kurrent-metadata-8b-instruct-q4_K_M
 KURRENT_PDF_EXCERPT_LLM=ollama:llama3.1:kurrent-pdf-excerpt-8b-instruct-q4_K_M
 KURRENT_SECTION_RECOGNITION_LLM=ollama:llama3.2:kurrent-sectioning-3b
 KURRENT_SUMMARY_LLM=ollama:qwen2.5:kurrent-summarization-7b
+KURRENT_SUMMARIZE_LLM=openai:gpt-4.1-mini
 ```
 
 Command-line switches override `.env` values and use the same explicit model-spec
@@ -97,7 +101,13 @@ format:
 kurrent ask --rag-llm openai:gpt-4.1-mini "What does my corpus say about reciprocity?"
 kurrent search --relevance-llm openai:gpt-4.1-mini "bounded confidence"
 kurrent ingest --summary-llm openai:gpt-4.1-mini paper.pdf
+kurrent summarize --summary-llm openai:gpt-4.1-mini
 ```
+
+`KURRENT_SUMMARY_LLM` controls the fast screening summary shown during ingest.
+`KURRENT_SUMMARIZE_LLM` controls the more complete summary produced by
+`kurrent summarize`, so the two summary workflows may use different providers
+and models.
 
 ## Design Overview
 
