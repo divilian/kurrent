@@ -6,6 +6,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kurrent"
 version = "0.1.0"
+dependencies = [
+    "PyMuPDF",
+    "python-dotenv",
+    "tqdm",
+    "chromadb",
+    "sentence-transformers",
+]
 
 [project.scripts]
 kurrent = "kurrent.cli:main"
